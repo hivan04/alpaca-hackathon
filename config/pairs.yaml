@@ -1,0 +1,75 @@
+# =============================================================================
+# Approved pair universe for the overnight strategy.
+# -----------------------------------------------------------------------------
+# GENERATED FILE - regenerate with:
+#     python scripts/find_pairs.py --write
+#
+# Each entry passed an Engle-Granger cointegration test plus practical filters
+# (half-life inside a tradable range, correlation floor, positive hedge ratio,
+# both legs liquid enough to short AND to hedge with options).
+#
+# The list below is a CANDIDATE set: economically-linked, options-liquid names
+# that are plausible cointegration candidates. They have NOT been screened
+# against live data yet. Run the script before the agent trades them - a pair
+# that has not passed the screen is a directional bet with extra steps.
+#
+# `hedge_ratio` is a seed only. The Kalman filter tracks it live from 15:45.
+# =============================================================================
+screened_at: null
+lookback_days: 500
+criteria:
+  max_pvalue: 0.05
+  min_correlation: 0.70
+  half_life_days: [1.0, 30.0]
+  min_observations: 250
+
+pairs:
+  # --- sector ETFs: deepest options books, cleanest borrow -------------------
+  - left: XLE
+    right: XOP
+    hedge_ratio: 1.0
+    enabled: true
+    notes: "Energy majors vs E&P. Same commodity driver, different beta."
+
+  - left: QQQ
+    right: XLK
+    hedge_ratio: 1.0
+    enabled: true
+    notes: "Nasdaq 100 vs tech sector. Heavy constituent overlap."
+
+  - left: XLF
+    right: KRE
+    hedge_ratio: 1.0
+    enabled: false
+    notes: "Large-cap financials vs regional banks. Regime-sensitive - screen first."
+
+  # --- single-name duopolies: strongest economic link ------------------------
+  - left: KO
+    right: PEP
+    hedge_ratio: 1.0
+    enabled: true
+    notes: "The textbook staples pair. Weekly options on both."
+
+  - left: XOM
+    right: CVX
+    hedge_ratio: 1.0
+    enabled: true
+    notes: "Integrated majors. Very liquid options."
+
+  - left: HD
+    right: LOW
+    hedge_ratio: 1.0
+    enabled: false
+    notes: "Home improvement duopoly. Earnings dates diverge - check the calendar."
+
+  - left: MA
+    right: V
+    hedge_ratio: 1.0
+    enabled: false
+    notes: "Payments duopoly. Tight spread, small edge - needs the screen to justify."
+
+  - left: GS
+    right: MS
+    hedge_ratio: 1.0
+    enabled: false
+    notes: "Bulge-bracket pair. Gappy around results."

@@ -1,0 +1,43 @@
+# Two containers: the trading loop and the public dashboard.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   docker compose -f deploy/docker-compose.yml logs -f agent
+#
+# TZ is pinned to New York everywhere. Every firewall boundary is an ET time,
+# and a container defaulting to UTC would fire the 15:15 cutoff at 11:15 ET.
+
+services:
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: oaa:latest
+    container_name: oaa-agent
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      TZ: America/New_York
+      OAA_PROFILE: judged
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../runs:/app/runs
+      - ../data:/app/data
+      - ../config:/app/config:ro
+    command: ["oaa", "run", "--profile", "judged"]
+    stop_grace_period: 45s
+
+  dashboard:
+    image: oaa:latest
+    container_name: oaa-dashboard
+    restart: unless-stopped
+    depends_on: [agent]
+    env_file: ../.env
+    environment:
+      TZ: America/New_York
+      OAA_PROFILE: judged
+    volumes:
+      - ../runs:/app/runs:ro
+      - ../config:/app/config:ro
+    ports:
+      - "8080:8080"
+    command: ["oaa", "serve", "--profile", "judged"]

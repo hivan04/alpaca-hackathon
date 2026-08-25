@@ -1,0 +1,36 @@
+# secrets
+.env
+.env.*
+!.env.example
+config/local.yaml
+config/*.local.yaml
+secrets/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# runtime artifacts
+runs/
+data/cache/
+logs/
+*.sqlite
+*.db
+*.log
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+!.vscode/mcp.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json

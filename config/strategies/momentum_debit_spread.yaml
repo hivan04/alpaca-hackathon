@@ -1,0 +1,32 @@
+# Directional, defined-risk momentum expression via vertical debit spreads.
+# Thesis: short-horizon trend persistence, expressed with capped downside so a
+# single bad day cannot dominate a one-week P&L window.
+description: >
+  Buys a vertical debit spread in the direction of a confirmed short-term
+  trend. Debit spreads cost less than long options and have a hard floor.
+
+universe: ["AAPL", "MSFT", "NVDA", "AMD", "TSLA", "QQQ"]
+
+entry:
+  fast_ma: 8
+  slow_ma: 21
+  min_trend_strength: 0.65       # normalised 0-1
+  min_adx: 20
+  # Do not buy premium into rich vol - that is the condor's job.
+  max_iv_rank: 0.60
+  min_volume_ratio: 1.0          # today's volume vs 20d average
+
+structure:
+  type: vertical_debit
+  target_dte: [14, 45]
+  long_delta: 0.45
+  short_delta: 0.25
+  max_debit_to_width: 0.45       # only take spreads with >=2.2:1 reward/risk
+  quantity_mode: risk_based
+  fixed_quantity: 1
+
+exit:
+  profit_target_pct: 0.60        # of max profit
+  stop_loss_pct: 0.50            # of debit paid
+  close_at_dte: 3
+  trail_after_profit_pct: 0.40

@@ -1,0 +1,286 @@
+"""The deterministic risk engine.
+
+Plain Python. No model, no LLM, no discretion. Every idea passes through here
+before it can become an order, and execution refuses any ticket that is not
+stamped by an approval from this class.
+
+The ordering is deliberate: the cheapest, most categorical checks first, so a
+structurally-forbidden trade never costs a sizing calculation.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass, field
+from typing import Any
+
+from oaa.config.schema import Config
+from oaa.core.logging import get_logger
+from oaa.core.types import AccountSnapshot, RiskVerdict, TradeIdea
+from oaa.options.occ import underlying_of
+from oaa.risk.sizing import size_by_risk
+
+log = get_logger("risk")
+
+
+@dataclass
+class DayState:
+    """Per-session counters. Reset at the start of each trading day."""
+
+    date: dt.date = field(default_factory=dt.date.today)
+    opened_today: int = 0
+    realised_pl: float = 0.0
+    start_equity: float = 0.0
+    peak_equity: float = 0.0
+    halted: bool = False
+    halt_reason: str | None = None
+
+    def roll(self, today: dt.date, equity: float) -> None:
+        if today != self.date:
+            self.date = today
+            self.opened_today = 0
+            self.realised_pl = 0.0
+            self.start_equity = equity
+            self.halted = False
+            self.halt_reason = None
+        if self.start_equity <= 0:
+            self.start_equity = equity
+        self.peak_equity = max(self.peak_equity, equity)
+
+
+class RiskEngine:
+    def __init__(self, cfg: Config, firewall: Any = None) -> None:
+        self.cfg = cfg
+        self.limits = cfg.risk
+        self.state = DayState()
+        #: The temporal firewall. When present it is checked FIRST, before any
+        #: other rule: a trade from the wrong book at the wrong minute is not a
+        #: sizing question, it is a categorical refusal.
+        self.firewall = firewall
+
+    # -- session control ---------------------------------------------------- #
+    def observe(self, account: AccountSnapshot, now: dt.datetime | None = None) -> None:
+        now = now or dt.datetime.now(dt.timezone.utc)
+        self.state.roll(now.date(), account.equity)
+
+        if self.state.start_equity > 0:
+            day_return = (account.equity - self.state.start_equity) / self.state.start_equity
+            if day_return <= -abs(self.limits.daily_loss_limit_pct):
+                self.halt(f"daily loss limit hit ({day_return:.2%})")
+
+        if self.state.peak_equity > 0:
+            drawdown = (account.equity - self.state.peak_equity) / self.state.peak_equity
+            if drawdown <= -abs(self.limits.max_drawdown_halt_pct):
+                self.halt(f"max drawdown breached ({drawdown:.2%})")
+
+    def halt(self, reason: str) -> None:
+        if not self.state.halted:
+            log.error("TRADING HALTED: %s", reason)
+        self.state.halted = True
+        self.state.halt_reason = reason
+
+    def resume(self) -> None:
+        self.state.halted = False
+        self.state.halt_reason = None
+
+    def record_open(self) -> None:
+        self.state.opened_today += 1
+
+    # -- the gate ----------------------------------------------------------- #
+    def evaluate(
+        self,
+        idea: TradeIdea,
+        account: AccountSnapshot,
+        now: dt.datetime | None = None,
+        market_open: bool = True,
+    ) -> RiskVerdict:
+        checks: dict[str, bool] = {}
+        now = now or dt.datetime.now(dt.timezone.utc)
+        self.observe(account, now)
+
+        def fail(rule: str, reason: str) -> RiskVerdict:
+            checks[rule] = False
+            log.info("REJECT %s [%s] %s", idea.symbol, rule, reason)
+            verdict = RiskVerdict.reject(reason, checks)
+            verdict.reasons.append(f"rule={rule}")
+            return verdict
+
+        # 0. The temporal firewall ------------------------------------------ #
+        # This runs before everything else. A book that does not hold the
+        # capital lock cannot open a position, regardless of how good the idea
+        # is or how much equity is sitting there.
+        if self.firewall is not None:
+            from oaa.firewall.lock import Book
+
+            book = Book(idea.book) if idea.book in {b.value for b in Book} else Book.INTRADAY
+            allowed, why = self.firewall.may_open(book, now)
+            if not allowed:
+                return fail("firewall", why)
+        checks["firewall"] = True
+
+        # 1. Session state ------------------------------------------------- #
+        if self.state.halted:
+            return fail("halted", self.state.halt_reason or "trading halted")
+        checks["halted"] = True
+
+        if not market_open:
+            return fail("market_closed", "market is closed")
+        checks["market_closed"] = True
+
+        # 2. Structural constraints ---------------------------------------- #
+        if not self.limits.allow_undefined_risk and not idea.structure.is_defined_risk:
+            return fail(
+                "undefined_risk",
+                f"{idea.structure.value} has uncapped downside and "
+                "risk.allow_undefined_risk is false",
+            )
+        checks["undefined_risk"] = True
+
+        if idea.max_loss is None or idea.max_loss <= 0:
+            return fail("unknown_risk", "structure has no computable maximum loss")
+        checks["unknown_risk"] = True
+
+        if not 1 <= len(idea.legs) <= 4:
+            return fail("leg_count", f"Alpaca accepts 1-4 legs, got {len(idea.legs)}")
+        checks["leg_count"] = True
+
+        if len({leg.symbol for leg in idea.legs}) != len(idea.legs):
+            return fail("duplicate_legs", "duplicate leg symbols in one order")
+        checks["duplicate_legs"] = True
+
+        # 3. Portfolio shape ------------------------------------------------ #
+        if len(account.option_positions()) >= self.limits.max_positions:
+            return fail("max_positions", f"already at {self.limits.max_positions} positions")
+        checks["max_positions"] = True
+
+        if self.state.opened_today >= self.limits.max_new_positions_per_day:
+            return fail(
+                "max_new_per_day",
+                f"opened {self.state.opened_today} today, cap is "
+                f"{self.limits.max_new_positions_per_day}",
+            )
+        checks["max_new_per_day"] = True
+
+        same_underlying = [
+            p for p in account.option_positions()
+            if (p.underlying or underlying_of(p.symbol)) == idea.symbol
+        ]
+        if len(same_underlying) >= self.limits.max_positions_per_underlying * len(idea.legs):
+            return fail(
+                "concentration",
+                f"{idea.symbol} already has {len(same_underlying)} option legs open",
+            )
+        checks["concentration"] = True
+
+        # 4. Sizing ---------------------------------------------------------- #
+        # Combo structures (a pairs trade with an options overlay) are already
+        # sized in shares by the strategy against the firewall-verified budget;
+        # the risk engine validates the resulting dollar risk rather than
+        # re-deriving a contract count that has no meaning here.
+        if idea.structure.is_pairs:
+            quantity = idea.quantity
+            budget_cap = idea.max_loss * quantity if idea.max_loss else 0.0
+            allowance = account.equity * self.limits.max_risk_per_trade_pct
+            if budget_cap > allowance:
+                return fail(
+                    "sizing",
+                    f"combo max loss ${budget_cap:,.0f} exceeds "
+                    f"{self.limits.max_risk_per_trade_pct:.1%} of equity "
+                    f"(${allowance:,.0f})",
+                )
+            checks["sizing"] = True
+            return self._finalise(idea, account, quantity, checks, now)
+
+        quantity = size_by_risk(idea, account.equity, self.limits.max_risk_per_trade_pct)
+        if quantity < 1:
+            return fail(
+                "sizing",
+                f"max loss ${idea.max_loss:,.0f} exceeds "
+                f"{self.limits.max_risk_per_trade_pct:.1%} of ${account.equity:,.0f} equity",
+            )
+        quantity = min(quantity, idea.quantity) if idea.quantity > 1 else quantity
+        checks["sizing"] = True
+
+        # 5. Aggregate exposure ---------------------------------------------- #
+        trade_risk = idea.max_loss * quantity
+        open_risk = sum(abs(p.market_value) for p in account.option_positions())
+        if account.equity > 0:
+            projected = (open_risk + trade_risk) / account.equity
+            if projected > self.limits.max_portfolio_risk_pct:
+                return fail(
+                    "portfolio_risk",
+                    f"projected portfolio risk {projected:.1%} exceeds "
+                    f"{self.limits.max_portfolio_risk_pct:.1%}",
+                )
+        checks["portfolio_risk"] = True
+
+        # 6. Cash ------------------------------------------------------------- #
+        cash_needed = max(0.0, idea.net_price) * 100 * quantity
+        buffer = account.equity * self.limits.min_cash_buffer_pct
+        available = (account.options_buying_power or account.buying_power)
+        if available - cash_needed < buffer:
+            return fail(
+                "cash_buffer",
+                f"needs ${cash_needed:,.0f}, buying power ${available:,.0f}, "
+                f"buffer ${buffer:,.0f}",
+            )
+        checks["cash_buffer"] = True
+
+        # 7. Time of day ------------------------------------------------------ #
+        # The overnight book deliberately trades in the last five minutes, which
+        # the generic no-trade window forbids. Its window is the firewall's, and
+        # that has already been checked at step 0.
+        if idea.book != "overnight" and not self._within_trading_window(now):
+            return fail(
+                "time_window",
+                "inside the open/close no-trade window - spreads are widest there",
+            )
+        checks["time_window"] = True
+
+        return self._finalise(idea, account, quantity, checks, now)
+
+    def _finalise(
+        self,
+        idea: TradeIdea,
+        account: AccountSnapshot,
+        quantity: int,
+        checks: dict[str, bool],
+        now: dt.datetime,
+    ) -> RiskVerdict:
+        """Approve, log the size and the risk taken, and stamp the verdict."""
+        trade_risk = (idea.max_loss or 0.0) * quantity
+        log.info(
+            "APPROVE [%s] %s x%d  risk=$%.0f (%.2f%% of equity)  %s",
+            idea.book, idea.describe(), quantity, trade_risk,
+            100 * trade_risk / account.equity if account.equity else 0, idea.strategy,
+        )
+        return RiskVerdict.approve(quantity, checks)
+
+    # -- helpers ------------------------------------------------------------- #
+    def _within_trading_window(self, now: dt.datetime) -> bool:
+        """US equity session is 09:30-16:00 Eastern."""
+        try:
+            from zoneinfo import ZoneInfo
+
+            local = now.astimezone(ZoneInfo(self.cfg.schedule.timezone))
+        except Exception:  # noqa: BLE001 - never let a tz lookup block trading
+            return True
+
+        minutes = local.hour * 60 + local.minute
+        open_min, close_min = 9 * 60 + 30, 16 * 60
+        if minutes < open_min + self.limits.no_trade_open_minutes:
+            return False
+        if minutes > close_min - self.limits.no_trade_close_minutes:
+            return False
+        return True
+
+    def status(self) -> dict[str, object]:
+        return {
+            "firewall": self.firewall.status() if self.firewall else None,
+            "halted": self.state.halted,
+            "halt_reason": self.state.halt_reason,
+            "opened_today": self.state.opened_today,
+            "date": self.state.date.isoformat(),
+            "start_equity": self.state.start_equity,
+            "peak_equity": self.state.peak_equity,
+        }

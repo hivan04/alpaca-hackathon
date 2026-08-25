@@ -1,0 +1,10 @@
+# Copy to config/local.yaml for machine-specific overrides. Gitignored.
+# Anything here wins over default.yaml and the profile overlay.
+#
+# universe:
+#   symbols: ["SPY"]
+# execution:
+#   dry_run: true
+# agents:
+#   llm:
+#     provider: null

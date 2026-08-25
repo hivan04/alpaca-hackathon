@@ -1,0 +1,22 @@
+# Overlay applied when OAA_PROFILE=judged.
+# This is the account the judges evaluate. Tighter, slower, no experiments.
+profile: judged
+
+broker:
+  paper: true
+  primary: rest
+  require_risk_approval: true
+
+execution:
+  dry_run: false          # this profile actually trades
+
+risk:
+  max_new_positions_per_day: 4
+  max_risk_per_trade_pct: 0.015
+  daily_loss_limit_pct: 0.03
+
+telemetry:
+  run_dir: "runs/judged"
+  journal: "runs/judged/journal.jsonl"
+  db: "runs/judged/oaa.sqlite"
+  equity_curve: "runs/judged/equity.csv"

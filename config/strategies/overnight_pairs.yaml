@@ -1,0 +1,118 @@
+# =============================================================================
+# Overnight Anomaly Pairs
+# -----------------------------------------------------------------------------
+# Market-neutral cointegrated pair, held from the close to the next open,
+# collared with short-dated options at the modelled gap tails.
+#
+# Runs on the OVERNIGHT book. The temporal firewall guarantees the intraday
+# book is provably flat before a single share of this is routed.
+# =============================================================================
+description: >
+  Buys the cheap leg and shorts the rich leg of a cointegrated pair at 15:55,
+  sized against verified Reg T buying power, with a protective put on the long
+  leg and a protective call on the short leg placed at the 5th/95th percentile
+  of the modelled overnight gap. Liquidated at 09:35.
+
+# -----------------------------------------------------------------------------
+# The approved universe.
+# Regenerate with:  python scripts/find_pairs.py --write
+# The screen is OFFLINE by design - re-testing cointegration live is how you
+# conjure a pair into existence at 15:45 and lose money on it at 09:35.
+# The hedge_ratio here is only a seed; the Kalman filter tracks it live.
+# -----------------------------------------------------------------------------
+pairs_file: "config/pairs.yaml"
+
+# -----------------------------------------------------------------------------
+# Kalman filter - the dynamic hedge ratio
+# -----------------------------------------------------------------------------
+kalman:
+  # How fast beta is allowed to move. Small = sticky, large = chases noise.
+  # Above ~1e-3 the z-score stops meaning anything.
+  delta: 0.0001
+  observation_covariance: 0.001
+  zscore_window: 60          # rolling window for the spread's mean and sd
+  warmup: 30                 # observations before the z-score is trusted
+
+# -----------------------------------------------------------------------------
+# The two-stage gap model
+#   stage 1  Huber      robust linear baseline; ignores gap outliers
+#   stage 2  Quantile   q50 -> direction and size
+#            LightGBM   q05 -> the protective put strike
+#                       q95 -> the protective call strike
+# -----------------------------------------------------------------------------
+model:
+  min_bars: 90               # aligned daily bars needed before we will fit
+  min_train_rows: 120        # below this it falls back to empirical quantiles
+  n_estimators: 150
+  learning_rate: 0.05
+  max_depth: 3
+
+# -----------------------------------------------------------------------------
+# Entry gates. All must pass.
+# -----------------------------------------------------------------------------
+entry:
+  min_abs_zscore: 0.75       # the spread must actually be dislocated
+  # A spread this stretched usually means the relationship broke, not that it
+  # is about to snap back. Refusing the extreme is the whole trade.
+  max_abs_zscore: 3.5
+  min_expected_return: 0.0015    # 15bp per $1 of long notional
+  min_edge_to_risk: 0.12         # expected move / distance to the q05 tail
+  min_confidence: 0.10
+  max_tail_width: 0.08           # q95 - q05; a wild night is not a tradable one
+  # Tightened for the competition window. A pair with a 25-day half-life will
+  # barely revert across five sessions - you would be holding a dislocation
+  # that resolves in October while P&L is scored in September.
+  max_half_life_days: 10.0
+  require_trained_model: false    # day one still trades, sized small
+
+# -----------------------------------------------------------------------------
+# The options overlay. Not decoration - it is what makes the position
+# defined-risk. A long/short equity pair has UNBOUNDED risk on the short leg.
+# -----------------------------------------------------------------------------
+overlay:
+  # collar   -> put on the long leg AND call on the short leg. Contractual
+  #             maximum loss. The only mode the risk engine approves by default.
+  # put_only -> long leg hedged, short leg naked. Requires
+  #             risk.allow_undefined_risk: true. Off for a reason.
+  mode: collar
+  require_full_hedge: true   # no call available on the short leg => no trade
+  target_dte: 1              # 1DTE where it lists, nearest otherwise
+  min_dte: 1
+  max_dte: 9
+  # Protection 20% away is a lottery ticket, not a floor.
+  max_strike_distance_pct: 0.10
+  # ...and an at-the-money hedge costs about as much as the move it insures,
+  # so it buys nothing. Never place the strike closer than this.
+  min_strike_distance_pct: 0.015
+  # Protection that eats the edge is not protection.
+  max_cost_pct_of_notional: 0.010
+  min_open_interest: 25
+  max_spread_pct: 0.35       # short-dated single-name options are wide
+  min_price: 0.02
+  max_price: 50.0
+
+# -----------------------------------------------------------------------------
+# Sizing. Share counts are forced to multiples of 100 so every share is
+# coverable by whole option contracts - a partially covered short leg is an
+# unhedged position with paperwork.
+# -----------------------------------------------------------------------------
+risk:
+  max_concurrent_pairs: 2
+  max_contracts_per_leg: 20
+  # Round lots fight dollar-neutrality. With an awkward price ratio the best
+  # achievable hedge can be 10%+ off neutral, which defeats the point of the
+  # trade. The sizer searches the lot grid for the closest fit and REFUSES the
+  # pair if it cannot get inside this. Lower-priced, closer-ratio legs (ETF
+  # pairs) hedge far more cleanly than high-priced single names.
+  max_hedge_error_pct: 0.05
+  # Only used if the firewall has not handed down a verified budget (it always
+  # should; this is the belt to that pair of braces).
+  fallback_equity_pct: 0.20
+
+# -----------------------------------------------------------------------------
+# Exit. On the clock, not on P&L. The thesis IS the holding period: there is no
+# taking profit at 03:00, and a stop mid-session would not fill anyway.
+# -----------------------------------------------------------------------------
+exit:
+  time: "09:35"
+  order_type: market         # certainty of exit beats price at the open

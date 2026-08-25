@@ -1,0 +1,20 @@
+# Overlay applied when OAA_PROFILE=dev (the default).
+# Throwaway paper account. Break things here.
+profile: dev
+
+broker:
+  paper: true
+
+execution:
+  dry_run: true           # flip to false to actually fire orders in dev
+
+risk:
+  max_new_positions_per_day: 20
+  max_risk_per_trade_pct: 0.01
+
+telemetry:
+  run_dir: "runs/dev"
+  journal: "runs/dev/journal.jsonl"
+  db: "runs/dev/oaa.sqlite"
+  equity_curve: "runs/dev/equity.csv"
+  log_level: DEBUG

@@ -1,0 +1,66 @@
+/**
+ * PM2 process definitions.
+ *
+ *   pm2 start ecosystem.config.js --only oaa-dev      # throwaway account
+ *   pm2 start ecosystem.config.js --only oaa-judged   # THE judged account
+ *   pm2 start ecosystem.config.js --only oaa-dashboard
+ *   pm2 logs oaa-judged
+ *   pm2 save && pm2 startup            # survive a host reboot
+ *
+ * A note on where this runs. The whole design turns on 15:15 and 15:54 ET
+ * firing on time. A laptop that sleeps misses the cutoff, and that is the exact
+ * failure the firewall exists to prevent. Put the judged process on an
+ * always-on host (a small us-east VPS is ideal) and use your machine for
+ * development only.
+ */
+const path = require("path");
+const PY = path.join(__dirname, ".venv", "bin", "oaa");
+
+const base = {
+  cwd: __dirname,
+  interpreter: "none",          // `oaa` is already an executable entry point
+  autorestart: true,
+  max_restarts: 50,
+  min_uptime: "60s",
+  restart_delay: 10000,
+  kill_timeout: 30000,          // let the current cycle finish before SIGKILL
+  max_memory_restart: "700M",
+  time: true,                   // timestamp every log line
+  merge_logs: true,
+};
+
+module.exports = {
+  apps: [
+    {
+      ...base,
+      name: "oaa-dev",
+      script: PY,
+      args: "run --profile dev",
+      env: { OAA_PROFILE: "dev", PYTHONUNBUFFERED: "1", TZ: "America/New_York" },
+      out_file: "logs/dev.out.log",
+      error_file: "logs/dev.err.log",
+    },
+    {
+      ...base,
+      name: "oaa-judged",
+      script: PY,
+      args: "run --profile judged",
+      env: { OAA_PROFILE: "judged", PYTHONUNBUFFERED: "1", TZ: "America/New_York" },
+      out_file: "logs/judged.out.log",
+      error_file: "logs/judged.err.log",
+      // The judged account is the submission. Restart hard, restart often,
+      // but never silently give up on it.
+      max_restarts: 200,
+      exp_backoff_restart_delay: 5000,
+    },
+    {
+      ...base,
+      name: "oaa-dashboard",
+      script: PY,
+      args: "serve --profile judged",
+      env: { OAA_PROFILE: "judged", PYTHONUNBUFFERED: "1", TZ: "America/New_York" },
+      out_file: "logs/dashboard.out.log",
+      error_file: "logs/dashboard.err.log",
+    },
+  ],
+};

@@ -1,0 +1,45 @@
+# systemd unit for the autonomous loop.
+#
+#   sudo cp deploy/oaa.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now oaa
+#   journalctl -u oaa -f
+#
+# Edit User, WorkingDirectory and the profile before enabling.
+
+[Unit]
+Description=Options Alpha Agents - autonomous options trading loop
+Documentation=https://github.com/ivanhung/alpaca-hackathon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oaa
+WorkingDirectory=/opt/alpaca-hackathon
+EnvironmentFile=/opt/alpaca-hackathon/.env
+Environment=PYTHONUNBUFFERED=1
+# The market is in New York. Servers are not. Pin it.
+Environment=TZ=America/New_York
+ExecStart=/opt/alpaca-hackathon/.venv/bin/oaa run --profile judged
+
+Restart=always
+RestartSec=10
+# Give the current cycle time to finish - a SIGKILL mid-liquidation is the
+# worst possible moment to lose the process.
+TimeoutStopSec=45
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=oaa
+
+# Hardening. The process needs its own directory and outbound HTTPS, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/alpaca-hackathon/runs /opt/alpaca-hackathon/data /opt/alpaca-hackathon/logs
+
+[Install]
+WantedBy=multi-user.target
