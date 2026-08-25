@@ -1,5 +1,7 @@
 # Options Alpha Agents
 
+**Built in 48 hours Solo!!!** 
+
 Autonomous options trading agents on Alpaca. Built for the
 [Alpaca AI Trading Agents Hackathon](https://lablab.ai/ai-hackathons/alpaca-ai-trading-agents-hackathon)
 — **Options Alpha Agents** track.
