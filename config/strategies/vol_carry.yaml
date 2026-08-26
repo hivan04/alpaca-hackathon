@@ -1,0 +1,90 @@
+# =============================================================================
+# vol_carry - the resident carry book
+# -----------------------------------------------------------------------------
+# Sells the IV-RV spread as defined-risk structures held 3-10 sessions.
+# Four HARD gates, not a blended score: a score would let a rich-IV reading
+# paper over an earnings date, which is the one trade this must never take.
+# =============================================================================
+
+universe: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA"]
+
+# --- 3.1 premium gate: is vol rich? -----------------------------------------
+# IV rank says vol is high FOR THIS NAME. The IV-RV spread says you are being
+# paid more than the stock has actually been moving. Both required; either
+# alone is a known false-positive generator.
+premium_gate:
+  iv_rank_min: 0.70
+  iv_rank_lookback_days: 252
+  iv_rv_spread_min: 0.03           # 3 vol points
+
+# --- 3.2 trend gate: is it going nowhere? -----------------------------------
+# Short premium is short movement. This is the SAME measurement that fires
+# momentum_debit_spread, which is what keeps the two mutually exclusive.
+trend_gate:
+  adx_max: 25
+  max_trend_strength: 0.60
+  keltner_atr_mult: 2.0
+
+# --- 3.3 event gate: hard exclusions ----------------------------------------
+event_gate:
+  exclude_earnings_in_window: true   # IV is elevated BECAUSE of the event
+  exclude_exdiv_short_calls: true    # assignment risk on the short call
+
+# --- 4. structures -----------------------------------------------------------
+# 7-14 DTE, not the conventional 20-45. Theta is steeply non-linear into
+# expiry: at 30 DTE a five-session hold captures ~20-25% of remaining decay;
+# at 10 DTE it captures the majority. The judged window is the constraint and
+# the structure's life has to fit inside it. The cost is gamma, and this is a
+# deliberate trade of tail risk for realised P&L inside the window - right for
+# seven days, wrong for a live book. Say so in the deck.
+structures:
+  short_delta_target: 0.14         # 10-16 delta short strikes
+  wing_width_points: 5
+  dte_min: 7
+  dte_max: 14
+  # A 5-wide 14-delta condor prices around 0.15-0.20 of its width. Below 0.15
+  # the credit is not paying for the tail and the trade is a coin flip with
+  # transaction costs attached.
+  min_credit_to_width: 0.15
+  fixed_quantity: 1
+  # Only the macro lens may set a lean; the numeric gates have already
+  # established there is no trend to lean on.
+  allow_directional_lean: true
+
+# --- 5. sizing ----------------------------------------------------------------
+# Size from MAX LOSS, not from capital, and explicitly NOT as a fraction of
+# Reg T buying power - that is near-full 2x leverage. Position count is the
+# primary defence against short-gamma tail risk: five uncorrelated positions
+# at 1.5% behave very differently from one at 7.5% when one is tested.
+sizing:
+  risk_fraction_per_position: 0.015
+  max_concurrent_positions: 5
+  max_aggregate_risk: 0.08
+
+# --- 6. exits -----------------------------------------------------------------
+# 30%, not the conventional 50%. A target rarely reached leaves positions open
+# at judging, which makes the P&L an unrealised mark on wide option spreads -
+# noisy, unflattering, and marked at a mid the account could not trade at.
+# Taking 30% converts decay into realised gains inside the window and produces
+# more CLOSED trades: win rate, average hold and per-trade attribution only
+# exist for closed trades, and the equity curve becomes a curve rather than one
+# flat line with a single mark at the end. The cost is EV per trade. Over a
+# longer horizon 50% is better; over five sessions, realised beats theoretical.
+exits:
+  profit_target_pct: 0.30
+  dte_floor: 3                     # gamma rises sharply into expiry
+  loss_multiple_of_credit: 2.0
+  defensive_mode: close_tested_side
+  entry_cutoff_utc: "2026-09-02T20:00:00Z"
+
+# --- cost gate ----------------------------------------------------------------
+# Underlying selection is a liquidity decision as much as a vol decision. A
+# name with rich IV and a 30c-wide quote is worse than one with moderately rich
+# IV and a 5c-wide quote.
+cost:
+  max_relative_spread: 0.10
+  # Round-trip spread as a fraction of the CREDIT RECEIVED. COST_STRUCTURE.md
+  # §5 suggests 0.15, but that figure was written for a two-leg vertical; a
+  # four-leg condor crosses four spreads on the way in and four on the way out,
+  # so the same underlying quote width lands roughly twice as heavily here.
+  max_spread_cost_vs_credit: 0.20

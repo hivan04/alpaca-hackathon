@@ -1,0 +1,104 @@
+# =============================================================================
+# intraday_momentum - the transient momentum book
+# -----------------------------------------------------------------------------
+# Momentum expressed THROUGH options. The option is leverage and defined risk,
+# not the source of edge. Index products only - see the spread arithmetic in
+# COST_STRUCTURE.md §5: a $0.10-wide single-name quote costs $20 round trip
+# against a $10-30 target, so no edge survives.
+# =============================================================================
+
+enabled: false                     # explicit opt-in; this book is built second
+universe: ["SPY", "QQQ"]
+bar_interval: 5m
+
+momentum:
+  min_bars: 30
+  # VWAP = the TRIGGER (the only indicator with an opinion on direction)
+  vwap_band_atr_mult: 0.25
+  # How many recent bars are searched for the cross. A cycle can land one or
+  # two 5-minute bars after the event; insisting on the very last bar would
+  # discard real signals for a polling artefact. Keep it small - the signal
+  # decays in minutes.
+  cross_lookback_bars: 3
+  atr_period: 14
+  volume_zscore_min: 1.0
+  volume_bucket_minutes: 30        # 09:45 volume is not comparable to 12:30
+  require_volume: true
+  persistence_bars: 2              # reject the single-bar spike that reverts
+
+  # Bollinger WIDTH = the FILTER (regime, not direction). Width, not position:
+  # position is a mean-reversion signal and would fight VWAP on every candidate.
+  bb_period: 20
+  bb_std: 2.0
+  width_lookback_bars: 6
+  require_width_rising: true
+  require_prior_squeeze: false
+  squeeze_percentile: 25
+
+  # RSI = a one-sided VETO only. Start at 80/20, not 70/30: strong momentum
+  # runs carry elevated RSI for extended periods and a tight threshold rejects
+  # exactly the trades this book exists to take. RSI at 65 blocks nothing.
+  rsi_period: 14
+  rsi_veto_upper: 80
+  rsi_veto_lower: 20
+
+# --- the non-generic layer ----------------------------------------------------
+# A VWAP cross with no reason behind it is noise, and noise mean-reverts. A
+# VWAP cross on a dated catalyst is a move with a mechanism, and mechanisms
+# persist. Weights are applied AFTER rank-normalisation within each source -
+# raw units across sources are not comparable.
+catalyst_gate:
+  required: true
+  lookback_minutes: 30
+  min_headlines: 1
+  relevance_floor: 0.5
+  breadth_min: 0.60                # % of the movers list moving with the signal
+  factor_weights:
+    news: 0.50                     # the only factor with a MECHANISM attached
+    breadth: 0.35                  # load-bearing on an index universe
+    volume: 0.15
+  use_llm: false                   # deterministic is the DEFAULT path
+  macro_calendar: config/macro_events.yaml
+
+# --- mandatory cost gate -------------------------------------------------------
+# Expect this to reject more candidates than any other gate. That is the
+# finding, not a bug.
+spread_gate:
+  max_relative_spread: 0.02        # much tighter than the carry book's 0.10
+  spread_cost_fraction_of_target: 0.30
+
+time_gate:
+  no_entry_before: "09:45"         # the open is wide and unstable
+  no_entry_after: "14:45"          # runway before the 15:15 firewall cutoff
+  skip_lunch: true
+  lunch_window: ["11:30", "13:30"]
+
+# --- where the agent adds value -------------------------------------------------
+# Buying the ATM call is what a script does. Strike, expiry and STRUCTURE
+# conditioned on the expected move and the current surface is a real decision.
+selection:
+  dte_max: 2
+  large_move_pct: 0.006
+  session_minutes: 345
+  iv_rank_no_trade_above: 0.85     # paying for a move already priced in
+  prefer_vertical_above_iv_rank: 0.60
+
+structure:
+  fixed_quantity: 1
+
+sizing:
+  risk_fraction_per_trade: 0.005   # below the carry book's 1.5%: lower hit rate
+  max_concurrent: 2
+  max_trades_per_day: 6            # hard cap against a signal-storm spread bleed
+  max_daily_loss_pct: 0.02         # on breach the book is disabled for the day
+
+# --- exits ---------------------------------------------------------------------
+# The stop is WIDER than the target (15% vs 10%) on purpose: option premium is
+# noisy and a tight stop is hit by spread flicker alone. The cost is a
+# breakeven hit rate of ~60%, which is demanding and is tracked live against
+# the actual rate rather than assumed.
+exits:
+  target_pct_of_premium: 0.10
+  stop_pct_of_premium: 0.15
+  time_stop_minutes: 20
+  exit_on_vwap_recross: true

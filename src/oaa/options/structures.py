@@ -35,6 +35,48 @@ def _leg(q: OptionQuote, side: Side, ratio: int = 1) -> Leg:
 
 
 # --------------------------------------------------------------------------- #
+# single long option
+# --------------------------------------------------------------------------- #
+def build_single_long(
+    *,
+    symbol: str,
+    strategy: str,
+    leg: OptionQuote,
+    quantity: int = 1,
+    thesis: str = "",
+) -> TradeIdea:
+    """One long option. Max loss is the premium paid, always, by construction.
+
+    The intraday book uses this when implied vol is cheap enough that paying
+    for the whole distribution is better than capping it with a short wing.
+    There is no `build_single_short` and there never will be: an uncovered
+    short fails `risk.allow_undefined_risk: false` at the engine.
+    """
+    debit = _mid_or_fail(leg)
+    return TradeIdea(
+        symbol=symbol,
+        strategy=strategy,
+        structure=StructureType.SINGLE_LONG,
+        legs=[_leg(leg, Side.BUY)],
+        quantity=quantity,
+        net_price=round(debit, 4),
+        max_loss=round(debit * MULTIPLIER, 2),
+        # Upside on a long option is unbounded; claiming a max profit we cannot
+        # compute would put a fictional number into the reward/risk ratio.
+        max_profit=None,
+        thesis=thesis,
+        meta={
+            "strike": leg.strike,
+            "right": leg.right.value,
+            "expiry": leg.expiry.isoformat(),
+            "iv": leg.implied_volatility,
+            "delta": leg.greeks.delta,
+            "premium": debit,
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
 # vertical spreads
 # --------------------------------------------------------------------------- #
 def build_vertical(
@@ -207,6 +249,26 @@ class StructureBuilder:
 
     view: ChainView
     strategy: str
+
+    def single_long(
+        self,
+        *,
+        right: Right,
+        dte_range: tuple[int, int],
+        target_delta: float,
+        quantity: int = 1,
+        thesis: str = "",
+        expiry: dt.date | None = None,
+    ) -> TradeIdea:
+        exp = expiry or self.view.expiry_in_range(dte_range)
+        leg = self.view.by_delta(exp, right, target_delta)
+        return build_single_long(
+            symbol=self.view.symbol,
+            strategy=self.strategy,
+            leg=leg,
+            quantity=quantity,
+            thesis=thesis,
+        )
 
     def vertical_by_delta(
         self,

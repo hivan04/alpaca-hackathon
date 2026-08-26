@@ -159,10 +159,11 @@ class ToolBelt:
         self._add(ToolSpec(
             name="get_firewall_status",
             description=(
-                "Current state of the temporal firewall: the ET session phase, "
-                "which book holds the capital lock, the verified budget, and "
-                "whether the intraday book is locked out for the day. Call this "
-                "FIRST in any cycle - it determines what you are allowed to do."
+                "Current state of the capital firewall: the ET session phase, the "
+                "carry book's reserved capital, which transient book holds the "
+                "lease and for how much, and whether the transient books are "
+                "locked out. Call this FIRST in any cycle - it determines what "
+                "you are allowed to do."
             ),
             input_schema=_obj({}),
             handler=self._firewall_status,
@@ -171,96 +172,90 @@ class ToolBelt:
         self._add(ToolSpec(
             name="get_book_state",
             description=(
-                "Account snapshot framed for the two-book model: equity, cash, "
-                "Reg T (overnight, 2x) and day-trading (intraday, 4x) buying "
-                "power, open positions split into equity and options, and the "
-                "leverage headroom against the overnight limit."
+                "Account snapshot framed for the three-book model: equity, cash, "
+                "Reg T and day-trading buying power, and open positions SPLIT into "
+                "resident carry legs and transient legs using the position ledger."
             ),
             input_schema=_obj({}),
             handler=self._book_state,
         ))
 
         self._add(ToolSpec(
-            name="list_pair_universe",
+            name="scan_carry_candidates",
             description=(
-                "The approved cointegrated pairs for the overnight book, with "
-                "their offline screen statistics (p-value, half-life, seed hedge "
-                "ratio). This universe is fixed offline on purpose; you cannot "
-                "add to it."
+                "Run the carry book's four hard gates (premium, trend, event, "
+                "macro) across its universe and return, for each symbol, either a "
+                "fully-priced structure or the gate that vetoed it and why. "
+                "Read-only - it computes and explains, it does not trade."
+            ),
+            input_schema=_obj({
+                "symbols": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Optional subset. Defaults to the strategy universe.",
+                }
+            }),
+            handler=self._scan_carry,
+        ))
+
+        self._add(ToolSpec(
+            name="scan_intraday_candidates",
+            description=(
+                "Run the intraday book's signal stack (VWAP trigger, Bollinger "
+                "width filter, RSI veto, catalyst confirmation, spread gate, "
+                "time-of-day gate) on SPY/QQQ and return the surviving structure "
+                "or the vetoing gate. Read-only."
             ),
             input_schema=_obj({}),
-            handler=self._pair_universe,
+            handler=self._scan_intraday,
         ))
 
         self._add(ToolSpec(
-            name="compute_pair_signal",
+            name="propose_trade",
             description=(
-                "Run the Kalman filter and the two-stage gap model for one pair "
-                "and return tonight's forecast: the dynamic hedge ratio, the "
-                "spread z-score, the expected overnight return (q50) and the "
-                "5th/95th percentile tails that set the option strikes. "
-                "Read-only - computes, does not trade."
+                "Build one fully-specified structure for a symbol on a named book "
+                "and return a proposal_id: legs, strikes, expiry, net credit or "
+                "debit, contractual max loss, modelled round-trip cost, and the "
+                "gate metrics behind it. This places NO order - it is the artefact "
+                "you reason about before deciding."
             ),
             input_schema=_obj(
-                {"pair": {
-                    "type": "string",
-                    "description": "Pair name as 'LEFT/RIGHT', e.g. 'KO/PEP'.",
-                }},
-                ["pair"],
-            ),
-            handler=self._pair_signal,
-        ))
-
-        self._add(ToolSpec(
-            name="propose_overnight_trade",
-            description=(
-                "Build a fully-specified overnight pairs trade for one pair: "
-                "direction, share counts, the protective put and call strikes "
-                "chosen from the modelled tails, the contractual maximum loss "
-                "and the expected profit. Returns a proposal_id. This places NO "
-                "order - it is the artefact you reason about before deciding."
-            ),
-            input_schema=_obj(
-                {"pair": {"type": "string", "description": "Pair name as 'LEFT/RIGHT'."}},
-                ["pair"],
+                {
+                    "symbol": {"type": "string"},
+                    "book": {
+                        "type": "string",
+                        "enum": ["carry", "intraday", "opportunistic"],
+                    },
+                },
+                ["symbol"],
             ),
             handler=self._propose,
         ))
 
         self._add(ToolSpec(
-            name="run_firewall_verification",
+            name="run_carry_verification",
             description=(
-                "Execute the 15:54 ET pre-trade gate: re-poll Alpaca, confirm "
-                "zero open positions and zero working orders, read FRESH Reg T "
-                "buying power, size against it and acquire the capital lock. "
-                "If rogue intraday positions are found it liquidates them and "
-                "aborts the night. This must pass before any overnight order."
+                "Execute the 15:45 ET sign-off: re-poll Alpaca, confirm zero "
+                "residual TRANSIENT positions and zero working orders, read FRESH "
+                "Reg T buying power and confirm the resident carry book's margin "
+                "is covered with headroom. Failure disables the transient books "
+                "for the following session."
             ),
-            input_schema=_obj({
-                "target_trade_value": {
-                    "type": "number",
-                    "description": "Intended gross notional, to be downscaled if it exceeds Reg T.",
-                }
-            }),
+            input_schema=_obj({}),
             handler=self._verify,
             mutating=True,
         ))
 
         self._add(ToolSpec(
-            name="submit_overnight_trade",
+            name="submit_proposal",
             description=(
-                "Route a proposal to the broker. It passes through the temporal "
+                "Route a proposal to the broker. It passes through the capital "
                 "firewall and the deterministic risk engine first; either can "
-                "refuse and you cannot override them. Execution is a "
-                "rollback-safe combo over the Alpaca CLI: protective options "
-                "first, then the equity legs, unwinding anything that filled if "
-                "a critical step fails."
+                "refuse and you cannot override them. Execution goes out over the "
+                "Alpaca CLI, atomically where the venue supports a combo and "
+                "otherwise legged long-first with a reverse unwind."
             ),
             input_schema=_obj(
-                {"proposal_id": {
-                    "type": "string",
-                    "description": "The id returned by propose_overnight_trade.",
-                }},
+                {"proposal_id": {"type": "string", "description": "From propose_trade."}},
                 ["proposal_id"],
             ),
             handler=self._submit,
@@ -270,14 +265,15 @@ class ToolBelt:
         self._add(ToolSpec(
             name="liquidate_book",
             description=(
-                "Cancel all working orders and liquidate a book to cash, then "
-                "POLL until flat is confirmed. 'intraday' is the 15:15 hard "
-                "cutoff; 'overnight' is the 09:35 exit. Returns whether flat "
-                "was actually confirmed, not merely requested."
+                "Cancel all working orders and liquidate a book to cash, then POLL "
+                "until flat is CONFIRMED. 'transient' is the 15:15 cutoff and "
+                "leaves resident carry legs untouched; 'all' is the submission "
+                "flatten and closes everything. Returns whether flat was actually "
+                "confirmed, not merely requested."
             ),
             input_schema=_obj(
-                {"book": {"type": "string", "enum": ["intraday", "overnight"]}},
-                ["book"],
+                {"scope": {"type": "string", "enum": ["transient", "all"]}},
+                ["scope"],
             ),
             handler=self._liquidate,
             mutating=True,
@@ -287,13 +283,26 @@ class ToolBelt:
             name="get_recent_decisions",
             description=(
                 "The decision journal: recent trades AND the trades that were "
-                "declined, each with the rule that stopped it. Useful for "
-                "checking whether a pattern is being repeatedly rejected."
+                "declined, each with the rule that stopped it."
             ),
             input_schema=_obj({
                 "limit": {"type": "integer", "description": "How many rows (default 15)."}
             }),
             handler=self._decisions,
+        ))
+
+        self._add(ToolSpec(
+            name="get_gate_rejections",
+            description=(
+                "The gate-by-gate rejection log: which gate vetoed each candidate "
+                "and every metric it measured. Expect the spread gate to dominate "
+                "on the intraday book - that is the finding, not a bug."
+            ),
+            input_schema=_obj({
+                "limit": {"type": "integer"},
+                "book": {"type": "string", "enum": ["carry", "intraday", "opportunistic"]},
+            }),
+            handler=self._rejections,
         ))
 
     # ------------------------------------------------------------------ #
@@ -302,16 +311,31 @@ class ToolBelt:
     def _firewall_status(self) -> dict[str, Any]:
         firewall = self.orch.firewall
         status = firewall.status()
-        status["intraday_may_open"] = firewall.may_open(Book.INTRADAY)[0]
-        status["overnight_may_open"] = firewall.may_open(Book.OVERNIGHT)[0]
+        status["may_open"] = {
+            book.value: firewall.may_open(book)[0] for book in Book
+        }
         status["explanation"] = {
-            "intraday": firewall.may_open(Book.INTRADAY)[1],
-            "overnight": firewall.may_open(Book.OVERNIGHT)[1],
+            book.value: firewall.may_open(book)[1] for book in Book
         }
         return status
 
     def _book_state(self) -> dict[str, Any]:
         account = self.orch.broker.account()
+        ledger = self.orch.firewall.ledger
+        resident, transient = ledger.split(account.positions)
+
+        def row(position: Any) -> dict[str, Any]:
+            return {
+                "symbol": position.symbol,
+                "qty": position.qty,
+                "underlying": position.underlying,
+                "expiry": position.expiry.isoformat() if position.expiry else None,
+                "strike": position.strike,
+                "market_value": position.market_value,
+                "unrealized_pl": position.unrealized_pl,
+                "book": ledger.book_of(position.symbol),
+            }
+
         return {
             "account_id": account.account_id,
             "equity": account.equity,
@@ -322,101 +346,113 @@ class ToolBelt:
             "daytrading_buying_power": account.daytrading_buying_power,
             "options_buying_power": account.options_buying_power,
             "options_trading_level": account.options_trading_level,
-            "shorting_enabled": account.shorting_enabled,
-            "is_flat": account.is_flat,
             "open_orders": account.open_orders,
             "leverage_headroom_vs_regt": account.leverage_headroom,
-            "equity_positions": [
-                {"symbol": p.symbol, "qty": p.qty, "market_value": p.market_value,
-                 "unrealized_pl": p.unrealized_pl}
-                for p in account.equity_positions()
-            ],
-            "option_positions": [
-                {"symbol": p.symbol, "qty": p.qty, "underlying": p.underlying,
-                 "expiry": p.expiry.isoformat() if p.expiry else None,
-                 "strike": p.strike, "unrealized_pl": p.unrealized_pl}
-                for p in account.option_positions()
-            ],
+            "carry_requirement": self.orch.firewall.carry_requirement(account),
+            "resident_positions": [row(p) for p in resident],
+            "transient_positions": [row(p) for p in transient],
         }
 
-    def _pair_universe(self) -> dict[str, Any]:
-        strategy = self._overnight_strategy()
-        return {
-            "pairs": [
-                {
-                    "pair": spec.name, "left": spec.left, "right": spec.right,
-                    "seed_hedge_ratio": spec.hedge_ratio, "pvalue": spec.pvalue,
-                    "half_life_days": spec.half_life_days, "notes": spec.notes,
-                }
-                for spec in strategy.pairs()
-            ],
-            "screen": strategy.p("pairs_meta", {}),
-        }
+    # ------------------------------------------------------------------ #
+    def _scan_carry(self, symbols: list[str] | None = None) -> dict[str, Any]:
+        return self._scan(self.orch.carry, symbols)
 
-    def _pair_signal(self, pair: str) -> dict[str, Any]:
-        strategy = self._overnight_strategy()
-        spec = self._find_pair(strategy, pair)
-        ctx = self._context_for(strategy, [spec.left, spec.right])
-        state = strategy._state_for(spec, ctx.require(spec.left), ctx.require(spec.right))
-        kalman = state.kalman.state
-        forecast = state.last_forecast
-        return {
-            "pair": spec.name,
-            "kalman": kalman.as_dict(),
-            "filter_ready": state.kalman.ready,
-            "forecast": forecast.as_dict() if forecast else None,
-            "model": state.model.summary(),
-            "gate": strategy._entry_gate(spec, kalman, forecast, state) if forecast else "no forecast",
-        }
+    def _scan_intraday(self) -> dict[str, Any]:
+        return self._scan(self.orch.intraday + self.orch.opportunistic, None)
 
-    def _propose(self, pair: str) -> dict[str, Any]:
-        strategy = self._overnight_strategy()
-        spec = self._find_pair(strategy, pair)
-        ctx = self._context_for(strategy, [spec.left, spec.right])
-        idea = strategy._evaluate_pair(spec, ctx)
-        if idea is None:
-            return {
-                "pair": spec.name,
-                "proposal": None,
-                "reason": "the pair did not pass its entry gates - see compute_pair_signal",
-            }
-        idea.book = "overnight"
-        self._proposals[idea.id] = (strategy, idea)
-        return {
-            "proposal_id": idea.id,
-            "pair": spec.name,
-            "structure": idea.structure.value,
-            "description": idea.describe(),
-            "thesis": idea.thesis,
-            "max_loss": idea.max_loss,
-            "expected_profit": idea.max_profit,
-            "confidence": idea.confidence,
-            "legs": [
-                {"symbol": leg.symbol, "side": leg.side.value,
-                 "kind": leg.kind.value, "qty": leg.qty}
-                for leg in idea.legs
-            ],
-            "meta": idea.meta,
-        }
-
-    def _verify(self, target_trade_value: float | None = None) -> dict[str, Any]:
-        verdict = self.orch.firewall.run_overnight_verification(
-            self.orch.broker, target_trade_value=target_trade_value
+    def _scan(self, strategies: list[Any], symbols: list[str] | None) -> dict[str, Any]:
+        if not strategies:
+            return {"candidates": [], "note": "no strategies enabled on that book"}
+        wanted = [s.upper() for s in symbols] if symbols else sorted(
+            {s for strat in strategies for s in strat.universe()}
         )
-        return verdict.as_dict()
+        contexts = self.orch._gather_contexts(wanted)
+        account = self.orch.broker.account()
+        out: list[dict[str, Any]] = []
+        for strategy in strategies:
+            for symbol, market in contexts.items():
+                if symbol not in set(strategy.universe()):
+                    continue
+                ctx = self.orch._context(account, contexts, strategy, 0.0, market)
+                ideas = strategy.generate(ctx)
+                if ideas:
+                    for idea in ideas:
+                        self._proposals[idea.id] = (strategy, idea)
+                        out.append({
+                            "symbol": symbol, "strategy": strategy.name,
+                            "proposal_id": idea.id, "passed": True,
+                            "structure": idea.structure.value,
+                            "description": idea.describe(),
+                            "max_loss": idea.max_loss, "max_profit": idea.max_profit,
+                            "thesis": idea.thesis, "gates": idea.meta.get("gates"),
+                        })
+                else:
+                    out.append({
+                        "symbol": symbol, "strategy": strategy.name,
+                        "passed": False,
+                        "note": "vetoed - see get_gate_rejections for the gate and metrics",
+                    })
+        return {"candidates": out}
+
+    def _propose(self, symbol: str, book: str = "carry") -> dict[str, Any]:
+        pool = {
+            "carry": self.orch.carry,
+            "intraday": self.orch.intraday,
+            "opportunistic": self.orch.opportunistic,
+        }.get(book, self.orch.carry)
+        if not pool:
+            return {"proposal": None, "reason": f"no strategy enabled on the {book} book"}
+
+        contexts = self.orch._gather_contexts([symbol.upper()])
+        market = contexts.get(symbol.upper())
+        if market is None:
+            return {"proposal": None, "reason": f"no market data for {symbol}"}
+
+        account = self.orch.broker.account()
+        for strategy in pool:
+            ctx = self.orch._context(account, contexts, strategy, 0.0, market)
+            for idea in strategy.generate(ctx):
+                idea.book = strategy.capital_book
+                self._proposals[idea.id] = (strategy, idea)
+                return {
+                    "proposal_id": idea.id,
+                    "symbol": idea.symbol,
+                    "book": idea.book,
+                    "strategy": strategy.name,
+                    "structure": idea.structure.value,
+                    "description": idea.describe(),
+                    "thesis": idea.thesis,
+                    "net_price": idea.net_price,
+                    "max_loss": idea.max_loss,
+                    "max_profit": idea.max_profit,
+                    "probability_of_profit": idea.probability_of_profit,
+                    "confidence": idea.confidence,
+                    "legs": [
+                        {"symbol": leg.symbol, "side": leg.side.value, "ratio": leg.ratio}
+                        for leg in idea.legs
+                    ],
+                    "meta": idea.meta,
+                }
+        return {
+            "proposal": None,
+            "reason": f"{symbol} did not pass the {book} book's gates - see get_gate_rejections",
+        }
+
+    def _verify(self) -> dict[str, Any]:
+        return self.orch.firewall.run_carry_verification(self.orch.broker).as_dict()
 
     def _submit(self, proposal_id: str) -> dict[str, Any]:
         entry = self._proposals.get(proposal_id)
         if entry is None:
             return {"submitted": False, "error": f"unknown proposal_id '{proposal_id}'"}
         strategy, idea = entry
+        book = Book.parse(idea.book)
 
-        allowed, why = self.orch.firewall.may_open(Book.OVERNIGHT)
+        allowed, why = self.orch.firewall.may_open(book)
         if not allowed:
             self.journal.record(Decision(
                 cycle="agent", action=DecisionAction.SKIP, symbol=idea.symbol,
-                strategy=strategy.name, idea=idea,
-                rationale=f"firewall refused: {why}",
+                strategy=strategy.name, idea=idea, rationale=f"firewall refused: {why}",
             ))
             return {"submitted": False, "blocked_by": "firewall", "reason": why}
 
@@ -435,42 +471,40 @@ class ToolBelt:
                 "checks": verdict.checks,
             }
 
-        from oaa.execution.combo import plan_from_idea
+        if self.orch.cfg.execution.multileg_mode == "legged" and idea.structure.is_multileg:
+            from oaa.execution.combo import plan_from_idea
 
-        outcome = self.orch.combo.execute(plan_from_idea(idea), risk_stamp=verdict.stamp)
+            outcome = self.orch.combo.execute(plan_from_idea(idea), risk_stamp=verdict.stamp)
+            ok, summary = outcome.ok or outcome.dry_run, outcome.summary()
+        else:
+            execution = self.orch.executor.execute(idea, verdict)
+            ok = execution.ok
+            summary = execution.error or (
+                execution.fill.status if execution.fill else "no fill"
+            )
+
         self.journal.record(Decision(
             cycle="agent",
-            action=DecisionAction.OPEN if outcome.ok else DecisionAction.SKIP,
+            action=DecisionAction.OPEN if ok else DecisionAction.SKIP,
             symbol=idea.symbol, strategy=strategy.name, idea=idea, verdict=verdict,
-            rationale=outcome.summary(),
-            error=None if outcome.ok else outcome.summary(),
+            rationale=summary, error=None if ok else summary,
         ))
-        if outcome.ok:
-            self.orch.risk.record_open()
-        return {
-            "submitted": outcome.ok or outcome.dry_run,
-            "dry_run": outcome.dry_run,
-            "summary": outcome.summary(),
-            "steps": [
-                {"label": s.label, "status": s.status.value,
-                 "order_id": s.fill.order_id if s.fill else None}
-                for s in outcome.plan.ordered()
-            ],
-            "unwind_errors": outcome.unwind_errors,
-        }
+        if ok:
+            self.orch._record_open(idea, strategy)
+        return {"submitted": ok, "summary": summary, "book": idea.book}
 
-    def _liquidate(self, book: str) -> dict[str, Any]:
-        target = Book(book)
-        if target is Book.OVERNIGHT:
-            report = self.orch.firewall.run_overnight_exit(self.orch.broker)
+    def _liquidate(self, scope: str = "transient") -> dict[str, Any]:
+        if scope == "all":
+            report = self.orch.firewall.run_submission_flatten(self.orch.broker)
         else:
             report = self.orch.firewall.run_intraday_cutoff(self.orch.broker)
         return {
-            "book": book,
+            "scope": scope,
             "confirmed_flat": report.confirmed_flat,
             "orders_cancelled": report.orders_cancelled,
             "positions_before": report.positions_before,
             "positions_after": report.positions_after,
+            "resident_untouched": report.resident_untouched,
             "attempts": report.attempts,
             "errors": report.errors,
             "summary": report.summary(),
@@ -487,36 +521,12 @@ class ToolBelt:
             ]
         }
 
-    # ------------------------------------------------------------------ #
-    def _overnight_strategy(self) -> Any:
-        for strategy in self.orch.overnight:
-            if hasattr(strategy, "pairs"):
-                return strategy
-        raise RuntimeError(
-            "no overnight pairs strategy is enabled - check `strategies` in config"
-        )
-
-    @staticmethod
-    def _find_pair(strategy: Any, pair: str) -> Any:
-        wanted = pair.replace(" ", "").upper()
-        for spec in strategy.pairs():
-            if spec.name.upper() == wanted or f"{spec.right}/{spec.left}" == wanted:
-                return spec
-        known = ", ".join(s.name for s in strategy.pairs())
-        raise ValueError(f"unknown pair '{pair}'. Approved universe: {known}")
-
-    def _context_for(self, strategy: Any, symbols: list[str]) -> Any:
-        from oaa.strategies.base import StrategyContext
-
-        contexts = self.orch._gather_contexts(symbols)
-        return StrategyContext(
-            account=self.orch.broker.account(),
-            config=self.orch.cfg,
-            contexts=contexts,
-            params=strategy.params,
-            budget=self.orch.firewall.budget_for(Book.OVERNIGHT),
-            firewall=self.orch.firewall,
-        )
+    def _rejections(self, limit: int = 20, book: str | None = None) -> dict[str, Any]:
+        events = getattr(self.journal, "events", None)
+        rows = events("gate_rejection", limit) if callable(events) else []
+        if book:
+            rows = [r for r in rows if r.get("book") == book]
+        return {"rejections": rows[:limit]}
 
 
 def mcp_read_tools(

@@ -58,6 +58,15 @@ data:
   # Free tier withholds the last 15 minutes of historical data. The engine
   # accounts for this rather than silently trading on stale marks.
   delayed_minutes: 15
+  # The intraday book needs a session VWAP; daily bars cannot express one.
+  fetch_intraday: true
+  intraday_timeframe: "5Min"
+  intraday_lookback_days: 5
+  # Per-symbol headlines for the intraday catalyst gate - Alpaca-native, so
+  # there is no scraper to maintain and nothing to break on day three.
+  fetch_news: true
+  news_limit: 20
+  news_lookback_hours: 6
   cache:
     enabled: true
     dir: "data/cache"
@@ -186,47 +195,55 @@ discovery:
   max_filter_checks: 25
 
 # -----------------------------------------------------------------------------
-# THE TEMPORAL FIREWALL
+# THE CAPITAL FIREWALL
 # -----------------------------------------------------------------------------
-# Two books share one account. Alpaca grants 4x day-trading buying power but
-# only 2x Reg T overnight. Intraday leverage still on the books at 16:00 is a
-# broker-forced liquidation, which is unrecoverable inside a one-week judged
-# window.
+# One account, three books:
 #
-# The firewall makes the overlap impossible with a sequential lock-and-verify:
+#   carry          RESIDENT. Short-premium defined-risk structures held 3-10
+#                  sessions. Margin reserved FIRST, never lent out. Not
+#                  flattened nightly - theta accrues on calendar days, and a
+#                  nightly round trip would pay the spread for nothing.
+#   intraday       TRANSIENT. Long premium, flat by 15:15, every session.
+#   opportunistic  TRANSIENT, dormant by default. Same 15:15 cutoff.
 #
-#   15:15  intraday hard cutoff  cancel all working orders, liquidate the day
-#                                book, POLL UNTIL CONFIRMED FLAT, release lock
-#   15:54  overnight verify      re-poll Alpaca, prove zero positions and zero
-#                                working orders, read FRESH Reg T buying power,
-#                                size against it, acquire the lock
-#   15:55  overnight entry       only possible while holding the lock
-#   09:35  overnight exit        liquidate, release, hand capital to the day
+# Layer 1 is temporal: each book trades only inside its own window.
+# Layer 2 is capital: the transient lease is whatever Reg T leaves AFTER the
+# carry book's requirement is subtracted, measured on a FRESH poll.
 #
-# Layer 1 is temporal (a book trades only in its own window). Layer 2 is
-# capital (size scaled against buying power measured AFTER the other book is
-# proven flat, never a cached number).
+#   15:15  transient cutoff   cancel working orders, liquidate the transient
+#                             books ONLY, POLL UNTIL CONFIRMED FLAT, release
+#   15:45  carry verification re-poll, confirm zero transient exposure and zero
+#                             working orders, read FRESH Reg T buying power,
+#                             confirm carry margin covered with headroom
+#
+# Any failure at 15:45 disables the transient books for the FOLLOWING session.
+# A book that needed rescuing does not get fresh leverage the next morning.
+#
+# Which leg belongs to which book is tracked in a persisted ledger, so a
+# restart at 15:10 cannot cause the cutoff to liquidate a resident condor.
+# Unattributed legs are treated as transient: closing something we did not
+# deliberately choose to hold is the recoverable error.
 # -----------------------------------------------------------------------------
 firewall:
   enabled: true
   times:                              # all US/Eastern
     market_open: "09:30"
-    overnight_exit: "09:35"
-    intraday_start: "10:00"           # 30 min for the open to settle
-    intraday_last_entry: "15:00"
+    intraday_start: "09:45"           # the open is wide and unstable
+    carry_entry_start: "10:00"
+    intraday_last_entry: "14:45"      # runway before the cutoff
+    carry_entry_end: "15:00"
     intraday_cutoff: "15:15"          # THE hard cutoff
-    overnight_signal: "15:45"         # models compute; nothing is routed
-    overnight_verify: "15:54"         # the gate
-    overnight_entry: "15:55"
+    carry_verification: "15:45"       # the sign-off
     market_close: "16:00"
+  ledger_path: "runs/position_ledger.json"
   # `close_all_positions` returning 200 means accepted, not filled. We poll.
   liquidation_confirm_attempts: 4
   liquidation_confirm_delay_seconds: 5.0
-  # Positions still open at 15:54: liquidate them, then abort the night anyway.
   emergency_liquidate: true
-  overnight_regt_utilisation: 0.95    # of VERIFIED Reg T buying power
-  overnight_max_equity_pct: 0.50      # hard ceiling on overnight gross exposure
-  intraday_dtbp_utilisation: 0.50     # deliberately below the 4x on offer
+  carry_max_equity_pct: 0.50          # resident book's gross ceiling
+  transient_utilisation: 0.50         # of what Reg T leaves after carry
+  transient_max_equity_pct: 0.15      # second, absolute ceiling
+  carry_margin_cushion: 1.25
   min_trade_value: 500.0
 
 # -----------------------------------------------------------------------------
@@ -255,7 +272,10 @@ risk:
   no_trade_close_minutes: 10
 
 execution:
-  order_type: limit                # limit | market  (limit strongly preferred)
+  order_type: limit
+  # atomic -> one multi-leg order. Legging doubles spread exposure, so it is a
+  # fallback for venues that cannot route combos, not a default.
+  multileg_mode: atomic                # limit | market  (limit strongly preferred)
   # Where inside the bid/ask to price. 0.5 = mid, 0.0 = bid, 1.0 = ask.
   limit_price_ratio: 0.5
   # Walk the limit toward the far touch if unfilled.
@@ -274,20 +294,34 @@ execution:
 # Add a file to src/oaa/strategies/, register it, add a block here. Done.
 # -----------------------------------------------------------------------------
 strategies:
-  # --- OVERNIGHT BOOK (15:55 entry -> 09:35 exit) ---------------------------
-  - name: overnight_pairs
+  # --- CARRY BOOK (resident, 10:00-15:00 entries, held 3-10 sessions) --------
+  - name: vol_carry
     enabled: true
     weight: 1.0
-    book: overnight
-    params_file: "config/strategies/overnight_pairs.yaml"
+    book: carry
+    params_file: "config/strategies/vol_carry.yaml"
 
-  # --- INTRADAY BOOK (10:00 -> 15:15 hard cutoff) ---------------------------
-  - name: vol_carry_condor
-    enabled: true
+  # --- INTRADAY BOOK (09:45-14:45 entries -> 15:15 hard cutoff) -------------
+  # Disabled by default. This book is BUILT SECOND and opted into explicitly:
+  # judges see the full history of the submitted account, and a malfunctioning
+  # intraday loop firing junk orders is permanently on the record. The carry
+  # book's P&L is the asset being protected here.
+  - name: intraday_momentum
+    enabled: false
     weight: 1.0
     book: intraday
-    params_file: "config/strategies/vol_carry_condor.yaml"
+    params_file: "config/strategies/intraday_momentum.yaml"
 
+  # --- OPPORTUNISTIC BOOK (dormant unless a scheduled print is due) ---------
+  - name: event_premium
+    enabled: true
+    weight: 0.5
+    book: opportunistic
+    params_file: "config/strategies/event_premium.yaml"
+
+  # --- opposite-regime strategy: trend present, IV cheap --------------------
+  # Shares the trend measurement with vol_carry, which is what keeps the two
+  # mutually exclusive. A test asserts they never co-fire.
   - name: momentum_debit_spread
     enabled: false
     weight: 1.0
@@ -326,6 +360,7 @@ agents:
     enabled: true
     min_score_to_trade: 0.55
     require_thesis: true
+  agent_cycles: ["carry_scan"]
   memory:
     enabled: true
     path: "runs/memory.sqlite"
@@ -345,27 +380,27 @@ schedule:
     - name: discover
       at: "09:15"
       action: discover                # pre-market: candidate pool + regime read
-    - name: overnight_exit
-      at: "09:35"
-      action: overnight_exit          # liquidate the overnight book, free capital
     - name: intraday_open
+      at: "09:45"
+      action: intraday_scan           # transient books lease the headroom
+    - name: carry_scan
       at: "10:00"
-      action: scan_and_trade          # intraday book acquires the lock
-    - name: intraday_manage
-      at: "13:00"
+      action: carry_scan              # resident book looks for rich premium
+    - name: midday_manage
+      at: "12:00"
+      action: manage_positions
+    - name: intraday_afternoon
+      at: "13:45"
+      action: intraday_scan
+    - name: carry_manage
+      at: "14:30"
       action: manage_positions
     - name: intraday_cutoff
       at: "15:15"
-      action: intraday_cutoff         # HARD CUTOFF - cancel, liquidate, confirm
-    - name: overnight_signal
-      at: "15:45"
-      action: overnight_signal        # Kalman + ML compute; nothing routed
-    - name: overnight_verify
-      at: "15:54"                     # THE GATE
-      action: overnight_verify
-    - name: overnight_entry
-      at: "15:55"
-      action: overnight_entry
+      action: intraday_cutoff         # HARD CUTOFF - transient books only
+    - name: carry_verify
+      at: "15:45"                     # THE SIGN-OFF
+      action: carry_verify
     - name: eod_report
       at: "16:10"
       action: report
@@ -382,7 +417,35 @@ management:
     enabled: false
     dte_trigger: 7
   # Close everything before the submission deadline so final P&L is realised.
-  flatten_before: null             # e.g. "2026-09-04T14:00:00-04:00"
+  flatten_before: null
+  # Stop opening carry structures once the remaining window is shorter than one
+  # can meaningfully decay.
+  entry_cutoff_utc: "2026-09-02T20:00:00Z"
+  # Flatten the ENTIRE book on the morning of submission day, well before the
+  # 15:00 UTC deadline. Realised P&L on a flat account is unambiguous evidence;
+  # an open book asks a judge to trust a mid-price mark on a wide quote.
+  submission_flatten_utc: "2026-09-04T13:45:00Z"
+
+# -----------------------------------------------------------------------------
+# Modelled transaction costs. Paper trading charges none of this and fills
+# optimistically at mid - which flatters the intraday book severely, because
+# spread cost IS its primary loss mechanism. Every closed trade therefore
+# carries gross P&L, modelled cost and net side by side. See COST_STRUCTURE.md.
+# -----------------------------------------------------------------------------
+cost_model:
+  enabled: true
+  occ_clearing: 0.025
+  orf: 0.015
+  cat_per_contract: 0.0003
+  taf_sell: 0.00329
+  sec_rate: 0.0000206
+  modelled_slippage_per_leg: 0.02   # half-spread assumption; tune from live quotes
+  margin_rate_annual: 0.0625
+  index_exchange_fees:
+    SPX: 0.66
+    SPXW: 0.59
+    VIX: 0.45
+    XSP: 0.0                        # free under 10 contracts, cash settled
 
 telemetry:
   run_dir: "runs"

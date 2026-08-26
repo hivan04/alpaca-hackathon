@@ -22,22 +22,22 @@ reports `confirmed_flat` based on what the account actually shows. Most
 implementations of this pattern skip the poll, and the skip is invisible until
 the day it costs the account.
 
-### A rescue at 15:54 still aborts the night
+### A rescue at 15:45 disables the transient books tomorrow
 
-If verification finds rogue positions it liquidates them *and abandons the
-overnight entry anyway*. The tempting behaviour is to fix the problem and carry
-on. A book that needed rescuing ninety seconds before the close has already
-demonstrated that something upstream is wrong; handing it fresh leverage is how
-a small bug becomes a margin call.
+If verification finds residual transient positions it liquidates them *and
+disables the transient books for the following session anyway*. The tempting
+behaviour is to fix the problem and carry on. A book that needed rescuing at the
+close has already demonstrated that something upstream is wrong; handing it
+fresh leverage the next morning is how a small bug becomes a margin call.
 
-### Protective options are bought BEFORE the equity legs
+### Long legs are bought BEFORE short legs are sold
 
-The pairs trade is four orders and MLEG cannot mix equity with options. The
-instinct is to establish the position and hedge after. That is backwards: if the
-equity legs fill and the options fail, the account carries an unhedged overnight
-short. If the options fill and the equities fail, it carries two cheap long
-options. Every partial failure should leave a bounded state, so protection goes
-first and anything that filled is unwound at market on a failure.
+When a venue cannot route a four-leg combo atomically, the structure has to be
+legged, and the order is a safety property rather than a style choice. If the
+short legs fill and a long wing fails, the account carries an uncovered short.
+If a long wing fills and a short leg fails, it carries a cheap long option.
+Every partial failure should leave a bounded state, so longs go first and
+anything that filled is unwound in reverse at market on a failure.
 
 ### The agent reads over MCP and writes over the CLI
 
@@ -46,17 +46,8 @@ through the MCP server — real autonomy, not a scripted pipeline with an LLM
 bolted on. But `place_option_order` and friends are withheld from it: every
 write goes through a first-party tool that routes via the firewall and the risk
 engine, and out over the Alpaca CLI, so each order is an auditable shell command.
-An agent that can place a raw order can bypass the 15:54 gate, and the entire
+An agent that can place a raw order can bypass the 15:45 gate, and the entire
 point of the gate is that nothing can.
-
-### The Kalman filter is seeded from differences, not levels
-
-Over a short window a random-walk price barely moves, so a level regression of
-y on x is near-collinear with its own intercept. It hands alpha an absurd value
-that beta then has to cancel, and the filter spends hundreds of observations
-walking it back out — during which the z-score, the number the whole strategy
-trades on, is wrong. Regressing `diff(y)` on `diff(x)` removes the intercept
-entirely. Recovery of a known beta went from ±0.17 to ±0.01.
 
 ### Quantiles set the strikes, not a human
 
@@ -73,7 +64,7 @@ not a defined-risk position, it is a 50-share naked exposure with paperwork. So
 share counts are forced to multiples of 100 and the resulting dollar-neutrality
 error is *reported* in `meta.hedge_error_pct` rather than quietly ignored.
 
-### Attention generates candidates; cointegration still decides
+### Attention generates candidates; the premium gates still decide
 
 The intuitive use of a "hottest stocks" feed is to trade what it surfaces. For a
 mean-reversion strategy that is close to backwards: a name that just became hot
@@ -86,7 +77,7 @@ screen and touches nothing else.
 A sector-wide move leaves a pair's spread intact and actually improves the
 trading environment. An idiosyncratic move on one leg dislocates the spread on
 news that will never mean-revert. Both look identical in an article count. The
-overnight book is hedged against market moves and not against headlines, so this
+carry book is hedged against range, not against headlines, so this
 distinction is the entire value of the lens — and it is the one thing in the
 strategy layer that genuinely needs reading rather than computing.
 
@@ -100,12 +91,12 @@ independently testable.
 
 ### The LLM is never on a mechanical path
 
-The 15:15 liquidation, the 15:54 verification and the 09:35 exit are never
-agent-driven. There is nothing to reason about in them, a language model in the
-path of a safety-critical liquidation is a failure mode rather than a feature,
-and it is also the single largest avoidable token cost. `collar_widening` is
-bounded below at 1.0 for the same reason: the lens may widen protection, never
-narrow it.
+The 15:15 liquidation, the 15:45 verification and the submission flatten are
+never agent-driven. There is nothing to reason about in them, a language model
+in the path of a safety-critical liquidation is a failure mode rather than a
+feature, and it is also the single largest avoidable token cost.
+`size_multiplier` is bounded at 1.0 for the same reason: the lens may reduce
+risk, never increase it.
 
 ### Defined risk only, enforced in code
 
@@ -123,7 +114,7 @@ more than prose in a P&L-scored week.
 
 ### Two strategies that fire on opposite regimes
 
-`vol_carry_condor` wants rich IV and no trend. `momentum_debit_spread` wants a
+`vol_carry` wants rich IV and no trend. `momentum_debit_spread` wants a
 confirmed trend and cheap IV. They are near-mutually-exclusive by construction, so
 the book gets diversification from one universe rather than from two correlated bets.
 There is a test asserting exactly this.

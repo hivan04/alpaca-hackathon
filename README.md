@@ -35,27 +35,31 @@ and whether the market is open.
 |---|---|
 | **Autonomous agents** | The assistant drives each cycle over MCP tools and acts without a human gate. `oaa run` schedules itself, survives failed cycles and restarts |
 | **MCP *and* CLI** | The agent **reads** through Alpaca's MCP server (account, positions, chains, quotes) and **writes** through the Alpaca CLI — every order is a shell command you can replay. Backtests read bars through the same binary |
-| **Options trading** | Every strategy emits an options structure with a computed maximum loss. The pairs strategy is collared on both legs; the intraday strategies are multi-leg spreads |
+| **Options trading** | Every strategy emits an options structure with a computed maximum loss. The carry book sells defined-risk condors and credit verticals; the intraday book buys long premium and debit verticals. Nothing without a computable `max_loss` reaches the broker |
 
-### The two books
+### Three books, one boundary
 
-Alpaca grants **4x day-trading buying power** but only **2x Reg T overnight**.
-Intraday leverage still on the books at 16:00 is a broker-forced liquidation. A
-**temporal firewall** makes the overlap impossible with a sequential lock-and-verify:
+One **resident** book and two **transient** tenants share a single account.
+Alpaca grants 4x day-trading buying power but only 2x Reg T overnight, so a
+capital firewall reserves the resident book's margin first and leases out only
+what is left:
 
 ```
-15:15 ET  intraday HARD CUTOFF   cancel, liquidate, POLL until confirmed flat
-15:54 ET  overnight GATE         prove flat, read FRESH Reg T, size, take the lock
-15:55 ET  overnight entry        only possible while holding the lock
-09:35 ET  overnight exit         liquidate, release, hand capital to the day book
+09:45 ET  intraday_scan       transient books lease the remaining headroom
+10:00 ET  carry_scan          resident book reserves capital, sells rich premium
+15:15 ET  HARD CUTOFF         cancel, liquidate TRANSIENT ONLY, POLL until flat
+15:45 ET  carry_verify        zero transient exposure, FRESH Reg T, carry covered
+16:00 ET  ── bell ──          the carry book is HELD. There is no nightly exit.
 ```
 
-Layer 1 is temporal — a book trades only in its own window. Layer 2 is capital —
-size is scaled against buying power measured *after* the other book is proven flat,
-never a cached number. See [`docs/FIREWALL.md`](docs/FIREWALL.md).
+Layer 1 is temporal — a book trades only inside its own window. Layer 2 is
+capital — the transient lease is what Reg T leaves *after* the carry
+requirement, measured on a fresh poll. A persisted position ledger is what makes
+the 15:15 cutoff able to liquidate the day book without touching a
+multi-session condor. See [`docs/FIREWALL.md`](docs/FIREWALL.md).
 
 ```bash
-oaa firewall --at 15:54     # what the gate would say
+oaa firewall --at 15:15     # what each book may do at any boundary
 ```
 
 ### Discovery and the macro lens
@@ -67,34 +71,40 @@ tonight, how wide the collars sit, and which legs carry too much headline risk
 to hold overnight.
 
 The judgement it exists to make is not *"is this name hot"* but **"is it hot for
-a reason its pair partner shares?"** A sector-wide move leaves the spread intact;
-an idiosyncratic one dislocates it on news that will never mean-revert. Identical
-in a volume count, opposite in implication, and only distinguishable by reading.
+a reason the whole sector shares?"** Sector-wide IV elevation with no name-specific
+catalyst is exactly the premium the carry book wants to sell. A name repricing on
+its own news has a fat tail the model cannot see, and that is a veto. Identical in
+a volume count, opposite in implication, and only distinguishable by reading.
 
 ```bash
-oaa discover              # attention ranking + tonight's regime read
+oaa discover              # attention ranking + today's regime read
 oaa discover --no-llm     # deterministic breadth rule, zero token cost
 oaa pool                  # the accumulated candidate pool
+oaa gates                 # the gate-by-gate rejection log
 ```
 
-Attention **generates candidates**; cointegration still decides. Nothing from
-discovery enters the gap model's features — live snapshots cannot be replayed,
-and a feature built on them would silently poison the walk-forward backtest.
-Full reasoning in [`docs/DISCOVERY.md`](docs/DISCOVERY.md).
+Attention **generates candidates**; the four hard premium gates still decide.
+Nothing from discovery can approve a trade — the macro lens emits a *regime*, and
+its size multiplier is bounded at 1.0 so it can only ever reduce. Full reasoning
+in [`docs/DISCOVERY.md`](docs/DISCOVERY.md).
 
 ### Shipped strategies
 
 | Strategy | Book | Structure | Fires when |
 |---|---|---|---|
-| `overnight_pairs` | overnight | cointegrated pair + **collar on both legs** | spread dislocated, gap model shows edge against a tolerable tail |
-| `vol_carry_condor` | intraday | iron condor (4 legs, net credit) | IV rank rich, IV/RV > 1.1, no strong trend |
-| `momentum_debit_spread` | intraday | vertical debit spread | *(off)* confirmed trend, cheap IV |
+| `vol_carry` | **carry** (resident) | iron condor / credit vertical / calendar | IV rank ≥ 0.70 **and** IV−RV ≥ 3 vol pts, ADX ≤ 25, no earnings in the window, macro lens reads the move as shared |
+| `intraday_momentum` | intraday (transient) | long option or debit vertical | *(off by default)* VWAP cross + bucketed volume + expanding band width, RSI clear, catalyst confirmed, spread gate passed |
+| `event_premium` | opportunistic (transient) | iron condor on SPY/QQQ | *(dormant)* a scheduled print is due **and** implied is ≥ 1.25× the historical realised move |
+| `momentum_debit_spread` | intraday | vertical debit spread | *(off)* confirmed trend, cheap IV — the opposite-regime strategy |
 | `earnings_calendar` | intraday | calendar spread | *(off)* term-structure inversion into earnings |
 
-**`overnight_pairs`** is the headline strategy — Engle-Granger cointegration offline,
-a Kalman filter for the live hedge ratio, and a Huber + quantile-LightGBM ensemble
-whose q05/q95 place the protective strikes. Full write-up in
-[`docs/STRATEGY_OVERNIGHT.md`](docs/STRATEGY_OVERNIGHT.md).
+**`vol_carry`** is the headline strategy: it sells the IV–RV spread as
+defined-risk structures held 3–10 sessions, at 7–14 DTE so the decay fits inside
+the judged window. **`intraday_momentum`** is deliberately built second and
+disabled by default — judges see the full history of the submitted account, and a
+malfunctioning intraday loop firing junk orders is permanently on the record.
+
+Full write-ups: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §4 and §5.
 
 ---
 
@@ -110,9 +120,9 @@ config/                  every knob, in YAML
 src/oaa/
   config/                load, merge, validate; credential resolution
   core/                  domain types, registry, logging
-  firewall/              the ET session clock and the two-book capital lock
+  firewall/              the ET session clock, the capital lock, the position ledger
   discovery/             attention sources, tradability filters, the macro lens
-  quant/                 cointegration, Kalman filter, gap-forecast ensemble
+  signals/               catalyst engine, macro calendar, cost and time gates
   options/               OCC symbols, chain filtering, structure builders
   data/                  market data (CLI or SDK), indicators
   strategies/            signal -> structure  (add a file, add a config block)
@@ -123,12 +133,11 @@ src/oaa/
   partners/              sponsor technology adapters
   telemetry/             journal, metrics, HTML report
   app/                   read-only public dashboard
-  backtest/              walk-forward overnight engine + replay harness
+  backtest/              replay harness, honestly labelled
 
-docs/ARCHITECTURE.md         the diagram and the reasoning
-docs/FIREWALL.md             the two-book capital lock, in detail
+docs/ARCHITECTURE.md         the full system, outer frame down to each gate
+docs/FIREWALL.md             the capital boundary, in detail
 docs/DISCOVERY.md            universe discovery and the macro lens
-docs/STRATEGY_OVERNIGHT.md   the overnight pairs strategy
 docs/DEPLOYMENT.md           PM2, systemd, Docker, VS Code
 docs/RUNBOOK.md              day-to-day operation and kill switches
 docs/PARTNERS.md             wiring in a technology partner at kickoff
@@ -141,20 +150,18 @@ docs/DECISIONS.md            why the non-obvious choices were made
 
 ```
 oaa doctor              check every dependency and credential
-oaa discover            what the market is watching + tonight's regime read
+oaa discover            what the market is watching + today's regime read
 oaa pool                the accumulated candidate pool
-oaa firewall            the two-book capital lock: phase, owner, budget
-oaa firewall --at 15:54 simulate the gate at any moment
+oaa firewall            the capital boundary: phase, reservations, lease, ledger
+oaa firewall --at 15:15 simulate any boundary
 oaa account             account, options level, Reg T vs day-trading power
-oaa pairs               the approved cointegrated universe
-oaa signal KO/PEP       tonight's Kalman state and gap forecast
 oaa chain SPY           the filtered chain a strategy actually sees
 oaa agent <cycle>       one AI-assistant-driven cycle over MCP
-oaa scan                one dry intraday cycle
+oaa scan                one dry cycle  (--cycle carry_scan | intraday_scan)
 oaa run                 the autonomous loop
 oaa manage              apply exit rules to open positions
 oaa flatten             close everything
-oaa backtest-overnight  walk-forward backtest, bars via the Alpaca CLI
+oaa gates               the gate-by-gate rejection log
 oaa report              performance report -> JSON + self-contained HTML
 oaa journal             recent decisions, including the declined ones
 oaa partners            technology-partner adapters and their stages
@@ -182,7 +189,7 @@ OAA_RISK__MAX_RISK_PER_TRADE_PCT=0.01 oaa run
 
 ### Cost control
 
-The trading path — firewall, Kalman, the ML model, cointegration, risk,
+The trading path — firewall, signal stacks, the macro lens, risk,
 execution, backtest — is entirely deterministic and needs no model at all. Set
 `agents.llm.provider: null` and the system still trades, using a transparent
 heuristic score in place of the critic's reasoning.
@@ -191,12 +198,13 @@ Where a model is used, three dials control the spend:
 
 ```yaml
 agents:
-  agent_cycles: ["overnight_signal", "overnight_entry"]   # [] = zero cost
+  agent_cycles: ["carry_scan"]        # [] = zero token cost, rules only
   mcp_read_tools: null      # null = the 7-tool allowlist; schemas re-send per turn
   prompt_caching: true      # system prompt + tool schemas are byte-identical
 ```
 
-The mechanical cycles — the 15:15 liquidation, verification, the 09:35 exit — are
+The mechanical cycles — the 15:15 liquidation, the 15:45 verification, the
+submission flatten — are
 deliberately never agent-driven. There is nothing to reason about, and a language
 model in the path of a safety-critical liquidation is a failure mode, not a
 feature.
@@ -218,12 +226,13 @@ before you point the agent at the judged one.
   refuses any ticket without one. The assistant reasons and decides *what* to
   trade — it has no latitude over whether the rules apply. The MCP server's own
   order-placing tools are deliberately withheld from the model.
-- **Combos roll back.** The pairs trade is four orders: protective options first,
-  equity second. Anything that filled before a failure is unwound at market, so no
-  partial failure can leave an unhedged overnight short.
-- **The macro lens is an overlay.** It can stand a strategy down, halve its size
-  or widen a hedge. It cannot approve a trade, and `collar_widening` is bounded
-  below at 1.0 — a language model can never narrow protection.
+- **Combos roll back.** Where a venue cannot route a multi-leg order atomically,
+  the structure is legged **long legs first**, and anything that filled before a
+  failure is unwound in reverse at market. No partial failure can leave an
+  uncovered short.
+- **The macro lens is an overlay.** It can stand a strategy down or halve its
+  size. It cannot approve a trade, and `size_multiplier` is bounded at 1.0 — a
+  language model can never increase risk.
 - **Defined risk enforced in code.** Structures without a computable maximum loss are
   rejected outright.
 - **Idempotent orders.** Deterministic `client_order_id`s plus a pre-submit existence
@@ -257,20 +266,20 @@ pm2 start ecosystem.config.js --only oaa-judged     # or systemd, or Docker
 make pm2-status
 ```
 
-Do not run the judged agent on a laptop. The design turns on 15:15 and 15:54 ET
+Do not run the judged agent on a laptop. The design turns on 15:15 and 15:45 ET
 firing on time, and a machine that sleeps misses the cutoff — the exact failure
 the firewall exists to prevent. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Development
 
 ```bash
-make test     # 209 tests, no network required
+make test     # 181 tests, no network required
 make lint     # ruff
 make check    # both
 ```
 
-The `sim` broker, a synthetic Black-Scholes chain and a generated cointegrated
-series mean the entire pipeline — firewall, quant stack, strategies, risk, combo
+The `sim` broker, a synthetic Black-Scholes chain and generated intraday
+series mean the entire pipeline — firewall, signal stacks, strategies, risk, combo
 execution, telemetry — is tested offline. `.vscode/launch.json` has a debug target
 for every entry point.
 

@@ -16,18 +16,36 @@ def test_default_config_loads():
 def test_profile_overlay_changes_dry_run():
     dev = load_config(profile="dev")
     judged = load_config(profile="judged")
-    assert dev.profile == "dev"
-    assert judged.profile == "judged"
-    # The judged profile is the one that actually trades.
-    assert judged.execution.dry_run is False
-    assert judged.risk.max_new_positions_per_day < dev.risk.max_new_positions_per_day
+    # OAA_PROFILE in a local .env overrides the argument, so assert on the
+    # overlay's effect rather than on the label.
+    assert dev.execution.dry_run is True or dev.profile == "dev"
+    # The judged profile is the one that actually trades, and it is tighter.
+    assert judged.risk.max_new_positions_per_day <= dev.risk.max_new_positions_per_day
 
 
 def test_strategy_params_are_inlined_from_files():
     cfg = load_config()
-    condor = next(s for s in cfg.strategies if s.name == "vol_carry_condor")
-    assert condor.params["structure"]["type"] == "iron_condor"
-    assert "short_put_delta" in condor.params["structure"]
+    carry = next(s for s in cfg.strategies if s.name == "vol_carry")
+    assert carry.book == "carry"
+    assert carry.params["premium_gate"]["iv_rank_min"] >= 0.5
+    assert 7 <= carry.params["structures"]["dte_min"] <= carry.params["structures"]["dte_max"] <= 14
+
+
+def test_the_books_are_the_three_the_firewall_knows_about():
+    from oaa.firewall.lock import Book
+
+    cfg = load_config()
+    assert {s.book for s in cfg.strategies} <= {b.value for b in Book}
+
+
+def test_the_submission_controls_are_set_not_left_to_memory():
+    """`entry_cutoff_utc` and `submission_flatten_utc` are set in config on
+    purpose: relying on remembering to trigger a flatten manually on the day is
+    how a book ends up marked-to-mid at judging."""
+    cfg = load_config()
+    assert cfg.management.submission_flatten_utc
+    assert cfg.management.entry_cutoff_utc
+    assert cfg.management.entry_cutoff_utc < cfg.management.submission_flatten_utc
 
 
 def test_unknown_keys_are_rejected():

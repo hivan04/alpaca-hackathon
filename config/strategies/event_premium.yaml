@@ -1,0 +1,43 @@
+# =============================================================================
+# event_premium - the opportunistic book
+# -----------------------------------------------------------------------------
+# Dormant by default. Fires only on a dated, scheduled catalyst, and may not
+# fire at all inside the judged window. That is an acceptable outcome and is
+# reported as such: an agent that correctly stands down is demonstrating
+# judgement, and designed-and-dormant reads better than quietly deleted.
+# =============================================================================
+
+universe: ["SPY", "QQQ"]           # index only - single-name spreads are too wide
+
+event:
+  horizon_hours: 30
+  min_samples: 6
+  # Implied must be materially above the historical realised move, or there is
+  # nothing to sell. In line or below -> stand down, which is the expected
+  # outcome most of the time.
+  min_premium_ratio: 1.25
+  # Historical realised same-day moves for each recurring event, as a fraction
+  # of spot. A committed table rather than a live fetch, for the same reason
+  # the macro calendar is: a live dependency that fails on the morning of the
+  # print fails exactly when it was needed.
+  realised_moves:
+    cpi:  [0.0091, 0.0074, 0.0122, 0.0068, 0.0105, 0.0083, 0.0059, 0.0117]
+    fomc: [0.0134, 0.0098, 0.0156, 0.0087, 0.0121, 0.0102, 0.0143]
+    nfp:  [0.0078, 0.0065, 0.0094, 0.0052, 0.0088, 0.0071, 0.0060]
+    pmi:  [0.0041, 0.0038, 0.0055, 0.0033, 0.0047, 0.0036]
+
+structures:
+  target_dte: [1, 5]
+  short_delta_target: 0.20
+  wing_width_points: 5
+  fixed_quantity: 1
+
+sizing:
+  max_risk: 0.02                   # 2% of equity, hard cap
+
+exits:
+  profit_target_pct: 0.50          # event premium collapses fast after the print
+
+cost:
+  max_relative_spread: 0.06
+  max_spread_cost_vs_credit: 0.20

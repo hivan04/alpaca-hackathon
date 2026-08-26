@@ -205,12 +205,24 @@ class AlpacaDataProvider(MarketDataProvider):
             hist.append(atm_iv)
             del hist[:-120]
 
+        intraday: list[dict[str, Any]] = []
+        if self.cfg.data.fetch_intraday:
+            try:
+                intraday = self.bars(
+                    symbol,
+                    lookback_days=self.cfg.data.intraday_lookback_days,
+                    timeframe=self.cfg.data.intraday_timeframe,
+                )
+            except (DataError, Exception):  # noqa: BLE001
+                intraday = []
+
         return MarketContext(
             symbol=symbol,
             asof=dt.datetime.now(dt.timezone.utc),
             spot=spot,
             prev_close=history[-2]["close"] if len(history) > 1 else None,
             bars=history,
+            intraday_bars=intraday,
             chain=chain,
             realised_vol=realised_vol(history, 20),
             implied_vol=atm_iv,

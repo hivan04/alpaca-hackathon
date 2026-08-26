@@ -275,10 +275,13 @@ def _closing_intent(side: Side) -> Any:
 
 # --------------------------------------------------------------------------- #
 def plan_from_idea(idea: TradeIdea, limit_prices: dict[str, float] | None = None) -> TradePlan:
-    """Turn a pairs TradeIdea into an ordered, rollback-safe plan.
+    """Turn a multi-leg TradeIdea into an ordered, rollback-safe plan.
 
-    Protective options first (sequence 0-1), equity exposure second (2-3), so
-    every partial failure leaves the book in a bounded state.
+    Used when the venue cannot route the combo atomically. The ordering is the
+    safety property: **long (protective) legs first, short legs second**, and
+    the unwind runs in reverse. Every partial failure therefore leaves the book
+    in a bounded state - a naked short leg is never the residue of a half-filled
+    structure.
     """
     prices = limit_prices or {}
     plan = TradePlan(idea=idea)
@@ -286,9 +289,13 @@ def plan_from_idea(idea: TradeIdea, limit_prices: dict[str, float] | None = None
     option_legs = [leg for leg in idea.legs if not leg.is_equity]
     equity_legs = [leg for leg in idea.legs if leg.is_equity]
 
+    # Buys before sells. An unfilled short leg with the long already on is a
+    # cheaper structure than intended; the reverse is an uncovered short.
+    option_legs.sort(key=lambda leg: 0 if leg.side is Side.BUY else 1)
+
     for index, leg in enumerate(option_legs):
         plan.add(PlanStep(
-            label=f"hedge-{leg.symbol}",
+            label=f"{'long' if leg.side is Side.BUY else 'short'}-{leg.symbol}",
             legs=[leg],
             quantity=idea.quantity * leg.ratio,
             sequence=index,
@@ -299,8 +306,6 @@ def plan_from_idea(idea: TradeIdea, limit_prices: dict[str, float] | None = None
         ))
 
     offset = len(option_legs)
-    # Long leg before short leg: an unfilled short is safer than an unfilled long
-    # when the protective options are already on.
     equity_legs.sort(key=lambda leg: 0 if leg.side is Side.BUY else 1)
     for index, leg in enumerate(equity_legs):
         plan.add(PlanStep(

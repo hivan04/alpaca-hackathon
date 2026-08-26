@@ -249,16 +249,17 @@ class TradingAgent:
     def _prompt_for(self, cycle: str, phase: str) -> tuple[str, str]:
         now = self.orch.firewall.clock.now().strftime("%Y-%m-%d %H:%M")
         table = {
-            "overnight_signal": prompts.TRADER_OVERNIGHT_SIGNAL,
-            "overnight_entry": prompts.TRADER_OVERNIGHT_ENTRY,
-            "intraday_cutoff": prompts.TRADER_CUTOFF,
+            "carry_scan": prompts.TRADER_CARRY,
+            "intraday_scan": prompts.TRADER_INTRADAY,
             "scan_and_trade": prompts.TRADER_INTRADAY,
+            "intraday_cutoff": prompts.TRADER_CUTOFF,
         }
         template = table.get(cycle, prompts.TRADER_INTRADAY)
+        pending = getattr(self.orch, "_open_ideas", {})
         proposals = "\n".join(
-            f"  - {idea.id}: {idea.describe()} (max loss ${idea.max_loss:,.0f})"
-            for _, idea, _ in self.orch._pending  # noqa: SLF001
-        ) or "  (none - recompute with compute_pair_signal / propose_overnight_trade)"
+            f"  - {idea.id}: {idea.describe()} (max loss ${idea.max_loss or 0:,.0f})"
+            for idea in list(pending.values())[-5:]
+        ) or "  (none yet - scan first)"
 
         user = template.format(now=now, phase=phase, proposals=proposals)
         return prompts.TRADER_SYSTEM, user
@@ -267,10 +268,10 @@ class TradingAgent:
 def _deterministic_action(cycle: str) -> str:
     """Map an agent cycle onto the plain orchestrator handler."""
     return {
-        "overnight_signal": "overnight_signal",
-        "overnight_entry": "overnight_entry",
-        "overnight_verify": "overnight_verify",
+        "carry_scan": "carry_scan",
+        "carry_verify": "carry_verify",
+        "intraday_scan": "intraday_scan",
         "intraday_cutoff": "intraday_cutoff",
-        "overnight_exit": "overnight_exit",
+        "submission_flatten": "submission_flatten",
         "scan_and_trade": "scan_and_trade",
     }.get(cycle, "scan_and_trade")

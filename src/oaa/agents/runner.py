@@ -50,11 +50,12 @@ class Runner:
                 self.agent = None
 
     #: Fallback when nothing is configured. The purely mechanical cycles -
-    #: verification, the 15:15 liquidation, the 09:35 exit, reporting - are
-    #: deliberately absent. There is nothing to reason about in them, and a
-    #: language model in the path of a safety-critical liquidation is a failure
-    #: mode dressed as a feature. It is also the single largest avoidable cost.
-    DEFAULT_AGENT_CYCLES = ("overnight_signal", "overnight_entry")
+    #: the 15:45 verification, the 15:15 liquidation, the submission flatten,
+    #: reporting - are deliberately absent. There is nothing to reason about in
+    #: them, and a language model in the path of a safety-critical liquidation
+    #: is a failure mode dressed as a feature. It is also the single largest
+    #: avoidable token cost.
+    DEFAULT_AGENT_CYCLES = ("carry_scan",)
 
     @property
     def agent_cycles(self) -> set[str]:
@@ -116,6 +117,11 @@ class Runner:
 
             self._roll_session(now)
 
+            # The dated submission flatten is checked on every poll, not on the
+            # daily schedule: it is a one-off wall-clock deadline, and "remember
+            # to trigger it on the day" is exactly the plan that fails.
+            self._check_submission_flatten(now)
+
             if self._is_trading_day(now):
                 for cycle in self._due(now):
                     log.info(
@@ -145,6 +151,30 @@ class Runner:
             self.agent.run_cycle(cycle.action)
             return
         self.orch.run_cycle(cycle.action, cycle.name)
+
+    def _check_submission_flatten(self, now: dt.datetime) -> None:
+        """Fire the whole-book flatten once, at the configured UTC moment.
+
+        Realised P&L on a flat account is unambiguous evidence; an open book at
+        judging asks a judge to trust a mid-price mark on a wide quote. Firing
+        early also leaves time to fix a failed close.
+        """
+        if self.firewall.state.flattened_for_submission:
+            return
+        from oaa.signals.gates import parse_utc
+
+        deadline = parse_utc(getattr(self.cfg.management, "submission_flatten_utc", None))
+        if deadline is None:
+            return
+        moment = now if now.tzinfo else now.replace(tzinfo=dt.timezone.utc)
+        if moment.astimezone(dt.timezone.utc) < deadline:
+            return
+        log.warning("SUBMISSION FLATTEN due at %s - closing the entire book", deadline)
+        try:
+            self.orch.run_cycle("submission_flatten", "submission_flatten")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("submission flatten failed: %s", exc)
+            self.orch.journal.event("cycle_error", cycle="submission_flatten", error=str(exc))
 
     def _roll_session(self, now: dt.datetime) -> None:
         """Reset the per-day firewall locks when the date turns over.

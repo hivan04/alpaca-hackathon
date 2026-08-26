@@ -67,20 +67,26 @@ def _bs(spot: float, strike: float, t_years: float, vol: float, is_call: bool):
     return strike * cdf(-d2) - spot * cdf(-d1), cdf(d1) - 1.0
 
 
-@pytest.fixture
-def chain(today: dt.date) -> list[OptionQuote]:
-    """A synthetic but arbitrage-free SPY chain: spot 500, 21 DTE, 20% vol,
-    strikes 400-600 on the 5-point grid, a realistic 5c-wide market."""
-    expiry = today + dt.timedelta(days=21)
-    spot, vol = 500.0, 0.20
-    t_years = 21 / 365
+def _expiry_slice(
+    today: dt.date,
+    days: int,
+    spot: float = 500.0,
+    vol: float = 0.20,
+    half_spread: float | None = None,
+):
+    expiry = today + dt.timedelta(days=days)
+    t_years = days / 365
     quotes: list[OptionQuote] = []
     for strike in range(400, 605, 5):
         for right in (Right.CALL, Right.PUT):
             price, delta = _bs(spot, float(strike), t_years, vol, right is Right.CALL)
             if price < 0.15:
                 continue
-            half = max(0.02, round(price * 0.01, 2))
+            half = (
+                half_spread
+                if half_spread is not None
+                else max(0.02, round(price * 0.01, 2))
+            )
             quotes.append(
                 make_quote(
                     expiry=expiry,
@@ -94,6 +100,18 @@ def chain(today: dt.date) -> list[OptionQuote]:
                 )
             )
     return quotes
+
+
+@pytest.fixture
+def chain(today: dt.date) -> list[OptionQuote]:
+    """A synthetic but arbitrage-free SPY chain: spot 500, 20% vol, strikes
+    400-600 on the 5-point grid, a realistic 5c-wide market.
+
+    TWO expiries, deliberately: the carry book trades 7-14 DTE (its decay has to
+    fit inside the judged window) and the momentum book trades 14-45, so a
+    single-expiry fixture would silently make one of them untestable.
+    """
+    return _expiry_slice(today, 10) + _expiry_slice(today, 21)
 
 
 @pytest.fixture
@@ -255,3 +273,116 @@ def frozen_clock():
         )
 
     return at
+
+
+# --------------------------------------------------------------------------- #
+# Intraday fixtures
+# --------------------------------------------------------------------------- #
+def five_minute_bars(
+    session_days: int = 4,
+    last_session_bars: int = 18,
+    base: float = 500.0,
+    bucket_volume: float = 100_000.0,
+    breakout: bool = True,
+    start: dt.date = dt.date(2026, 8, 24),
+) -> list[dict]:
+    """Several full 5-minute sessions plus a partial current one.
+
+    The prior sessions exist so the time-of-day volume baseline has something
+    to compare against: 09:45 volume is not comparable to 12:30 volume, and a
+    flat daily average would make lunchtime look permanently dead.
+    """
+    rows: list[dict] = []
+    day = start
+
+    def push(stamp: dt.datetime, close: float, volume: float) -> None:
+        rows.append({
+            "timestamp": stamp,
+            "open": close * 0.9995,
+            "high": close * 1.0008,
+            "low": close * 0.9992,
+            "close": close,
+            "volume": volume,
+        })
+
+    for d in range(session_days):
+        while day.weekday() >= 5:
+            day += dt.timedelta(days=1)
+        stamp = dt.datetime.combine(day, dt.time(9, 30))
+        for i in range(78):
+            drift = 0.15 if i % 2 else -0.15
+            # Real volume varies within a bucket across days; a fixture with
+            # zero dispersion would make the z-score undefined rather than high.
+            jitter = 1.0 + 0.08 * ((d * 7 + i) % 5 - 2)
+            push(stamp, base + drift, bucket_volume * jitter)
+            stamp += dt.timedelta(minutes=5)
+        day += dt.timedelta(days=1)
+
+    while day.weekday() >= 5:
+        day += dt.timedelta(days=1)
+    stamp = dt.datetime.combine(day, dt.time(9, 30))
+    # Chop below the developing VWAP, then a genuine expansion through it.
+    path = [
+        499.9, 499.6, 499.9, 499.5, 499.8, 499.4, 499.7, 499.3,
+        499.6, 499.2, 499.5, 499.1, 499.4, 499.0, 499.3,
+        500.4, 501.4, 502.3,          # the expansion through session VWAP
+    ][:last_session_bars]
+    if not breakout:
+        path = [499.9, 499.6] * (last_session_bars // 2)
+    for i, close in enumerate(path):
+        volume = bucket_volume
+        if breakout and i >= len(path) - 5:
+            volume = bucket_volume * 2.2
+        push(stamp, close, volume)
+        stamp += dt.timedelta(minutes=5)
+    return rows
+
+
+@pytest.fixture
+def intraday_chain() -> list[OptionQuote]:
+    """A 0-2 DTE chain around the intraday fixture's session date.
+
+    The intraday book buys 0-2 DTE for maximum gamma per dollar, so it cannot
+    be tested against the carry book's 7-21 DTE chain.
+    """
+    asof = dt.date(2026, 8, 28)
+    # A penny-wide market, which is what SPY 0-2 DTE actually quotes at. The
+    # carry book's fixture is deliberately wider; using it here would test the
+    # wrong instrument and make the spread gate look impossible rather than
+    # merely strict.
+    return _expiry_slice(asof, 1, vol=0.18, half_spread=0.005) + _expiry_slice(
+        asof, 2, vol=0.18, half_spread=0.005
+    )
+
+
+@pytest.fixture
+def intraday_bars() -> list[dict]:
+    return five_minute_bars()
+
+
+@pytest.fixture
+def choppy_intraday_bars() -> list[dict]:
+    return five_minute_bars(breakout=False)
+
+
+@pytest.fixture
+def attention():
+    """A movers snapshot with confirming breadth and a volume ranking."""
+    from oaa.discovery.score import AttentionSnapshot, SymbolAttention
+
+    return AttentionSnapshot(
+        asof=dt.datetime(2026, 8, 28, 14, 40, tzinfo=dt.timezone.utc),
+        symbols={
+            "SPY": SymbolAttention(
+                symbol="SPY", score=0.9,
+                raw={"most_actives": {"volume": 90_000_000}},
+                percent_change=0.9, direction="up", news_velocity=3.0,
+            ),
+            "QQQ": SymbolAttention(
+                symbol="QQQ", score=0.6,
+                raw={"most_actives": {"volume": 40_000_000}},
+                percent_change=0.7, direction="up",
+            ),
+        },
+        breadth={"gainers": 17, "losers": 3},
+    )

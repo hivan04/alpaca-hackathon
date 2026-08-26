@@ -1,0 +1,41 @@
+# =============================================================================
+# Scheduled macro calendar
+# -----------------------------------------------------------------------------
+# A STATIC file committed to the repo, deliberately. A live calendar feed that
+# fails on the morning of a print fails at exactly the moment it was needed,
+# and there is no upside to that trade.
+#
+# Two consumers:
+#   intraday_momentum §3.2  a scheduled print satisfies "catalyst_present" even
+#                           with no headline in the window
+#   event_premium           the only thing that wakes the opportunistic book
+#
+# `when` is UTC. US macro prints are 08:30 ET (12:30 UTC in EDT); FOMC
+# statements are 14:00 ET (18:00 UTC in EDT).
+# =============================================================================
+
+events:
+  - name: "US CPI (August)"
+    kind: cpi
+    when: "2026-09-10T12:30:00Z"
+    importance: high
+
+  - name: "US Non-Farm Payrolls (August)"
+    kind: nfp
+    when: "2026-09-04T12:30:00Z"
+    importance: high
+
+  - name: "ISM Manufacturing PMI"
+    kind: pmi
+    when: "2026-09-01T14:00:00Z"
+    importance: medium
+
+  - name: "ISM Services PMI"
+    kind: pmi
+    when: "2026-09-03T14:00:00Z"
+    importance: medium
+
+  - name: "FOMC rate decision"
+    kind: fomc
+    when: "2026-09-16T18:00:00Z"
+    importance: high

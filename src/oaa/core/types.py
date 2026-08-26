@@ -65,12 +65,6 @@ class StructureType(str, Enum):
     STRADDLE = "straddle"
     STRANGLE = "strangle"
     RATIO = "ratio"
-    # Pairs structures: cash equity legs plus a protective options overlay.
-    # PAIRS_COLLAR hedges BOTH legs (long put on the long, long call on the
-    # short), which is the only variant with a contractual maximum loss.
-    PAIRS_COLLAR = "pairs_collar"
-    PAIRS_PUT_HEDGE = "pairs_put_hedge"
-    PAIRS_NAKED = "pairs_naked"
 
     @property
     def is_defined_risk(self) -> bool:
@@ -78,18 +72,11 @@ class StructureType(str, Enum):
             StructureType.STRADDLE,
             StructureType.STRANGLE,
             StructureType.RATIO,
-            # Only the long leg is hedged - the short leg's upside is open.
-            StructureType.PAIRS_PUT_HEDGE,
-            StructureType.PAIRS_NAKED,
         }
 
     @property
-    def is_pairs(self) -> bool:
-        return self in {
-            StructureType.PAIRS_COLLAR,
-            StructureType.PAIRS_PUT_HEDGE,
-            StructureType.PAIRS_NAKED,
-        }
+    def is_multileg(self) -> bool:
+        return self is not StructureType.SINGLE_LONG
 
 
 class DecisionAction(str, Enum):
@@ -170,6 +157,10 @@ class MarketContext(Model):
     spot: float
     prev_close: float | None = None
     bars: list[dict[str, Any]] = Field(default_factory=list)
+    #: Intraday bars (5m by default) for the momentum book. Daily bars cannot
+    #: express a session VWAP, and a VWAP that bleeds across days anchors to
+    #: yesterday's value area rather than the level anyone is trading against.
+    intraday_bars: list[dict[str, Any]] = Field(default_factory=list)
     chain: list[OptionQuote] = Field(default_factory=list)
     realised_vol: float | None = None
     implied_vol: float | None = None

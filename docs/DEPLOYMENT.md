@@ -2,7 +2,7 @@
 
 ## Where this should run
 
-**Not on your laptop.** The design turns on 15:15 and 15:54 ET firing on time. A
+**Not on your laptop.** The design turns on 15:15 and 15:45 ET firing on time. A
 machine that sleeps, drops wifi, or gets closed at 20:00 BST (= 15:00 ET) misses
 the cutoff — and that is precisely the failure the firewall exists to prevent.
 
@@ -96,8 +96,8 @@ breakpoint in the risk engine and step through a real decision:
 | Target | What it does |
 |---|---|
 | doctor | dependency and credential check |
-| firewall (now) / (simulate 15:54) | inspect the phase machine |
-| signal: KO/PEP | Kalman state + tonight's gap forecast |
+| firewall (now) / (simulate 15:15) | inspect the phase machine |
+| scan --cycle carry_scan | the four premium gates across the universe |
 | backtest: overnight | full walk-forward, writes a CSV |
 | agent: overnight_signal | the assistant reasoning over MCP |
 | scan (dry) | one intraday cycle, no orders |
@@ -120,7 +120,7 @@ Run this before leaving it unattended on the judged account:
 oaa doctor --profile judged      # deps, credentials, options level, connection
 ./scripts/verify_accounts.sh     # dev and judged are genuinely different
 oaa firewall                     # boundaries look right, clock is ET
-oaa pairs                        # universe is screened, not the shipped candidates
+oaa strategies                   # the enabled books and their gates
 oaa scan --profile dev           # behaviour is sane on the throwaway account
 date                             # host clock and TZ
 ```
@@ -147,5 +147,5 @@ the account trade from a browser. That is the URL to put in the submission's
 | Stop opening new positions | `OAA_EXECUTION__DRY_RUN=true` then restart the process |
 | Stop everything, keep positions | `pm2 stop oaa-judged` (finishes the current cycle) |
 | Close everything now | `oaa flatten --profile judged --yes` |
-| The 15:15 cutoff failed | `oaa journal` for the `firewall_cutoff` event, then flatten manually. The overnight book will have refused to trade — that part worked |
+| The 15:15 cutoff failed | `oaa journal` for the `firewall_cutoff` event, then flatten the transient legs manually. The 15:45 verification will have disabled the transient books for tomorrow — that part worked |
 | Host rebooted mid-session | The runner fires late cycles on startup, so a restart at 15:20 still runs the 15:15 cutoff |

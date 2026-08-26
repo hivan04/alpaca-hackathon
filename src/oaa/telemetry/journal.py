@@ -194,6 +194,29 @@ class Journal:
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
 
+    def events(self, kind: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Replay structured events from the append-only JSONL journal.
+
+        The gate rejection log lives here rather than in SQLite: it is the
+        highest-value artefact for judging (it shows the agent DECLINING trades
+        and why), and an append-only file is the least corruptible place for it.
+        """
+        if not self.journal_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        with self.journal_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if kind is None or record.get("kind") == kind:
+                    rows.append(record)
+        return list(reversed(rows))[:limit]
+
     def fills(self, limit: int = 200) -> list[dict[str, Any]]:
         with self._connect() as conn:
             return [

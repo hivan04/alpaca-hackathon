@@ -213,7 +213,7 @@ def test_a_shared_catalyst_is_not_flagged():
     lens = MacroLens(cfg=None)
     view = lens.view(
         snapshot_with({"SNDK": 6.0, "MU": 5.5}),
-        strategies=["overnight_pairs"],
+        strategies=["vol_carry"],
         pairs=[("SNDK", "MU")],
     )
     assert "SNDK" not in view.flagged_symbols
@@ -225,7 +225,7 @@ def test_an_idiosyncratic_catalyst_flags_only_the_moving_leg():
     lens = MacroLens(cfg=None)
     view = lens.view(
         snapshot_with({"SNDK": 8.0, "MU": 1.0}),
-        strategies=["overnight_pairs"],
+        strategies=["vol_carry"],
         pairs=[("SNDK", "MU")],
     )
     assert "SNDK" in view.flagged_symbols
@@ -254,7 +254,7 @@ def test_garbage_from_the_model_falls_back_rather_than_widening_risk():
     fallback = MacroView(regime="risk_off", overnight_risk=0.8)
     view = lens._parse(
         {"regime": "banana", "overnight_risk": "very high", "guidance": {"x": "YOLO"}},
-        ["overnight_pairs"], fallback,
+        ["vol_carry"], fallback,
     )
     assert view.regime == "risk_off"          # kept the fallback
     assert view.overnight_risk == 0.8

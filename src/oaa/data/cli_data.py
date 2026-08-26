@@ -216,6 +216,33 @@ class AlpacaCliDataProvider(MarketDataProvider):
         key = f"chain:{symbol}:{min_dte}:{max_dte}:{strike_low}:{strike_high}"
         return self._cached(key, fetch)
 
+    def news(self, symbol: str, limit: int | None = None) -> list[dict[str, Any]]:
+        """Recent headlines for one symbol via `alpaca data news`.
+
+        Alpaca answers this itself, so there is no scraper to maintain, no ToS
+        exposure, and nothing to break on day three of a seven-day window.
+        """
+        cap = int(limit or self.cfg.data.news_limit)
+        hours = int(self.cfg.data.news_lookback_hours)
+        start = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+
+        def fetch() -> list[dict[str, Any]]:
+            args = [
+                "data", "news",
+                "--symbols", symbol,
+                "--limit", str(cap),
+                "--start", start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ]
+            payload = self.run(args)
+            rows = payload.get("news", payload) if isinstance(payload, dict) else payload
+            return [r for r in (rows or []) if isinstance(r, dict)]
+
+        try:
+            return self._cached(f"news:{symbol}:{cap}", fetch)
+        except DataError as exc:
+            log.debug("%s: no news (%s)", symbol, exc)
+            return []
+
     def option_contracts(self, symbol: str, **flags: Any) -> list[dict[str, Any]]:
         """Reference data via `alpaca option contracts` (open interest, tradability)."""
         args = ["option", "contracts", "--underlying-symbols", symbol]
@@ -246,12 +273,27 @@ class AlpacaCliDataProvider(MarketDataProvider):
             series.append(atm_iv)
             del series[:-120]
 
+        intraday: list[dict[str, Any]] = []
+        if self.cfg.data.fetch_intraday:
+            try:
+                intraday = self.bars(
+                    symbol,
+                    lookback_days=self.cfg.data.intraday_lookback_days,
+                    timeframe=self.cfg.data.intraday_timeframe,
+                )
+            except DataError as exc:
+                log.debug("%s: no intraday bars (%s)", symbol, exc)
+
+        headlines = self.news(symbol) if self.cfg.data.fetch_news else []
+
         return MarketContext(
             symbol=symbol,
             asof=dt.datetime.now(dt.timezone.utc),
             spot=spot,
             prev_close=history[-2]["close"] if len(history) > 1 else None,
             bars=history,
+            intraday_bars=intraday,
+            news=headlines,
             chain=chain,
             realised_vol=realised_vol(history, 20),
             implied_vol=atm_iv,

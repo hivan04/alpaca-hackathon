@@ -1,13 +1,27 @@
-"""The capital lock.
+"""The capital firewall.
 
-One account, two books, one lock. A book cannot open a position unless it
-holds the lock, and it cannot hold the lock unless the other book has been
-*proven* flat — not assumed flat, polled and confirmed.
+One account, three books, one lock discipline.
 
-This is deliberately paranoid. The failure it prevents is not "a strategy
-loses money", it is "the broker force-liquidates the account at 16:00 because
-4x intraday leverage was still on the books when the 2x Reg T limit applied".
-That failure is unrecoverable inside a one-week judged window.
+    carry           RESIDENT. Short-premium defined-risk structures held for
+                    3-10 sessions. Its margin requirement is reserved FIRST and
+                    is never lent to anyone else.
+    intraday        TRANSIENT tenant. Long options / debit verticals, flat by
+                    the 15:15 cutoff, every session, without exception.
+    opportunistic   TRANSIENT tenant on the same cutoff. Dormant by default.
+
+The purpose changed when the carry book became resident. It is no longer a
+nightly handoff of the whole account; it is a boundary that stops the transient
+books from consuming margin the resident book needs at the close.
+
+Three properties are enforced rather than assumed:
+
+  1. **Liquidation is confirmed, not requested.** A 200 from `close_all_positions`
+     means accepted, not filled. We poll until the book is provably flat.
+  2. **Working orders count as "not flat".** A resting order that fills at 15:59
+     is unexpected exposure into the close.
+  3. **The two books never hold conflicting claims on the same capital.** The
+     transient budget is computed from headroom *after* the carry book's
+     requirement is reserved, and it is measured on a fresh account poll.
 """
 
 from __future__ import annotations
@@ -21,27 +35,45 @@ from typing import Any
 from oaa.core.logging import get_logger
 from oaa.core.types import AccountSnapshot
 from oaa.firewall.clock import Phase, SessionClock, SessionTimes
+from oaa.firewall.ledger import PositionLedger
 
 log = get_logger("firewall")
 
 
 class Book(str, Enum):
+    CARRY = "carry"
     INTRADAY = "intraday"
-    OVERNIGHT = "overnight"
+    OPPORTUNISTIC = "opportunistic"
 
     @property
-    def other(self) -> Book:
-        return Book.OVERNIGHT if self is Book.INTRADAY else Book.INTRADAY
+    def is_transient(self) -> bool:
+        return self is not Book.CARRY
+
+    @property
+    def is_resident(self) -> bool:
+        return self is Book.CARRY
+
+    @classmethod
+    def parse(cls, value: str | None) -> Book:
+        try:
+            return cls(str(value or "intraday").strip().lower())
+        except ValueError:
+            return cls.INTRADAY
+
+
+TRANSIENT_BOOKS = (Book.INTRADAY, Book.OPPORTUNISTIC)
 
 
 @dataclass
 class LiquidationReport:
-    """What the hard cutoff actually achieved. Journalled verbatim."""
+    """What a cutoff actually achieved. Journalled verbatim."""
 
     triggered_at: dt.datetime
+    scope: str = "transient"
     orders_cancelled: int = 0
     positions_before: int = 0
     positions_after: int = 0
+    resident_untouched: int = 0
     attempts: int = 0
     confirmed_flat: bool = False
     errors: list[str] = field(default_factory=list)
@@ -53,24 +85,28 @@ class LiquidationReport:
     def summary(self) -> str:
         state = "FLAT" if self.confirmed_flat else "NOT FLAT"
         return (
-            f"cutoff {state}: cancelled {self.orders_cancelled} orders, "
-            f"{self.positions_before} -> {self.positions_after} positions "
-            f"in {self.attempts} attempt(s)"
+            f"{self.scope} cutoff {state}: cancelled {self.orders_cancelled} orders, "
+            f"{self.positions_before} -> {self.positions_after} position(s) "
+            f"in {self.attempts} attempt(s), {self.resident_untouched} resident leg(s) "
+            "left untouched"
             + (f", errors: {'; '.join(self.errors)}" if self.errors else "")
         )
 
 
 @dataclass
 class FirewallVerdict:
-    """The answer to 'may the overnight book trade, and with how much?'"""
+    """The answer to 'may this book trade, and with how much?'"""
 
     passed: bool
     book: Book
     phase: Phase
     checked_at: dt.datetime
     regt_buying_power: float = 0.0
+    carry_requirement: float = 0.0
     allocated_budget: float = 0.0
     open_positions: int = 0
+    transient_positions: int = 0
+    resident_positions: int = 0
     open_orders: int = 0
     emergency_liquidated: bool = False
     checks: dict[str, bool] = field(default_factory=dict)
@@ -83,8 +119,11 @@ class FirewallVerdict:
             "phase": self.phase.value,
             "checked_at": self.checked_at.isoformat(),
             "regt_buying_power": self.regt_buying_power,
+            "carry_requirement": self.carry_requirement,
             "allocated_budget": self.allocated_budget,
             "open_positions": self.open_positions,
+            "transient_positions": self.transient_positions,
+            "resident_positions": self.resident_positions,
             "open_orders": self.open_orders,
             "emergency_liquidated": self.emergency_liquidated,
             "checks": self.checks,
@@ -95,30 +134,39 @@ class FirewallVerdict:
         head = "PASS" if self.passed else "BLOCK"
         return (
             f"[{head}] {self.book.value} @ {self.phase.value} | "
-            f"RegT ${self.regt_buying_power:,.0f} -> budget ${self.allocated_budget:,.0f}"
+            f"RegT ${self.regt_buying_power:,.0f} - carry ${self.carry_requirement:,.0f} "
+            f"-> budget ${self.allocated_budget:,.0f}"
             + (f" | {'; '.join(self.reasons)}" if self.reasons else "")
         )
 
 
 @dataclass
 class LockState:
-    owner: Book | None = None
-    acquired_at: dt.datetime | None = None
+    """Who holds what. The carry reservation and the transient lease coexist by
+    construction: the lease is computed from what the reservation leaves."""
+
+    carry_reserved: float = 0.0
+    carry_reserved_at: dt.datetime | None = None
+    transient_owner: Book | None = None
+    transient_budget: float = 0.0
+    transient_acquired_at: dt.datetime | None = None
     session_date: dt.date | None = None
-    budget: float = 0.0
-    intraday_disabled_until: dt.date | None = None
+    transient_disabled_until: dt.date | None = None
     last_cutoff: LiquidationReport | None = None
     last_verdict: FirewallVerdict | None = None
+    last_carry_verification: FirewallVerdict | None = None
+    flattened_for_submission: bool = False
 
 
 class TemporalFirewall:
-    """Sequential lock-and-verify between the intraday and overnight books."""
+    """Temporal windows plus a capital boundary between resident and transient."""
 
     def __init__(
         self,
         cfg: Any,
         journal: Any = None,
         clock: SessionClock | None = None,
+        ledger: PositionLedger | None = None,
     ) -> None:
         self.cfg = cfg
         self.settings = getattr(cfg, "firewall", None)
@@ -132,6 +180,8 @@ class TemporalFirewall:
             times=times,
             timezone=getattr(getattr(cfg, "schedule", None), "timezone", "America/New_York"),
         )
+        ledger_path = getattr(self.settings, "ledger_path", None) if self.settings else None
+        self.ledger = ledger if ledger is not None else PositionLedger.load(ledger_path)
         self.state = LockState()
 
     # ------------------------------------------------------------------ #
@@ -145,40 +195,226 @@ class TemporalFirewall:
         return self.clock.phase(now)
 
     def holder(self) -> Book | None:
-        return self.state.owner
+        """Which transient book currently holds the lease, if any."""
+        return self.state.transient_owner
 
     def budget_for(self, book: Book) -> float:
-        return self.state.budget if self.state.owner is book else 0.0
+        if book.is_resident:
+            return self.state.carry_reserved
+        return self.state.transient_budget if self.state.transient_owner is book else 0.0
+
+    def _setting(self, name: str, default: Any) -> Any:
+        value = getattr(self.settings, name, None) if self.settings else None
+        return default if value is None else value
 
     # ------------------------------------------------------------------ #
     # Layer 1 - temporal
     # ------------------------------------------------------------------ #
     def may_open(self, book: Book, now: dt.datetime | None = None) -> tuple[bool, str]:
-        """Is this book inside its own window, and does it hold the lock?"""
+        """Is this book inside its own window, and does it hold its claim?"""
         if not self.enabled:
             return True, "firewall disabled"
 
         moment = self.clock.to_et(now) if now else self.clock.now()
         phase = self.phase(moment)
 
-        if book is Book.INTRADAY:
-            if self.state.intraday_disabled_until == moment.date():
-                return False, "intraday book locked for the day by the 15:15 cutoff"
-            if not phase.intraday_may_open:
-                return False, f"intraday book may not open during phase '{phase.value}'"
-        else:
-            if not phase.overnight_may_open:
-                return False, f"overnight book may not open during phase '{phase.value}'"
+        if self.state.flattened_for_submission:
+            return False, "the book has been flattened for submission - no new entries"
 
-        owner = self.state.owner
-        if owner is not None and owner is not book:
-            return False, f"capital lock is held by the {owner.value} book"
-        if book is Book.OVERNIGHT and owner is not Book.OVERNIGHT:
-            return False, "overnight book has not passed 15:54 verification"
+        if book.is_resident:
+            if not phase.carry_may_open:
+                return False, f"carry book may not open during phase '{phase.value}'"
+            if self.state.carry_reserved <= 0:
+                return False, "carry book has no reserved capital - run the carry allocation"
+            return True, "ok"
+
+        # -- transient books ------------------------------------------------ #
+        if self.state.transient_disabled_until == moment.date():
+            return False, f"{book.value} book is locked out for the session"
+        if not phase.intraday_may_open:
+            return False, f"{book.value} book may not open during phase '{phase.value}'"
+
+        owner = self.state.transient_owner
+        if owner is None:
+            return False, f"{book.value} book has not acquired the transient lease"
+        if owner is not book:
+            return False, f"the transient lease is held by the {owner.value} book"
+        if self.state.transient_budget <= 0:
+            return False, "no transient headroom left once the carry book is reserved"
         return True, "ok"
 
     # ------------------------------------------------------------------ #
-    # 15:15 - the intraday hard cutoff
+    # capital allocation
+    # ------------------------------------------------------------------ #
+    def carry_requirement(self, snapshot: AccountSnapshot) -> float:
+        """Margin the resident book is currently consuming.
+
+        Measured from live marks on the legs the ledger attributes to the carry
+        book, not from a cached number computed at entry.
+        """
+        resident, _ = self.ledger.split(snapshot.positions)
+        return round(sum(abs(p.market_value) for p in resident), 2)
+
+    def allocate_carry(
+        self, broker: Any, now: dt.datetime | None = None
+    ) -> FirewallVerdict:
+        """Reserve the resident book's capital before anything else can bid for it."""
+        moment = self.clock.to_et(now) if now else self.clock.now()
+        phase = self.phase(moment)
+        verdict = FirewallVerdict(
+            passed=False, book=Book.CARRY, phase=phase, checked_at=moment
+        )
+
+        if not self.enabled:
+            verdict.passed = True
+            verdict.allocated_budget = float("inf")
+            verdict.checks["firewall_enabled"] = False
+            verdict.reasons.append("firewall disabled in config")
+            self.state.carry_reserved = verdict.allocated_budget
+            return verdict
+
+        if not phase.carry_may_open:
+            verdict.checks["window"] = False
+            verdict.reasons.append(
+                f"carry entries run {self.clock.times.carry_entry_start:%H:%M}-"
+                f"{self.clock.times.carry_entry_end:%H:%M} ET; phase is '{phase.value}'"
+            )
+            self._record(verdict)
+            return verdict
+        verdict.checks["window"] = True
+
+        try:
+            snapshot: AccountSnapshot = broker.account()
+        except Exception as exc:  # noqa: BLE001
+            verdict.checks["account_reachable"] = False
+            verdict.reasons.append(f"could not poll the account: {exc}")
+            self._record(verdict)
+            return verdict
+        verdict.checks["account_reachable"] = True
+
+        self.ledger.reconcile([p.symbol for p in snapshot.positions])
+        resident, transient = self.ledger.split(snapshot.positions)
+        verdict.open_positions = len(snapshot.positions)
+        verdict.resident_positions = len(resident)
+        verdict.transient_positions = len(transient)
+        verdict.open_orders = snapshot.open_orders
+
+        used = round(sum(abs(p.market_value) for p in resident), 2)
+        verdict.carry_requirement = used
+        verdict.regt_buying_power = round(
+            snapshot.regt_buying_power or snapshot.buying_power or 0.0, 2
+        )
+
+        ceiling = snapshot.equity * float(self._setting("carry_max_equity_pct", 0.50))
+        headroom = max(0.0, ceiling - used)
+        verdict.allocated_budget = round(headroom, 2)
+        self.state.carry_reserved = round(max(used, ceiling), 2)
+        self.state.carry_reserved_at = moment
+        verdict.checks["capacity"] = headroom > 0
+        verdict.passed = headroom > 0
+        if not verdict.passed:
+            verdict.reasons.append(
+                f"carry book is at its ${ceiling:,.0f} ceiling (${used:,.0f} used)"
+            )
+        log.info(verdict.summary())
+        self._record(verdict)
+        return verdict
+
+    def acquire_transient(
+        self, broker: Any, book: Book = Book.INTRADAY, now: dt.datetime | None = None
+    ) -> FirewallVerdict:
+        """Lease the transient books whatever the resident book is not using.
+
+        This is the capital half of the firewall. The lease is derived from a
+        FRESH account poll with the carry requirement subtracted first, so the
+        two books cannot both believe they own the same dollar.
+        """
+        moment = self.clock.to_et(now) if now else self.clock.now()
+        phase = self.phase(moment)
+        verdict = FirewallVerdict(passed=False, book=book, phase=phase, checked_at=moment)
+
+        if not self.enabled:
+            verdict.passed = True
+            self.state.transient_owner = book
+            self.state.transient_budget = float("inf")
+            return verdict
+
+        if self.state.transient_disabled_until == moment.date():
+            verdict.checks["not_locked_out"] = False
+            verdict.reasons.append("transient books are locked out for this session")
+            self._record(verdict)
+            return verdict
+        verdict.checks["not_locked_out"] = True
+
+        if not phase.intraday_may_open:
+            verdict.checks["window"] = False
+            verdict.reasons.append(
+                f"{book.value} entries are closed during phase '{phase.value}'"
+            )
+            self._record(verdict)
+            return verdict
+        verdict.checks["window"] = True
+
+        try:
+            snapshot = broker.account()
+        except Exception as exc:  # noqa: BLE001
+            verdict.checks["account_reachable"] = False
+            verdict.reasons.append(f"could not poll the account: {exc}")
+            self._record(verdict)
+            return verdict
+        verdict.checks["account_reachable"] = True
+
+        self.ledger.reconcile([p.symbol for p in snapshot.positions])
+        resident, transient = self.ledger.split(snapshot.positions)
+        verdict.open_positions = len(snapshot.positions)
+        verdict.resident_positions = len(resident)
+        verdict.transient_positions = len(transient)
+        verdict.open_orders = snapshot.open_orders
+
+        carry_used = round(sum(abs(p.market_value) for p in resident), 2)
+        carry_reserve = max(carry_used, self.state.carry_reserved)
+        verdict.carry_requirement = round(carry_reserve, 2)
+
+        regt = snapshot.regt_buying_power
+        if regt is None or regt <= 0:
+            regt = snapshot.buying_power
+            verdict.checks["regt_available"] = False
+            verdict.reasons.append("regt_buying_power unavailable; fell back to buying_power")
+        else:
+            verdict.checks["regt_available"] = True
+        verdict.regt_buying_power = round(regt or 0.0, 2)
+
+        # THE line that makes the two books disjoint: the resident book's
+        # requirement comes off the top before anything is leased out.
+        utilisation = float(self._setting("transient_utilisation", 0.50))
+        headroom = max(0.0, (regt or 0.0) - carry_reserve) * utilisation
+        equity_cap = snapshot.equity * float(self._setting("transient_max_equity_pct", 0.15))
+        budget = round(min(headroom, equity_cap), 2)
+        verdict.allocated_budget = budget
+
+        minimum = float(self._setting("min_trade_value", 500.0))
+        if budget < minimum:
+            verdict.checks["min_size"] = False
+            verdict.reasons.append(
+                f"transient headroom ${budget:,.0f} is below the minimum viable "
+                f"trade size ${minimum:,.0f} once the carry book is reserved"
+            )
+            self._record(verdict)
+            return verdict
+        verdict.checks["min_size"] = True
+
+        self.state.transient_owner = book
+        self.state.transient_budget = budget
+        self.state.transient_acquired_at = moment
+        self.state.session_date = moment.date()
+        verdict.passed = True
+        log.info(verdict.summary())
+        self._journal("firewall_lock", action="acquire", book=book.value, budget=budget)
+        self._record(verdict)
+        return verdict
+
+    # ------------------------------------------------------------------ #
+    # 15:15 - the transient hard cutoff
     # ------------------------------------------------------------------ #
     def run_intraday_cutoff(
         self,
@@ -186,28 +422,38 @@ class TemporalFirewall:
         now: dt.datetime | None = None,
         confirm_attempts: int | None = None,
         confirm_delay: float | None = None,
+        scope: str = "transient",
     ) -> LiquidationReport:
-        """Cancel everything, liquidate the day book, then CONFIRM it is flat.
+        """Cancel working orders, liquidate the TRANSIENT books, confirm flat.
 
         Confirmation is the part most implementations skip. `close_all_positions`
-        returning 200 means the orders were accepted, not that they filled — and
-        an unfilled liquidation at 15:15 is exactly the state this whole system
-        exists to prevent.
+        returning 200 means the orders were accepted, not that they filled - and
+        an unfilled liquidation at 15:15 is exactly the state this exists to
+        prevent. Resident carry legs are deliberately left alone.
         """
         moment = self.clock.to_et(now) if now else self.clock.now()
-        attempts_cap = confirm_attempts if confirm_attempts is not None else (
-            self.settings.liquidation_confirm_attempts if self.settings else 4
+        attempts_cap = int(
+            confirm_attempts
+            if confirm_attempts is not None
+            else self._setting("liquidation_confirm_attempts", 4)
         )
-        delay = confirm_delay if confirm_delay is not None else (
-            self.settings.liquidation_confirm_delay_seconds if self.settings else 5.0
+        delay = float(
+            confirm_delay
+            if confirm_delay is not None
+            else self._setting("liquidation_confirm_delay_seconds", 5.0)
         )
+        everything = scope == "all"
 
-        report = LiquidationReport(triggered_at=moment)
-        log.warning("INTRADAY HARD CUTOFF at %s", self.clock.describe(moment))
+        report = LiquidationReport(triggered_at=moment, scope=scope)
+        log.warning("%s HARD CUTOFF at %s", scope.upper(), self.clock.describe(moment))
 
         try:
             snapshot = broker.account()
-            report.positions_before = len(snapshot.positions)
+            self.ledger.reconcile([p.symbol for p in snapshot.positions])
+            resident, transient = self.ledger.split(snapshot.positions)
+            targets = snapshot.positions if everything else transient
+            report.positions_before = len(targets)
+            report.resident_untouched = 0 if everything else len(resident)
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"account poll failed: {exc}")
 
@@ -222,52 +468,60 @@ class TemporalFirewall:
         for attempt in range(1, attempts_cap + 1):
             report.attempts = attempt
             try:
-                remaining = broker.account().positions
+                snapshot = broker.account()
             except Exception as exc:  # noqa: BLE001
                 report.errors.append(f"account poll failed: {exc}")
                 break
 
-            if not remaining:
+            resident, transient = self.ledger.split(snapshot.positions)
+            remaining = snapshot.positions if everything else transient
+            report.resident_untouched = 0 if everything else len(resident)
+
+            if not remaining and snapshot.open_orders == 0:
                 report.confirmed_flat = True
                 report.positions_after = 0
                 break
 
             log.warning(
-                "cutoff attempt %d/%d: %d position(s) still open",
-                attempt, attempts_cap, len(remaining),
+                "cutoff attempt %d/%d: %d %s position(s) and %d working order(s) open",
+                attempt, attempts_cap, len(remaining), scope, snapshot.open_orders,
             )
             for position in remaining:
                 try:
                     broker.close_position(position.symbol)
+                    self.ledger.forget(position.symbol)
                 except Exception as exc:  # noqa: BLE001
                     report.errors.append(f"close {position.symbol}: {exc}")
             if attempt < attempts_cap:
                 time.sleep(delay)
         else:
             try:
-                report.positions_after = len(broker.account().positions)
+                snapshot = broker.account()
+                _, transient = self.ledger.split(snapshot.positions)
+                report.positions_after = len(
+                    snapshot.positions if everything else transient
+                )
             except Exception:  # noqa: BLE001
                 report.positions_after = -1
 
         if report.confirmed_flat:
-            # Lock the intraday book out for the rest of the day and hand the
-            # capital back, so the overnight book can claim it at 15:54.
-            self.state.intraday_disabled_until = moment.date()
-            if self.state.owner is Book.INTRADAY:
-                self.release(Book.INTRADAY)
-            log.info("intraday book flat and locked for %s", moment.date())
+            self.state.transient_disabled_until = moment.date()
+            self.release_transient()
+            log.info("transient books flat and locked for %s", moment.date())
         else:
             log.critical(
-                "INTRADAY BOOK DID NOT GO FLAT: %d position(s) remain. "
-                "Overnight entry will be blocked.", report.positions_after,
+                "TRANSIENT BOOKS DID NOT GO FLAT: %d position(s) remain. "
+                "Carry verification will fail.", report.positions_after,
             )
 
         self.state.last_cutoff = report
         self._journal("firewall_cutoff", **{
             "triggered_at": report.triggered_at.isoformat(),
+            "scope": report.scope,
             "orders_cancelled": report.orders_cancelled,
             "positions_before": report.positions_before,
             "positions_after": report.positions_after,
+            "resident_untouched": report.resident_untouched,
             "attempts": report.attempts,
             "confirmed_flat": report.confirmed_flat,
             "errors": report.errors,
@@ -275,22 +529,22 @@ class TemporalFirewall:
         return report
 
     # ------------------------------------------------------------------ #
-    # 15:54 - overnight pre-trade verification
+    # 15:45 - carry book verification
     # ------------------------------------------------------------------ #
-    def run_overnight_verification(
-        self,
-        broker: Any,
-        now: dt.datetime | None = None,
-        target_trade_value: float | None = None,
+    def run_carry_verification(
+        self, broker: Any, now: dt.datetime | None = None
     ) -> FirewallVerdict:
-        """Prove flat, read fresh Reg T buying power, size against it, take the lock.
+        """Confirm no residual transient exposure and that carry margin is covered.
 
-        Order matters: positions are checked *before* buying power is read, so
-        the number we size against is measured in a state we have verified.
+        This is where the day is signed off. It does not open anything; it
+        proves the resident book can survive the close on its own margin, and
+        it decides whether the transient books are allowed to trade tomorrow.
         """
         moment = self.clock.to_et(now) if now else self.clock.now()
         phase = self.phase(moment)
-        verdict = FirewallVerdict(passed=False, book=Book.OVERNIGHT, phase=phase, checked_at=moment)
+        verdict = FirewallVerdict(
+            passed=False, book=Book.CARRY, phase=phase, checked_at=moment
+        )
 
         if not self.enabled:
             verdict.passed = True
@@ -298,191 +552,148 @@ class TemporalFirewall:
             verdict.reasons.append("firewall disabled in config")
             return verdict
 
-        # -- window ------------------------------------------------------- #
-        if phase not in (Phase.OVERNIGHT_VERIFY, Phase.OVERNIGHT_ENTRY):
+        if phase not in (Phase.CARRY_VERIFY, Phase.INTRADAY_CUTOFF, Phase.CLOSED):
             verdict.checks["window"] = False
             verdict.reasons.append(
-                f"verification runs at {self.clock.times.overnight_verify:%H:%M} ET, "
+                f"carry verification runs at {self.clock.times.carry_verification:%H:%M} ET, "
                 f"current phase is '{phase.value}'"
             )
-            self._record(verdict)
+            self._record(verdict, carry=True)
             return verdict
         verdict.checks["window"] = True
 
-        # -- fresh account poll ------------------------------------------- #
         try:
             snapshot: AccountSnapshot = broker.account()
         except Exception as exc:  # noqa: BLE001
             verdict.checks["account_reachable"] = False
             verdict.reasons.append(f"could not poll the account: {exc}")
-            self._record(verdict)
+            self._disable_transient_next_session(moment)
+            self._record(verdict, carry=True)
             return verdict
         verdict.checks["account_reachable"] = True
+
+        self.ledger.reconcile([p.symbol for p in snapshot.positions])
+        resident, transient = self.ledger.split(snapshot.positions)
         verdict.open_positions = len(snapshot.positions)
+        verdict.resident_positions = len(resident)
+        verdict.transient_positions = len(transient)
         verdict.open_orders = snapshot.open_orders
 
-        # -- rogue intraday positions ------------------------------------- #
-        if verdict.open_positions > 0 or verdict.open_orders > 0:
+        # -- residual transient exposure ---------------------------------- #
+        if transient or snapshot.open_orders > 0:
             log.critical(
-                "CRITICAL RISK: %d position(s) and %d working order(s) still open at %s",
-                verdict.open_positions, verdict.open_orders, moment.strftime("%H:%M ET"),
+                "CRITICAL RISK: %d transient position(s) and %d working order(s) "
+                "still open at %s", len(transient), snapshot.open_orders,
+                moment.strftime("%H:%M ET"),
             )
-            verdict.checks["flat_before_entry"] = False
+            verdict.checks["transient_flat"] = False
             verdict.reasons.append(
-                f"{verdict.open_positions} position(s) and {verdict.open_orders} "
-                "order(s) open when the book should be cash"
+                f"{len(transient)} transient position(s) and {snapshot.open_orders} "
+                "working order(s) open when only the carry book should remain"
             )
-            if self.settings is None or self.settings.emergency_liquidate:
+            if bool(self._setting("emergency_liquidate", True)):
                 report = self.run_intraday_cutoff(broker, now=moment)
                 verdict.emergency_liquidated = True
                 verdict.reasons.append(report.summary())
-            # Abort regardless. A book that needed rescuing at 15:54 does not
-            # get to put on a fresh overnight position ninety seconds later.
-            verdict.reasons.append("overnight entry aborted for this session")
-            self._record(verdict)
+            self._disable_transient_next_session(moment)
+            verdict.reasons.append("transient books disabled for the following session")
+            self._record(verdict, carry=True)
             return verdict
-        verdict.checks["flat_before_entry"] = True
+        verdict.checks["transient_flat"] = True
 
-        # -- Reg T buying power ------------------------------------------- #
+        # -- fresh Reg T, carry margin covered with headroom ---------------- #
         regt = snapshot.regt_buying_power
         if regt is None or regt <= 0:
-            # Fall back to the generic figure, but say so loudly - the whole
-            # point of this check is to size against the *overnight* limit.
             regt = snapshot.buying_power
-            verdict.reasons.append(
-                "regt_buying_power unavailable; fell back to buying_power"
-            )
             verdict.checks["regt_available"] = False
+            verdict.reasons.append("regt_buying_power unavailable; fell back to buying_power")
         else:
             verdict.checks["regt_available"] = True
-        verdict.regt_buying_power = round(regt, 2)
+        verdict.regt_buying_power = round(regt or 0.0, 2)
 
-        if regt <= 0:
-            verdict.checks["buying_power"] = False
-            verdict.reasons.append("no overnight buying power available")
-            self._record(verdict)
-            return verdict
-        verdict.checks["buying_power"] = True
-
-        # -- sizing --------------------------------------------------------- #
-        utilisation = self.settings.overnight_regt_utilisation if self.settings else 0.95
-        ceiling = regt * utilisation
-        equity_cap = snapshot.equity * (
-            self.settings.overnight_max_equity_pct if self.settings else 0.50
+        requirement = round(sum(abs(p.market_value) for p in resident), 2)
+        verdict.carry_requirement = requirement
+        cushion = float(self._setting("carry_margin_cushion", 1.25))
+        covered = (regt or 0.0) >= requirement * (cushion - 1.0)
+        headroom_ok = (
+            snapshot.leverage_headroom is None or snapshot.leverage_headroom <= 1.0
         )
-        budget = min(ceiling, equity_cap)
-        if target_trade_value is not None and target_trade_value > budget:
-            verdict.reasons.append(
-                f"target ${target_trade_value:,.0f} exceeds the verified budget; "
-                f"downscaled to ${budget:,.0f}"
-            )
-        elif target_trade_value is not None:
-            budget = target_trade_value
-        verdict.allocated_budget = round(max(0.0, budget), 2)
+        verdict.checks["carry_margin_covered"] = bool(covered and headroom_ok)
 
-        if verdict.allocated_budget < (self.settings.min_trade_value if self.settings else 500.0):
-            verdict.checks["min_size"] = False
+        if not verdict.checks["carry_margin_covered"]:
             verdict.reasons.append(
-                f"verified budget ${verdict.allocated_budget:,.0f} is below the "
-                "minimum viable trade size"
+                f"carry book requires ${requirement:,.0f} with only "
+                f"${regt or 0:,.0f} Reg T buying power behind it "
+                f"(leverage headroom {snapshot.leverage_headroom})"
             )
-            self._record(verdict)
+            self._disable_transient_next_session(moment)
+            self._record(verdict, carry=True)
             return verdict
-        verdict.checks["min_size"] = True
 
-        # -- take the lock --------------------------------------------------- #
-        self._acquire(Book.OVERNIGHT, moment, verdict.allocated_budget)
+        self.state.carry_reserved = requirement
+        verdict.allocated_budget = requirement
         verdict.passed = True
-        log.info(verdict.summary())
-        self._record(verdict)
+        log.info("carry verification passed: %s", verdict.summary())
+        self._record(verdict, carry=True)
         return verdict
 
     # ------------------------------------------------------------------ #
-    # 09:35 - overnight exit
+    # submission flatten
     # ------------------------------------------------------------------ #
-    def run_overnight_exit(self, broker: Any, now: dt.datetime | None = None) -> LiquidationReport:
-        """Liquidate the overnight book and hand the capital to the day book."""
-        moment = self.clock.to_et(now) if now else self.clock.now()
-        log.info("OVERNIGHT EXIT at %s", self.clock.describe(moment))
-        report = self.run_intraday_cutoff(broker, now=moment)
-        # The cutoff helper locks the *intraday* book by design; undo that here,
-        # because a clean 09:35 exit is precisely what frees the day to trade.
-        self.state.intraday_disabled_until = None
-        if report.confirmed_flat:
-            self.release(Book.OVERNIGHT)
-        self._journal("firewall_overnight_exit", confirmed_flat=report.confirmed_flat)
+    def run_submission_flatten(
+        self, broker: Any, now: dt.datetime | None = None
+    ) -> LiquidationReport:
+        """Close the entire book - resident included - with the same discipline.
+
+        Realised P&L on a flat account is unambiguous evidence. An open book at
+        judging asks a judge to trust a mid-price mark on a wide quote.
+        """
+        report = self.run_intraday_cutoff(broker, now=now, scope="all")
+        self.state.flattened_for_submission = True
+        self.state.carry_reserved = 0.0
+        self.release_transient()
+        self._journal("firewall_submission_flatten", confirmed_flat=report.confirmed_flat)
         return report
 
     # ------------------------------------------------------------------ #
     # lock mechanics
     # ------------------------------------------------------------------ #
-    def _acquire(self, book: Book, moment: dt.datetime, budget: float) -> None:
-        self.state.owner = book
-        self.state.acquired_at = moment
-        self.state.session_date = moment.date()
-        self.state.budget = budget
-        log.info("capital lock acquired by %s book (budget $%s)", book.value, f"{budget:,.0f}")
-        self._journal("firewall_lock", action="acquire", book=book.value, budget=budget)
-
-    def acquire_intraday(self, broker: Any, now: dt.datetime | None = None) -> FirewallVerdict:
-        """The day book's equivalent of the 15:54 gate, run at 10:00."""
-        moment = self.clock.to_et(now) if now else self.clock.now()
-        phase = self.phase(moment)
-        verdict = FirewallVerdict(passed=False, book=Book.INTRADAY, phase=phase, checked_at=moment)
-
-        if not self.enabled:
-            verdict.passed = True
-            return verdict
-
-        allowed, reason = self.may_open(Book.INTRADAY, moment)
-        verdict.checks["window"] = allowed
-        if not allowed:
-            verdict.reasons.append(reason)
-            self._record(verdict)
-            return verdict
-
-        try:
-            snapshot = broker.account()
-        except Exception as exc:  # noqa: BLE001
-            verdict.reasons.append(f"could not poll the account: {exc}")
-            self._record(verdict)
-            return verdict
-
-        verdict.open_positions = len(snapshot.positions)
-        if verdict.open_positions > 0:
-            # An overnight position still on at 10:00 means the 09:35 exit failed.
-            verdict.checks["flat_before_entry"] = False
-            verdict.reasons.append(
-                f"{verdict.open_positions} position(s) survived the 09:35 overnight exit"
+    def release_transient(self) -> None:
+        if self.state.transient_owner is not None:
+            log.info("transient lease released by %s", self.state.transient_owner.value)
+            self._journal(
+                "firewall_lock", action="release", book=self.state.transient_owner.value
             )
-            self._record(verdict)
-            return verdict
-        verdict.checks["flat_before_entry"] = True
-
-        dtbp = snapshot.daytrading_buying_power or snapshot.buying_power
-        utilisation = self.settings.intraday_dtbp_utilisation if self.settings else 0.50
-        verdict.regt_buying_power = round(snapshot.regt_buying_power or 0.0, 2)
-        verdict.allocated_budget = round(dtbp * utilisation, 2)
-        self._acquire(Book.INTRADAY, moment, verdict.allocated_budget)
-        verdict.passed = True
-        self._record(verdict)
-        return verdict
+        self.state.transient_owner = None
+        self.state.transient_budget = 0.0
+        self.state.transient_acquired_at = None
 
     def release(self, book: Book) -> None:
-        if self.state.owner is book:
-            self.state.owner = None
-            self.state.budget = 0.0
-            self.state.acquired_at = None
-            log.info("capital lock released by %s book", book.value)
-            self._journal("firewall_lock", action="release", book=book.value)
+        """Backwards-compatible release."""
+        if book.is_resident:
+            self.state.carry_reserved = 0.0
+            self.state.carry_reserved_at = None
+        elif self.state.transient_owner is book:
+            self.release_transient()
+
+    def _disable_transient_next_session(self, moment: dt.datetime) -> None:
+        """A book that needed rescuing does not get fresh leverage tomorrow."""
+        self.state.transient_disabled_until = moment.date() + dt.timedelta(days=1)
+        log.warning(
+            "transient books disabled for %s", self.state.transient_disabled_until
+        )
 
     def reset_day(self, session_date: dt.date | None = None) -> None:
-        """Clear the per-day locks. Called by the runner on a date rollover."""
-        self.state.intraday_disabled_until = None
-        self.state.owner = None
-        self.state.budget = 0.0
+        """Clear the per-day lease. The carry reservation survives by design."""
+        self.release_transient()
+        if (
+            self.state.transient_disabled_until is not None
+            and session_date is not None
+            and self.state.transient_disabled_until < session_date
+        ):
+            self.state.transient_disabled_until = None
         self.state.session_date = session_date
-        log.debug("firewall reset for %s", session_date)
+        log.debug("firewall rolled to %s", session_date)
 
     # ------------------------------------------------------------------ #
     def status(self) -> dict[str, Any]:
@@ -490,18 +701,29 @@ class TemporalFirewall:
             "enabled": self.enabled,
             "now_et": self.clock.describe(),
             "phase": self.phase().value,
-            "lock_owner": self.state.owner.value if self.state.owner else None,
-            "budget": self.state.budget,
-            "intraday_locked_for": (
-                self.state.intraday_disabled_until.isoformat()
-                if self.state.intraday_disabled_until else None
+            "carry_reserved": self.state.carry_reserved,
+            "transient_owner": (
+                self.state.transient_owner.value if self.state.transient_owner else None
             ),
+            "transient_budget": self.state.transient_budget,
+            "transient_disabled_until": (
+                self.state.transient_disabled_until.isoformat()
+                if self.state.transient_disabled_until else None
+            ),
+            "flattened_for_submission": self.state.flattened_for_submission,
+            "ledger": self.ledger.stats(),
             "last_cutoff": self.state.last_cutoff.summary() if self.state.last_cutoff else None,
             "last_verdict": self.state.last_verdict.summary() if self.state.last_verdict else None,
+            "last_carry_verification": (
+                self.state.last_carry_verification.summary()
+                if self.state.last_carry_verification else None
+            ),
         }
 
-    def _record(self, verdict: FirewallVerdict) -> None:
+    def _record(self, verdict: FirewallVerdict, carry: bool = False) -> None:
         self.state.last_verdict = verdict
+        if carry:
+            self.state.last_carry_verification = verdict
         self._journal("firewall_verify", **verdict.as_dict())
 
     def _journal(self, kind: str, **fields: Any) -> None:

@@ -18,7 +18,7 @@ Not *"is this name hot"* — **"is it hot for a reason its pair partner shares?"
 | SNDK announces a customer-specific supply deal. MU doesn't move | the spread dislocates on news that **will never mean-revert** | idiosyncratic — **flag that leg** |
 
 Identical attention scores. Opposite implications. A z-score cannot tell them
-apart; it requires reading *why*. The overnight book is hedged against market
+apart; it requires reading *why*. The carry book is hedged against range, not
 moves, not against headlines, so asymmetric news is precisely how a
 market-neutral pair loses money.
 
@@ -29,7 +29,7 @@ than `stand_down`.
 
 ## Two disciplines, enforced in code
 
-**1. Attention generates candidates; cointegration still decides.**
+**1. Attention generates candidates; the premium gates still decide.**
 
 A name that just became hot is one whose historical relationship may be
 breaking. The test itself is unaffected — being hot today does not change a
@@ -89,10 +89,11 @@ external:
 A buzz list is full of things you cannot trade this strategy on. In rejection
 order:
 
-- **not shortable / hard to borrow** — the one that bites silently. The pairs
-  trade shorts a leg, so an unborrowable candidate fails at 15:55 with the
+- **not shortable / hard to borrow** — retained as a liquidity proxy rather than
+  a hard requirement now that no strategy shorts stock. A name nobody will lend
+  is usually a name whose options quote badly. It previously failed at 15:55 with the
   collar already bought
-- **leveraged or inverse** — daily-rebalance decay means they cointegrate with
+- **leveraged or inverse** — daily-rebalance decay means their implied vol has
   nothing. They appear in most-actives constantly
 - **no listed options** — cannot be collared, so cannot be held overnight
 - price outside bounds, insufficient history
@@ -105,40 +106,46 @@ candidate; taking only today's top twenty throws away yesterday.
 **Ranks by persistence before intensity.** Seen on four of five days beats one
 loud spike — a durable theme beats a headline.
 
-**Additive-only.** Pairs enter the live universe when they pass cointegration
+**Additive-only.** Symbols enter the live universe when they pass the gates
 and are never dropped for falling off a buzz list. Churning the tradable set is
 chasing, and chasing is what destroys a mean-reversion strategy.
 
 Seeds (hand-picked, economically-linked names) are always screened and never
 evicted.
 
-## Multiple testing — read this before widening the pool
+## Attention generates candidates; the gates still decide
 
-N symbols means N×(N−1) ordered cointegration tests. **24 symbols is 552 tests**,
-and at a flat `p < 0.05` you would expect roughly 27 "cointegrated" pairs from
-pure noise — indistinguishable from the real ones.
+Nothing discovery produces can approve a trade. It contributes two things and
+only two:
 
-`find_pairs.py` applies FDR control by default, tightening the threshold with
-the size of the pool. Disable it with `--no-fdr` only if you know why.
+1. a **candidate pool** — names worth pushing through the carry book's four hard
+   premium gates, which are the things that actually decide
+2. a **regime read** — `guidance` (trade / reduce / stand_down) and a
+   `size_multiplier` bounded at 1.0, so the lens can only ever *reduce*
 
-Statistical significance alone is not enough. **Require economic rationale too**
-— same sector, a real supply-chain link, a spin-off relationship. SNDK/MU passes
-on rationale; SNDK/Chipotle might produce a beautiful p-value and be pure data
-mining.
+The judgement that matters is shared versus idiosyncratic. Sector-wide IV
+elevation with no name-specific catalyst is exactly the premium the carry book
+exists to sell. A name repricing on its own news carries a fat tail the numeric
+gates cannot see, and that is a veto. Both look identical in a volume count;
+telling them apart needs reading, which is the one thing a language model does
+better than a feature vector.
+
+The polarity **inverts** for the intraday book: there, a shared catalyst is a
+reason to trade (a broad move continues) and *no* catalyst is the veto (a VWAP
+cross with no mechanism is drift, and drift reverts).
 
 ## Using it
 
 ```bash
-oaa discover                  # attention ranking + tonight's regime read
+oaa discover                  # attention ranking + today's regime read
 oaa discover --no-llm         # deterministic breadth rule, zero token cost
 oaa pool                      # the accumulated candidate pool
-
-python scripts/find_pairs.py --from-pool --additive --write
+oaa gates --book carry        # which gate refused each candidate, and why
 ```
 
 Cadence: `discover` runs pre-market (09:15 ET) for the pool and the morning
-regime, and the view is refreshed at 15:45 before the overnight decision — that
-is when it actually gets used. Two small model calls a day, trivial next to the
+regime, and the view is refreshed before the carry decision if it has gone stale
+— that is when it actually gets used. Two small model calls a day, trivial next to the
 agent cycles.
 
 Screen **weekly, not daily**. Cointegration statistics barely move day to day;

@@ -173,24 +173,6 @@ class RiskEngine:
         checks["concentration"] = True
 
         # 4. Sizing ---------------------------------------------------------- #
-        # Combo structures (a pairs trade with an options overlay) are already
-        # sized in shares by the strategy against the firewall-verified budget;
-        # the risk engine validates the resulting dollar risk rather than
-        # re-deriving a contract count that has no meaning here.
-        if idea.structure.is_pairs:
-            quantity = idea.quantity
-            budget_cap = idea.max_loss * quantity if idea.max_loss else 0.0
-            allowance = account.equity * self.limits.max_risk_per_trade_pct
-            if budget_cap > allowance:
-                return fail(
-                    "sizing",
-                    f"combo max loss ${budget_cap:,.0f} exceeds "
-                    f"{self.limits.max_risk_per_trade_pct:.1%} of equity "
-                    f"(${allowance:,.0f})",
-                )
-            checks["sizing"] = True
-            return self._finalise(idea, account, quantity, checks, now)
-
         quantity = size_by_risk(idea, account.equity, self.limits.max_risk_per_trade_pct)
         if quantity < 1:
             return fail(

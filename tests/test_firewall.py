@@ -1,4 +1,8 @@
-"""The temporal firewall: the interlock that stops the two books colliding."""
+"""The capital firewall: phases, the resident/transient boundary, liquidation.
+
+The property that matters is at the bottom: the resident and transient books
+never hold conflicting claims on the same capital.
+"""
 
 from __future__ import annotations
 
@@ -6,278 +10,272 @@ import datetime as dt
 
 import pytest
 
-from oaa.brokers.sim import SimBroker
 from oaa.config.schema import Config
-from oaa.core.types import PositionSnapshot
+from oaa.core.types import AccountSnapshot, PositionSnapshot
 from oaa.firewall.clock import Phase, SessionClock, SessionTimes
+from oaa.firewall.ledger import PositionLedger
 from oaa.firewall.lock import Book, TemporalFirewall
 
 
 # --------------------------------------------------------------------------- #
-# the phase machine
+# phases
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
-    ("time", "expected"),
+    ("clock_time", "expected"),
     [
-        ("08:00", Phase.OVERNIGHT_HOLD),      # pre-bell, yesterday's book is on
-        ("09:31", Phase.OVERNIGHT_HOLD),      # bell rung, exit has not fired
-        ("09:35", Phase.OVERNIGHT_EXIT),      # the exit boundary itself
-        ("09:50", Phase.SETTLE),              # flat by design
-        ("10:30", Phase.INTRADAY),
-        ("15:05", Phase.INTRADAY_WIND_DOWN),  # manage only
+        ("08:00", Phase.CLOSED),            # pre-bell; the carry book is simply held
+        ("09:31", Phase.OPEN_SETTLE),       # wide and unstable, nothing opens
+        ("09:50", Phase.INTRADAY),          # intraday only
+        ("11:00", Phase.ACTIVE),            # both books may open
+        ("14:50", Phase.CARRY_ONLY),        # intraday wind-down
+        ("15:05", Phase.WIND_DOWN),         # manage only
         ("15:20", Phase.INTRADAY_CUTOFF),
-        ("15:46", Phase.OVERNIGHT_SIGNAL),
-        ("15:54", Phase.OVERNIGHT_VERIFY),
-        ("15:56", Phase.OVERNIGHT_ENTRY),
-        ("16:30", Phase.OVERNIGHT_HOLD),
+        ("15:50", Phase.CARRY_VERIFY),
+        ("16:30", Phase.CLOSED),
     ],
 )
-def test_phase_boundaries(frozen_clock, time, expected):
-    clock = SessionClock()
-    assert clock.phase(frozen_clock(time)) is expected
+def test_phase_machine(frozen_clock, clock_time, expected):
+    clock = SessionClock(frozen_now=frozen_clock(clock_time))
+    assert clock.phase() is expected
 
 
-def test_weekend_is_always_a_hold(frozen_clock):
-    saturday = dt.date(2026, 9, 5)
-    clock = SessionClock()
-    assert clock.phase(frozen_clock("11:00", saturday)) is Phase.OVERNIGHT_HOLD
+def test_weekend_is_closed_not_an_error(frozen_clock):
+    saturday = frozen_clock("11:00", dt.date(2026, 9, 5))
+    assert SessionClock(frozen_now=saturday).phase() is Phase.CLOSED
 
 
-def test_session_times_must_be_increasing():
+def test_boundaries_must_be_strictly_increasing():
     with pytest.raises(ValueError, match="out of order"):
-        SessionTimes(intraday_cutoff=dt.time(16, 0), overnight_signal=dt.time(15, 45)).validate()
+        SessionTimes(intraday_start=dt.time(9, 0)).validate()
 
 
-def test_cutoff_needs_settling_room_before_verification():
-    with pytest.raises(ValueError, match="15"):
-        SessionTimes(
-            intraday_cutoff=dt.time(15, 45), overnight_signal=dt.time(15, 50),
-            overnight_verify=dt.time(15, 52), overnight_entry=dt.time(15, 55),
-        ).validate()
+def test_cutoff_and_verification_need_room_to_settle():
+    with pytest.raises(ValueError, match="at least 15"):
+        SessionTimes(carry_verification=dt.time(15, 20)).validate()
 
 
 # --------------------------------------------------------------------------- #
-# layer 1: temporal
+# fakes
 # --------------------------------------------------------------------------- #
-def _firewall(cfg: Config | None = None) -> TemporalFirewall:
-    return TemporalFirewall(cfg or Config())
+class FakeBroker:
+    """Minimal broker double. `stubborn` refuses to fill the liquidation, which
+    is the exact failure the confirm-poll exists to catch."""
+
+    def __init__(self, positions=None, stubborn=False, regt=200_000.0, equity=100_000.0):
+        self._positions = list(positions or [])
+        self.stubborn = stubborn
+        self.regt = regt
+        self.equity = equity
+        self.cancelled = 0
+        self.closed: list[str] = []
+        self.open_orders = 0
+
+    def account(self):
+        return AccountSnapshot(
+            equity=self.equity, last_equity=self.equity, cash=self.equity,
+            buying_power=self.regt, regt_buying_power=self.regt,
+            daytrading_buying_power=self.regt * 2,
+            positions=list(self._positions), open_orders=self.open_orders,
+        )
+
+    def cancel_all(self):
+        self.cancelled += 1
+        self.open_orders = 0
+        return 1
+
+    def close_position(self, symbol, qty=None):
+        self.closed.append(symbol)
+        if not self.stubborn:
+            self._positions = [p for p in self._positions if p.symbol != symbol]
+        return True
 
 
-def test_neither_book_may_open_during_the_cutoff(frozen_clock):
-    fw = _firewall()
-    now = frozen_clock("15:20")
-    assert not fw.may_open(Book.INTRADAY, now)[0]
-    assert not fw.may_open(Book.OVERNIGHT, now)[0]
-
-
-def test_overnight_cannot_open_during_the_intraday_window(frozen_clock):
-    allowed, why = _firewall().may_open(Book.OVERNIGHT, frozen_clock("11:00"))
-    assert not allowed
-    assert "intraday" in why or "may not open" in why
-
-
-def test_intraday_cannot_open_in_the_entry_window(frozen_clock):
-    allowed, _ = _firewall().may_open(Book.INTRADAY, frozen_clock("15:56"))
-    assert not allowed
-
-
-def test_overnight_needs_the_lock_even_inside_its_window(frozen_clock):
-    fw = _firewall()
-    allowed, why = fw.may_open(Book.OVERNIGHT, frozen_clock("15:56"))
-    assert not allowed
-    assert "verification" in why
-
-
-def test_lock_is_exclusive(frozen_clock):
-    fw = _firewall()
-    fw._acquire(Book.INTRADAY, frozen_clock("11:00"), 50_000)
-    allowed, why = fw.may_open(Book.OVERNIGHT, frozen_clock("15:56"))
-    assert not allowed
-    assert "intraday" in why
-
-
-# --------------------------------------------------------------------------- #
-# 15:15 cutoff
-# --------------------------------------------------------------------------- #
-def test_cutoff_liquidates_and_confirms_flat(cfg, frozen_clock):
-    broker = SimBroker(cfg)
-    broker._positions["SPY260918C00500000"] = PositionSnapshot(
-        symbol="SPY260918C00500000", qty=2, avg_entry_price=3.0, market_value=600.0
+def position(symbol: str, value: float = 5_000.0) -> PositionSnapshot:
+    return PositionSnapshot(
+        symbol=symbol, qty=-1, avg_entry_price=1.0, market_value=value,
+        underlying=symbol[:3],
     )
-    fw = TemporalFirewall(cfg)
-    report = fw.run_intraday_cutoff(broker, now=frozen_clock("15:15"), confirm_delay=0)
+
+
+def build(tmp_path, frozen_clock, at="15:20", **positions_by_book):
+    cfg = Config()
+    cfg.firewall.ledger_path = str(tmp_path / "ledger.json")
+    ledger = PositionLedger(path=tmp_path / "ledger.json")
+    from oaa.firewall.ledger import LedgerEntry
+
+    live = []
+    for book, symbols in positions_by_book.items():
+        for symbol in symbols:
+            live.append(position(symbol))
+            ledger.entries[symbol] = LedgerEntry(symbol=symbol, book=book)
+    broker = FakeBroker(positions=live)
+    firewall = TemporalFirewall(cfg, ledger=ledger)
+    firewall.clock.freeze(frozen_clock(at))
+    return firewall, broker
+
+
+# --------------------------------------------------------------------------- #
+# the cutoff
+# --------------------------------------------------------------------------- #
+def test_cutoff_liquidates_transient_and_leaves_the_resident_book_alone(
+    tmp_path, frozen_clock
+):
+    firewall, broker = build(
+        tmp_path, frozen_clock, carry=["CARRY1", "CARRY2"], intraday=["DAY1"]
+    )
+    report = firewall.run_intraday_cutoff(broker, confirm_delay=0)
 
     assert report.confirmed_flat
-    assert report.positions_before == 1
-    assert report.positions_after == 0
-    assert broker.account().positions == []
+    assert broker.closed == ["DAY1"]
+    assert report.resident_untouched == 2
+    assert {p.symbol for p in broker.account().positions} == {"CARRY1", "CARRY2"}
 
 
-def test_cutoff_locks_the_intraday_book_for_the_rest_of_the_day(cfg, frozen_clock):
-    fw = TemporalFirewall(cfg)
-    fw.run_intraday_cutoff(SimBroker(cfg), now=frozen_clock("15:15"), confirm_delay=0)
-    # Even back inside the intraday window (a manual re-run, say), it stays shut.
-    allowed, why = fw.may_open(Book.INTRADAY, frozen_clock("11:00"))
-    assert not allowed
-    assert "locked for the day" in why
+def test_an_unfilled_liquidation_is_not_reported_as_flat(tmp_path, frozen_clock):
+    """A 200 from close_all_positions means accepted, not filled."""
+    firewall, broker = build(tmp_path, frozen_clock, intraday=["DAY1"])
+    broker.stubborn = True
+    report = firewall.run_intraday_cutoff(broker, confirm_attempts=2, confirm_delay=0)
 
-
-def test_cutoff_reports_failure_when_positions_survive(cfg, frozen_clock):
-    class StubbornBroker(SimBroker):
-        def close_position(self, symbol, qty=None):
-            return None  # accepted, never fills - the realistic failure mode
-
-    broker = StubbornBroker(cfg)
-    broker._positions["SPY260918C00500000"] = PositionSnapshot(
-        symbol="SPY260918C00500000", qty=1, avg_entry_price=3.0
-    )
-    report = TemporalFirewall(cfg).run_intraday_cutoff(
-        broker, now=frozen_clock("15:15"), confirm_attempts=2, confirm_delay=0
-    )
     assert not report.confirmed_flat
     assert report.attempts == 2
+    assert firewall.state.transient_disabled_until is None  # never locked as "done"
+
+
+def test_working_orders_count_as_not_flat(tmp_path, frozen_clock):
+    firewall, broker = build(tmp_path, frozen_clock)
+    broker.open_orders = 1
+    broker.cancel_all = lambda: 0          # a cancel that silently does nothing
+    report = firewall.run_intraday_cutoff(broker, confirm_attempts=2, confirm_delay=0)
+    assert not report.confirmed_flat
+
+
+def test_unattributed_legs_are_treated_as_transient(tmp_path, frozen_clock):
+    """Closing something we did not deliberately choose to hold is the
+    recoverable error; carrying it into the close is not."""
+    firewall, broker = build(tmp_path, frozen_clock)
+    broker._positions.append(position("MYSTERY"))
+    report = firewall.run_intraday_cutoff(broker, confirm_delay=0)
+    assert "MYSTERY" in broker.closed
+    assert report.confirmed_flat
 
 
 # --------------------------------------------------------------------------- #
-# 15:54 verification
+# carry verification
 # --------------------------------------------------------------------------- #
-def test_verification_passes_on_a_flat_account(cfg, frozen_clock):
-    broker = SimBroker(cfg, starting_cash=100_000)
-    verdict = TemporalFirewall(cfg).run_overnight_verification(
-        broker, now=frozen_clock("15:54")
-    )
+def test_carry_verification_passes_on_a_clean_resident_book(tmp_path, frozen_clock):
+    firewall, broker = build(tmp_path, frozen_clock, at="15:50", carry=["CARRY1"])
+    verdict = firewall.run_carry_verification(broker)
     assert verdict.passed
-    assert verdict.checks["flat_before_entry"]
-    assert verdict.regt_buying_power > 0
-    assert verdict.allocated_budget > 0
+    assert verdict.checks["transient_flat"]
+    assert verdict.resident_positions == 1
 
 
-def test_verification_sizes_against_regt_not_daytrading_power(cfg, frozen_clock):
-    broker = SimBroker(cfg, starting_cash=100_000)
-    account = broker.account()
-    verdict = TemporalFirewall(cfg).run_overnight_verification(
-        broker, now=frozen_clock("15:54")
+def test_residual_transient_exposure_disables_the_next_session(tmp_path, frozen_clock):
+    firewall, broker = build(
+        tmp_path, frozen_clock, at="15:50", carry=["CARRY1"], intraday=["DAY1"]
     )
-    # Reg T is 2x, day-trading is 4x. The budget must derive from the smaller one.
-    assert verdict.regt_buying_power == account.regt_buying_power
-    assert verdict.allocated_budget <= account.regt_buying_power
-    assert verdict.allocated_budget < (account.daytrading_buying_power or 0)
-
-
-def test_verification_is_capped_by_the_equity_ceiling(cfg, frozen_clock):
-    cfg.firewall.overnight_max_equity_pct = 0.10
-    broker = SimBroker(cfg, starting_cash=100_000)
-    verdict = TemporalFirewall(cfg).run_overnight_verification(
-        broker, now=frozen_clock("15:54")
-    )
-    assert verdict.allocated_budget == pytest.approx(10_000, rel=0.01)
-
-
-def test_verification_downscales_an_oversized_target(cfg, frozen_clock):
-    broker = SimBroker(cfg, starting_cash=100_000)
-    verdict = TemporalFirewall(cfg).run_overnight_verification(
-        broker, now=frozen_clock("15:54"), target_trade_value=10_000_000
-    )
-    assert verdict.passed
-    assert verdict.allocated_budget < 10_000_000
-    assert any("downscaled" in r for r in verdict.reasons)
-
-
-def test_verification_aborts_and_liquidates_when_positions_remain(cfg, frozen_clock):
-    broker = SimBroker(cfg, starting_cash=100_000)
-    broker._positions["SPY260918C00500000"] = PositionSnapshot(
-        symbol="SPY260918C00500000", qty=1, avg_entry_price=3.0, market_value=300.0
-    )
-    fw = TemporalFirewall(cfg)
-    verdict = fw.run_overnight_verification(broker, now=frozen_clock("15:54"))
-
+    verdict = firewall.run_carry_verification(broker)
     assert not verdict.passed
     assert verdict.emergency_liquidated
-    assert broker.account().positions == []          # rescued
-    assert fw.holder() is None                       # but the night is off
-    assert any("aborted" in r for r in verdict.reasons)
+    assert firewall.state.transient_disabled_until is not None
 
 
-def test_verification_refuses_outside_its_window(cfg, frozen_clock):
-    verdict = TemporalFirewall(cfg).run_overnight_verification(
-        SimBroker(cfg), now=frozen_clock("11:00")
-    )
+def test_verification_outside_its_window_refuses(tmp_path, frozen_clock):
+    firewall, broker = build(tmp_path, frozen_clock, at="11:00")
+    verdict = firewall.run_carry_verification(broker)
     assert not verdict.passed
-    assert not verdict.checks["window"]
-
-
-def test_verification_blocks_when_working_orders_remain(cfg, frozen_clock):
-    class OrdersOpen(SimBroker):
-        def account(self):
-            snapshot = super().account()
-            return snapshot.model_copy(update={"open_orders": 2})
-
-    verdict = TemporalFirewall(cfg).run_overnight_verification(
-        OrdersOpen(cfg), now=frozen_clock("15:54")
-    )
-    assert not verdict.passed
-
-
-def test_passing_verification_grants_the_lock_and_a_budget(cfg, frozen_clock):
-    fw = TemporalFirewall(cfg)
-    broker = SimBroker(cfg, starting_cash=100_000)
-    verdict = fw.run_overnight_verification(broker, now=frozen_clock("15:54"))
-
-    assert fw.holder() is Book.OVERNIGHT
-    assert fw.budget_for(Book.OVERNIGHT) == verdict.allocated_budget
-    assert fw.budget_for(Book.INTRADAY) == 0.0
-    assert fw.may_open(Book.OVERNIGHT, frozen_clock("15:56"))[0]
+    assert verdict.checks["window"] is False
 
 
 # --------------------------------------------------------------------------- #
-# the full daily sequence
+# temporal permissions
 # --------------------------------------------------------------------------- #
-def test_the_two_books_never_hold_capital_simultaneously(cfg, frozen_clock):
-    """The property the whole design exists to guarantee."""
-    fw = TemporalFirewall(cfg)
-    broker = SimBroker(cfg, starting_cash=100_000)
+def test_books_may_only_open_in_their_own_windows(tmp_path, frozen_clock):
+    firewall, broker = build(tmp_path, frozen_clock, at="11:00")
+    # Nothing is leased or reserved yet.
+    assert firewall.may_open(Book.INTRADAY)[0] is False
+    assert firewall.may_open(Book.CARRY)[0] is False
 
-    # 10:00 - the day book takes the lock
-    fw.clock.freeze(frozen_clock("10:00"))
-    assert fw.acquire_intraday(broker, now=frozen_clock("10:00")).passed
-    assert fw.holder() is Book.INTRADAY
-    assert not fw.may_open(Book.OVERNIGHT, frozen_clock("10:00"))[0]
+    firewall.acquire_transient(broker, Book.INTRADAY)
+    firewall.allocate_carry(broker)
+    assert firewall.may_open(Book.INTRADAY)[0] is True
+    assert firewall.may_open(Book.CARRY)[0] is True
 
-    # 15:15 - cutoff hands the capital back
-    fw.run_intraday_cutoff(broker, now=frozen_clock("15:15"), confirm_delay=0)
-    assert fw.holder() is None
-
-    # 15:54 - the night book takes it
-    assert fw.run_overnight_verification(broker, now=frozen_clock("15:54")).passed
-    assert fw.holder() is Book.OVERNIGHT
-    assert not fw.may_open(Book.INTRADAY, frozen_clock("15:54"))[0]
-
-    # 09:35 next day - released again
-    fw.run_overnight_exit(broker, now=frozen_clock("09:35"))
-    assert fw.holder() is None
+    firewall.clock.freeze(frozen_clock("15:20"))
+    assert firewall.may_open(Book.INTRADAY)[0] is False
+    assert firewall.may_open(Book.CARRY)[0] is False
 
 
-def test_overnight_exit_unlocks_the_day_book(cfg, frozen_clock):
-    fw = TemporalFirewall(cfg)
-    broker = SimBroker(cfg)
-    fw.run_intraday_cutoff(broker, now=frozen_clock("15:15"), confirm_delay=0)
-    assert fw.state.intraday_disabled_until is not None
-
-    fw.run_overnight_exit(broker, now=frozen_clock("09:35"))
-    assert fw.state.intraday_disabled_until is None
-    assert fw.may_open(Book.INTRADAY, frozen_clock("10:30"))[0]
-
-
-def test_day_rollover_clears_the_lockout(cfg, frozen_clock):
-    fw = TemporalFirewall(cfg)
-    fw.run_intraday_cutoff(SimBroker(cfg), now=frozen_clock("15:15"), confirm_delay=0)
-    fw.reset_day(dt.date(2026, 9, 3))
-    assert fw.may_open(Book.INTRADAY, frozen_clock("11:00", dt.date(2026, 9, 3)))[0]
+def test_submission_flatten_closes_the_resident_book_too(tmp_path, frozen_clock):
+    firewall, broker = build(
+        tmp_path, frozen_clock, at="11:00", carry=["CARRY1"], intraday=["DAY1"]
+    )
+    report = firewall.run_submission_flatten(broker)
+    assert report.confirmed_flat
+    assert set(broker.closed) == {"CARRY1", "DAY1"}
+    assert firewall.may_open(Book.CARRY)[0] is False   # no entries after the flatten
 
 
-def test_disabled_firewall_is_permissive(frozen_clock):
-    cfg = Config()
-    cfg.firewall.enabled = False
-    fw = TemporalFirewall(cfg)
-    assert fw.may_open(Book.OVERNIGHT, frozen_clock("11:00"))[0]
-    assert fw.may_open(Book.INTRADAY, frozen_clock("15:56"))[0]
+# --------------------------------------------------------------------------- #
+# THE property
+# --------------------------------------------------------------------------- #
+def test_the_two_books_never_hold_conflicting_claims_on_the_same_capital(
+    tmp_path, frozen_clock
+):
+    """The transient lease is computed from what Reg T leaves AFTER the resident
+    book's requirement is reserved. Whatever the carry book is using, the sum of
+    the two claims can never exceed the buying power behind them."""
+    for carry_value in (0.0, 20_000.0, 60_000.0, 140_000.0):
+        firewall, broker = build(tmp_path, frozen_clock, at="11:00")
+        if carry_value:
+            broker._positions.append(position("CARRY1", carry_value))
+            from oaa.firewall.ledger import LedgerEntry
+
+            firewall.ledger.entries["CARRY1"] = LedgerEntry(symbol="CARRY1", book="carry")
+
+        firewall.allocate_carry(broker)
+        firewall.acquire_transient(broker, Book.INTRADAY)
+
+        carry_claim = firewall.budget_for(Book.CARRY)
+        transient_claim = firewall.budget_for(Book.INTRADAY)
+        regt = broker.account().regt_buying_power
+
+        assert carry_claim + transient_claim <= regt + 1e-6, (
+            f"carry ${carry_claim:,.0f} + transient ${transient_claim:,.0f} "
+            f"exceeds Reg T ${regt:,.0f}"
+        )
+        # And the transient lease shrinks as the resident book grows.
+        assert transient_claim >= 0
+
+
+def test_the_transient_lease_shrinks_as_the_carry_book_grows(tmp_path, frozen_clock):
+    from oaa.firewall.ledger import LedgerEntry
+
+    leases = []
+    for carry_value in (0.0, 80_000.0, 160_000.0):
+        firewall, broker = build(tmp_path, frozen_clock, at="11:00")
+        if carry_value:
+            broker._positions.append(position("CARRY1", carry_value))
+            firewall.ledger.entries["CARRY1"] = LedgerEntry(symbol="CARRY1", book="carry")
+        firewall.allocate_carry(broker)
+        firewall.acquire_transient(broker, Book.INTRADAY)
+        leases.append(firewall.budget_for(Book.INTRADAY))
+
+    assert leases == sorted(leases, reverse=True)
+
+
+# --------------------------------------------------------------------------- #
+# ledger
+# --------------------------------------------------------------------------- #
+def test_the_ledger_survives_a_restart(tmp_path):
+    from oaa.firewall.ledger import LedgerEntry
+
+    path = tmp_path / "ledger.json"
+    ledger = PositionLedger(path=path)
+    ledger.entries["CARRY1"] = LedgerEntry(symbol="CARRY1", book="carry")
+    ledger.save()
+
+    reloaded = PositionLedger.load(path)
+    assert reloaded.is_resident("CARRY1")
+    assert reloaded.book_of("NEVER_SEEN") == "intraday"

@@ -27,13 +27,20 @@ def context(chain, bars, **overrides) -> MarketContext:
 def strategy(name: str):
     cfg = load_config()
     ref = next(s for s in cfg.strategies if s.name == name)
+    # The dated entry cutoff is a submission-week control, not a strategy
+    # property; tests must not start failing the day it passes.
+    ref.params.setdefault("exits", {})["entry_cutoff_utc"] = None
+    cfg.management.entry_cutoff_utc = None
     return strategy_registry.get(name)(ref, cfg), cfg
 
 
 def test_registry_autoloads_every_shipped_strategy():
     strategy_registry.autoload("oaa.strategies")
     names = strategy_registry.names()
-    assert {"vol_carry_condor", "momentum_debit_spread", "earnings_calendar"} <= set(names)
+    assert {
+        "vol_carry", "intraday_momentum", "event_premium",
+        "momentum_debit_spread", "earnings_calendar",
+    } <= set(names)
 
 
 def test_load_strategies_only_returns_enabled_ones():
@@ -44,8 +51,8 @@ def test_load_strategies_only_returns_enabled_ones():
     }
 
 
-def test_condor_fires_in_a_rich_quiet_regime(chain, bars, account):
-    strat, cfg = strategy("vol_carry_condor")
+def test_carry_fires_in_a_rich_quiet_regime(chain, bars, account):
+    strat, cfg = strategy("vol_carry")
     strat.ref.params["universe"] = ["SPY"]
     ctx = StrategyContext(market=context(chain, bars), account=account,
                           config=cfg, params=strat.params)
@@ -56,10 +63,14 @@ def test_condor_fires_in_a_rich_quiet_regime(chain, bars, account):
     assert idea.max_loss and idea.max_loss > 0
     assert len(idea.legs) == 4
     assert idea.thesis  # a thesis is mandatory - the judges read it
+    # 7-14 DTE: the structure's life has to fit inside the judged window.
+    dte = (dt.date.fromisoformat(idea.meta["expiry"]) - ctx.market.asof.date()).days
+    assert 7 <= dte <= 14
+    assert idea.meta["gates"]["passed"] is True
 
 
-def test_condor_stays_out_when_vol_is_cheap(chain, bars, account):
-    strat, cfg = strategy("vol_carry_condor")
+def test_carry_stays_out_when_vol_is_cheap(chain, bars, account):
+    strat, cfg = strategy("vol_carry")
     ctx = StrategyContext(
         market=context(chain, bars, iv_rank=0.05, implied_vol=0.10, realised_vol=0.20),
         account=account, config=cfg, params=strat.params,
@@ -67,13 +78,46 @@ def test_condor_stays_out_when_vol_is_cheap(chain, bars, account):
     assert strat.generate(ctx) == []
 
 
-def test_condor_stays_out_of_a_strong_trend(chain, bars, account):
-    strat, cfg = strategy("vol_carry_condor")
+def test_carry_stays_out_of_a_strong_trend(chain, bars, account):
+    strat, cfg = strategy("vol_carry")
     ctx = StrategyContext(
-        market=context(chain, bars, trend_strength=0.95),
+        market=context(chain, bars, trend_strength=0.95, adx=40.0),
         account=account, config=cfg, params=strat.params,
     )
     assert strat.generate(ctx) == []
+
+
+def test_carry_refuses_to_sell_premium_priced_for_an_earnings_date(chain, bars, account):
+    """IV is elevated BECAUSE of the event; that premium is fair."""
+    strat, cfg = strategy("vol_carry")
+    strat.ref.params["universe"] = ["SPY"]
+    ctx = StrategyContext(
+        market=context(chain, bars, earnings_date=dt.date(2026, 9, 8)),
+        account=account, config=cfg, params=strat.params,
+    )
+    assert strat.generate(ctx) == []
+
+
+def test_carry_defers_to_the_macro_lens_on_an_idiosyncratic_flag(chain, bars, account):
+    from oaa.discovery.macro import MacroView
+
+    strat, cfg = strategy("vol_carry")
+    strat.ref.params["universe"] = ["SPY"]
+    flagged = MacroView(flagged_symbols={"SPY": "repricing on its own news"})
+    ctx = StrategyContext(market=context(chain, bars), account=account,
+                          config=cfg, params=strat.params, macro=flagged)
+    assert strat.generate(ctx) == []
+
+
+def test_carry_exits_at_thirty_percent_not_fifty(chain, bars, account):
+    strat, cfg = strategy("vol_carry")
+    strat.ref.params["universe"] = ["SPY"]
+    ctx = StrategyContext(market=context(chain, bars), account=account,
+                          config=cfg, params=strat.params)
+    idea = strat.generate(ctx)[0]
+    assert strat.should_exit(ctx, idea, 0.20) is None
+    assert "profit target" in (strat.should_exit(ctx, idea, 0.32) or "")
+    assert "credit" in (strat.should_exit(ctx, idea, -2.5) or "")
 
 
 def test_momentum_needs_a_confirmed_trend(chain, bars, account):
@@ -102,7 +146,7 @@ def test_momentum_builds_a_debit_spread_when_trending(chain, bars, account):
 
 
 def test_the_two_strategies_do_not_fire_on_the_same_regime(chain, bars, account):
-    condor, cfg = strategy("vol_carry_condor")
+    condor, cfg = strategy("vol_carry")
     momentum, _ = strategy("momentum_debit_spread")
     for s in (condor, momentum):
         s.ref.params["universe"] = ["SPY"]
@@ -118,6 +162,10 @@ def test_the_two_strategies_do_not_fire_on_the_same_regime(chain, bars, account)
 
 def test_every_generated_idea_is_defined_risk(chain, bars, account):
     cfg = load_config()
+    cfg.management.entry_cutoff_utc = None
+    for ref in cfg.strategies:
+        ref.enabled = True
+        ref.params.setdefault("exits", {})["entry_cutoff_utc"] = None
     for strat in load_strategies(cfg):
         strat.ref.params["universe"] = ["SPY"]
         ctx = StrategyContext(

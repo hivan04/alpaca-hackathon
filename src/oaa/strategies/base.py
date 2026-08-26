@@ -42,8 +42,13 @@ class StrategyContext:
     budget: float = 0.0
     firewall: Any = None
     #: The macro lens's regime read for this session. An OVERLAY: it may stand a
-    #: strategy down or widen a hedge, never approve a trade or narrow one.
+    #: strategy down or reduce size, never approve a trade or increase one.
     macro: Any = None
+    #: CatalystEngine for the intraday book's §3.2 gate. Deterministic by design:
+    #: an LLM call inside a loop whose signal decays in minutes is a latency risk.
+    catalyst: Any = None
+    #: This cycle's AttentionSnapshot (movers breadth, most-actives, news velocity).
+    attention: Any = None
 
     def __post_init__(self) -> None:
         if self.market is not None:
@@ -115,6 +120,7 @@ class Strategy(abc.ABC):
     #: A pairs strategy needs both legs simultaneously, so it is a portfolio one.
     mode: str = "per_symbol"
     #: Which capital book this trades from. The firewall gates on it.
+    #: "carry" is resident; "intraday" and "opportunistic" are transient tenants.
     book: str = "intraday"
 
     def __init__(self, ref: StrategyRef, config: Config) -> None:
@@ -161,8 +167,13 @@ class Strategy(abc.ABC):
         return self.config.universe.active()
 
     # -- convenience --------------------------------------------------------- #
-    def builder(self, ctx: StrategyContext, symbol: str | None = None) -> StructureBuilder:
-        view = ctx.chain_view(symbol=symbol)
+    def builder(
+        self,
+        ctx: StrategyContext,
+        symbol: str | None = None,
+        chain_filter: ChainFilter | None = None,
+    ) -> StructureBuilder:
+        view = ctx.chain_view(chain_filter=chain_filter, symbol=symbol)
         if view.is_empty:
             raise StrategyError(
                 f"{view.symbol}: no contracts survived the liquidity filter"

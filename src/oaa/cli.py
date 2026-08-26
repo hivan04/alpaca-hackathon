@@ -6,12 +6,10 @@
     oaa scan              one dry scan: what would the agent do right now?
     oaa trade             one live cycle
     oaa run               the autonomous loop (this is the deliverable)
-    oaa firewall          the two-book capital lock: phase, owner, budget
-    oaa discover          what the market is watching + tonight's regime read
+    oaa firewall          the capital boundary: phase, reservations, lease
+    oaa discover          what the market is watching + today's regime read
     oaa pool              the accumulated candidate pool
-    oaa pairs             the approved cointegrated universe
-    oaa signal KO/PEP     tonight's Kalman state and gap forecast
-    oaa backtest-overnight   walk-forward backtest, bars via the Alpaca CLI
+    oaa gates             the gate-by-gate rejection log
     oaa agent <cycle>     one AI-assistant-driven cycle over MCP
     oaa manage            close positions that hit their exit rules
     oaa flatten           close everything
@@ -232,9 +230,10 @@ def chain(
 def scan(
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
+    cycle: str = typer.Option("carry_scan", help="carry_scan | intraday_scan | discover"),
     live: bool = typer.Option(False, "--live", help="Actually place orders (overrides dry_run)"),
 ) -> None:
-    """One scan cycle. Dry by default: shows what the agent would do."""
+    """One scan cycle across every enabled book. Dry by default."""
     from oaa.agents.orchestrator import Orchestrator
 
     settings, broker, data = _boot(profile, config)
@@ -243,8 +242,8 @@ def scan(
 
     orch = Orchestrator(settings, broker, data)
     try:
-        result = orch.run_cycle("scan_and_trade", "cli-scan")
-        console.print(Panel.fit(result.summary(), title="scan"))
+        result = orch.run_cycle(cycle, f"cli-{cycle}")
+        console.print(Panel.fit(result.summary(), title=cycle))
         for error in result.errors:
             console.print(f"[red]{error}[/]")
     finally:
@@ -490,9 +489,9 @@ def serve(
 def firewall(
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
-    at: str | None = typer.Option(None, help="Simulate a time, e.g. '15:54' or '2026-09-04T15:54'"),
+    at: str | None = typer.Option(None, help="Simulate a time, e.g. '15:15' or '2026-09-04T15:15'"),
 ) -> None:
-    """Show the temporal firewall state: phase, lock owner, verified budget."""
+    """Show the capital firewall state: phase, reservations, lease, ledger."""
     import datetime as dtm
 
     from oaa.firewall.lock import Book, TemporalFirewall
@@ -511,34 +510,31 @@ def firewall(
     status = fw.status()
     console.print(Panel.fit(
         f"[bold]{status['now_et']}[/]\n"
-        f"phase        [bold cyan]{status['phase']}[/]\n"
-        f"lock owner   {status['lock_owner'] or '[dim]free[/]'}\n"
-        f"budget       ${status['budget']:,.2f}\n"
-        f"intraday locked for  {status['intraday_locked_for'] or '[dim]-[/]'}",
-        title="temporal firewall",
+        f"phase                [bold cyan]{status['phase']}[/]\n"
+        f"carry reserved       ${status['carry_reserved']:,.2f}\n"
+        f"transient lease      {status['transient_owner'] or '[dim]free[/]'} "
+        f"(${status['transient_budget']:,.2f})\n"
+        f"transient locked to  {status['transient_disabled_until'] or '[dim]-[/]'}\n"
+        f"ledger               {status['ledger']}",
+        title="capital firewall",
     ))
 
     table = Table("Book", "May open?", "Why")
-    for book in (Book.INTRADAY, Book.OVERNIGHT):
+    for book in Book:
         allowed, why = fw.may_open(book)
-        table.add_row(
-            book.value,
-            "[green]yes[/]" if allowed else "[red]no[/]",
-            why,
-        )
+        table.add_row(book.value, "[green]yes[/]" if allowed else "[red]no[/]", why)
     console.print(table)
 
     times = Table("Boundary", "ET", "What happens")
     what = {
         "market_open": "bell",
-        "overnight_exit": "liquidate the overnight book, release the lock",
-        "intraday_start": "intraday book may acquire the lock",
-        "intraday_last_entry": "no new intraday entries",
-        "intraday_cutoff": "HARD CUTOFF: cancel, liquidate, confirm flat",
-        "overnight_signal": "Kalman + ML compute; nothing routed",
-        "overnight_verify": "THE GATE: prove flat, read fresh Reg T, take the lock",
-        "overnight_entry": "dispatch the pairs combo",
-        "market_close": "bell",
+        "intraday_start": "intraday book may lease the transient headroom",
+        "carry_entry_start": "carry book may open resident structures",
+        "intraday_last_entry": "no new intraday entries - runway before the cutoff",
+        "carry_entry_end": "no new carry entries",
+        "intraday_cutoff": "HARD CUTOFF: cancel, liquidate TRANSIENT ONLY, confirm flat",
+        "carry_verification": "THE SIGN-OFF: zero transient exposure, fresh Reg T, carry covered",
+        "market_close": "bell - the carry book is HELD, not flattened",
     }
     for boundary, name in fw.clock.times.ordered():
         times.add_row(name, boundary.strftime("%H:%M"), what.get(name, ""))
@@ -546,157 +542,8 @@ def firewall(
 
 
 @app.command()
-def pairs(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> None:
-    """The approved cointegrated pair universe for the overnight book."""
-    settings = _settings_only(profile, config)
-    ref = next(
-        (s for s in settings.config.strategies if s.name == "overnight_pairs"), None
-    )
-    if ref is None:
-        console.print("[yellow]overnight_pairs is not configured[/]")
-        raise typer.Exit(1)
-
-    meta = ref.params.get("pairs_meta", {})
-    screened = meta.get("screened_at")
-    console.print(
-        f"screened: [bold]{screened or '[red]NEVER[/] - run `python scripts/find_pairs.py --write`'}[/]"
-    )
-    table = Table("Pair", "On", "Hedge", "p-value", "Half-life", "Notes")
-    for raw in ref.params.get("pairs", []):
-        hl = raw.get("half_life_days")
-        table.add_row(
-            f"{raw['left']}/{raw['right']}",
-            "[green]yes[/]" if raw.get("enabled") else "[dim]no[/]",
-            f"{raw.get('hedge_ratio', 1.0):.3f}",
-            f"{raw['pvalue']:.4f}" if raw.get("pvalue") else "-",
-            f"{hl:.1f}d" if hl else "-",
-            (raw.get("notes") or "")[:46],
-        )
-    console.print(table)
-
-
-@app.command()
-def signal(
-    pair: str = typer.Argument(..., help="Pair as 'LEFT/RIGHT', e.g. KO/PEP"),
-    profile: str | None = _PROFILE,
-    config: str | None = _CONFIG,
-) -> None:
-    """Tonight's Kalman state and gap forecast for one pair. Reads only."""
-    from oaa.agents.orchestrator import Orchestrator
-    from oaa.agents.tools import ToolBelt
-
-    settings, broker, data = _boot(profile, config)
-    orch = Orchestrator(settings, broker, data)
-    try:
-        payload = ToolBelt(orch).call("compute_pair_signal", {"pair": pair})
-        if "error" in payload:
-            console.print(f"[red]{payload['error']}[/]")
-            raise typer.Exit(1)
-
-        kalman = payload["kalman"]
-        forecast = payload.get("forecast") or {}
-        console.print(Panel.fit(
-            f"[bold]{payload['pair']}[/]\n"
-            f"hedge ratio (beta)  {kalman['beta']:.4f}\n"
-            f"spread z-score      {kalman['zscore']:+.3f}\n"
-            f"observations        {kalman['observations']}\n"
-            f"filter ready        {payload['filter_ready']}",
-            title="Kalman state",
-        ))
-        if forecast:
-            console.print(Panel.fit(
-                f"direction     [bold]{forecast['direction']}[/]\n"
-                f"E[r] (q50)    {forecast['expected']:+.4%}\n"
-                f"q05 (bad)     {forecast['lower_q05']:+.4%}   -> protective put strike\n"
-                f"q95 (good)    {forecast['upper_q95']:+.4%}   -> protective call strike\n"
-                f"edge / risk   {forecast['edge_to_risk']:.3f}\n"
-                f"confidence    {forecast['confidence']:.3f}\n"
-                f"model         {forecast['model']} ({forecast['train_rows']} rows)",
-                title="overnight gap forecast",
-            ))
-        gate = payload.get("gate")
-        console.print(
-            "[green]entry gates: PASS[/]" if not gate else f"[yellow]would skip: {gate}[/]"
-        )
-    finally:
-        orch.close()
-
-
-@app.command("backtest-overnight")
-def backtest_overnight(
-    pair: str | None = typer.Argument(None, help="Pair as 'LEFT/RIGHT'; omit for all enabled"),
-    start: str | None = typer.Option(None, help="YYYY-MM-DD"),
-    end: str | None = typer.Option(None, help="YYYY-MM-DD"),
-    equity: float = typer.Option(100_000.0, help="Starting equity"),
-    out: str | None = typer.Option(None, help="Write per-night CSV here"),
-    profile: str | None = _PROFILE,
-    config: str | None = _CONFIG,
-) -> None:
-    """Walk-forward backtest of the overnight strategy. Bars come from the CLI."""
-    import csv
-    import datetime as dtm
-
-    from oaa.backtest.overnight import OvernightBacktest
-    from oaa.data.factory import get_data_provider
-
-    settings = _settings_only(profile, config)
-    provider = get_data_provider(settings.config, settings.credentials)
-    ref = next((s for s in settings.config.strategies if s.name == "overnight_pairs"), None)
-    if ref is None:
-        console.print("[red]overnight_pairs is not configured[/]")
-        raise typer.Exit(1)
-
-    if pair:
-        left, right = [p.strip().upper() for p in pair.split("/")]
-        targets = [(left, right)]
-    else:
-        targets = [
-            (p["left"], p["right"]) for p in ref.params.get("pairs", []) if p.get("enabled")
-        ]
-    if not targets:
-        console.print("[yellow]no enabled pairs to backtest[/]")
-        raise typer.Exit(1)
-
-    begin = dtm.date.fromisoformat(start) if start else None
-    finish = dtm.date.fromisoformat(end) if end else None
-    engine = OvernightBacktest(settings, provider, ref.params)
-
-    rows: list[dict] = []
-    for left, right in targets:
-        console.print(f"\n[bold]{left}/{right}[/] — fetching bars via {provider.name}...")
-        try:
-            result = engine.run(left, right, start=begin, end=finish, initial_equity=equity)
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[red]{left}/{right}: {exc}[/]")
-            continue
-        console.print(Panel.fit("\n".join(result.summary_lines()), title=f"{left}/{right}"))
-        skips = result.metrics()["skip_reasons"]
-        if skips:
-            table = Table("Why a night was skipped", "Count")
-            for reason, count in list(skips.items())[:8]:
-                table.add_row(reason, str(count))
-            console.print(table)
-        rows.extend(n.as_row() for n in result.nights)
-
-    if out and rows:
-        path = settings.path(out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
-            writer.writeheader()
-            writer.writerows(rows)
-        console.print(f"\n[green]wrote[/] {path} ({len(rows)} nights)")
-
-    console.print(
-        "\n[dim]The options overlay is modelled, not replayed - no historical option\n"
-        "chain with greeks exists on the free tier. Assumptions are deliberately\n"
-        "pessimistic; see src/oaa/backtest/pricing.py.[/]"
-    )
-
-
-@app.command()
 def agent(
-    cycle: str = typer.Argument("overnight_signal", help="overnight_signal | overnight_entry | scan_and_trade | intraday_cutoff"),
+    cycle: str = typer.Argument("carry_scan", help="carry_scan | intraday_scan | intraday_cutoff | carry_verify"),
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
 ) -> None:
@@ -757,17 +604,10 @@ def discover(
         console.print("[yellow]discovery is disabled in config[/]")
         raise typer.Exit(1)
 
-    pairs = [
-        (p["left"], p["right"])
-        for ref in cfg.strategies if ref.name == "overnight_pairs"
-        for p in ref.params.get("pairs", []) if p.get("enabled")
-    ]
     strategies = [s.name for s in cfg.enabled_strategies()]
 
     with console.status("querying Alpaca..."):
-        result = engine.run(
-            strategies=strategies, pairs=pairs, apply_filters=not no_filters
-        )
+        result = engine.run(strategies=strategies, apply_filters=not no_filters)
 
     snap = result.snapshot
     if snap.source_errors:
@@ -810,7 +650,7 @@ def discover(
         console.print(guide)
 
     if macro.flagged_symbols:
-        flags = Table("Flagged leg", "Why it should not be held overnight")
+        flags = Table("Flagged symbol", "Why its premium should not be sold")
         for symbol, reason in macro.flagged_symbols.items():
             flags.add_row(f"[red]{symbol}[/]", reason[:88])
         console.print(flags)
@@ -830,7 +670,7 @@ def discover(
         + (f", {len(result.new_symbols)} new: {', '.join(result.new_symbols[:8])}"
            if result.new_symbols else "")
     )
-    console.print("[dim]Next: python scripts/find_pairs.py --from-pool --write[/]")
+    console.print("[dim]Next: `oaa scan --cycle carry_scan` to run the four premium gates.[/]")
 
 
 @app.command()
@@ -867,6 +707,51 @@ def pool(
     console.print(
         f"[dim]Persistence beats intensity — a name seen on four days outranks one "
         f"that spiked once.[/]\n[dim]Screen order: {', '.join(candidate_pool.candidates(12))}[/]"
+    )
+
+
+@app.command()
+def gates(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    book: str | None = typer.Option(None, help="carry | intraday | opportunistic"),
+    limit: int = typer.Option(25),
+) -> None:
+    """The gate-by-gate rejection log.
+
+    The highest-value artefact for judging: it shows the agent DECLINING trades
+    and the exact measurement that stopped each one. Expect the spread gate to
+    dominate on the intraday book - that is the finding, not a bug.
+    """
+    settings = _settings_only(profile, config)
+    journal = _journal(settings)
+    rows = journal.events("gate_rejection", limit * 4)
+    if book:
+        rows = [r for r in rows if r.get("book") == book]
+    if not rows:
+        console.print("[yellow]No rejections logged yet.[/] Run a scan cycle first.")
+        return
+
+    table = Table("When", "Book", "Symbol", "Vetoed by", "Reason",
+                  title=f"gate rejections ({len(rows)})")
+    for row in rows[:limit]:
+        table.add_row(
+            str(row.get("ts", ""))[11:19],
+            str(row.get("book", "")),
+            str(row.get("symbol", "")),
+            f"[red]{row.get('vetoed_by', '')}[/]",
+            str(row.get("reason", ""))[:90],
+        )
+    console.print(table)
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("vetoed_by") or "-")
+        counts[key] = counts.get(key, 0) + 1
+    console.print(
+        "[dim]by gate: "
+        + ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+        + "[/]"
     )
 
 

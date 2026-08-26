@@ -79,6 +79,14 @@ class DataConfig(Base):
     stock_feed: Literal["iex", "sip", "delayed_sip", "otc"] = "iex"
     option_feed: Literal["indicative", "opra"] = "indicative"
     delayed_minutes: int = 15
+    #: The intraday book needs a session VWAP, which daily bars cannot express.
+    fetch_intraday: bool = True
+    intraday_timeframe: str = "5Min"
+    intraday_lookback_days: int = 5
+    #: Per-symbol headlines for the intraday catalyst gate. Alpaca-native.
+    fetch_news: bool = True
+    news_limit: int = 20
+    news_lookback_hours: int = 6
     cache: CacheConfig = Field(default_factory=CacheConfig)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
@@ -141,6 +149,11 @@ class ChaseConfig(Base):
 
 class ExecutionConfig(Base):
     order_type: Literal["limit", "market"] = "limit"
+    #: atomic -> one multi-leg order (preferred: one spread crossed, not four).
+    #: legged -> rollback-safe combo, long/protective legs first, unwound in
+    #: reverse on any critical failure. Legging doubles spread exposure, so it
+    #: is a fallback for venues that cannot route combos, not a default.
+    multileg_mode: Literal["atomic", "legged"] = "atomic"
     limit_price_ratio: float = 0.5
     chase: ChaseConfig = Field(default_factory=ChaseConfig)
     time_in_force: Literal["day", "gtc"] = "day"
@@ -159,6 +172,12 @@ class ManagementConfig(Base):
     close_at_dte: int = 1
     roll: RollConfig = Field(default_factory=RollConfig)
     flatten_before: str | None = None
+    #: Stop opening carry structures once the window is shorter than one can
+    #: meaningfully decay. ISO-8601 UTC.
+    entry_cutoff_utc: str | None = None
+    #: Close the entire book before the submission deadline so the judged P&L
+    #: is realised rather than an unrealised mark on a wide quote. ISO-8601 UTC.
+    submission_flatten_utc: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -168,40 +187,49 @@ class FirewallTimesConfig(Base):
     """Every boundary in the trading day, US/Eastern, HH:MM."""
 
     market_open: str = "09:30"
-    overnight_exit: str = "09:35"
-    intraday_start: str = "10:00"
-    intraday_last_entry: str = "15:00"
+    #: 09:30-09:45 is skipped outright: the open is wide and unstable, and the
+    #: intraday book's entire edge fits inside a few cents of spread.
+    intraday_start: str = "09:45"
+    carry_entry_start: str = "10:00"
+    #: No intraday entry that cannot be closed calmly before the 15:15 cutoff.
+    intraday_last_entry: str = "14:45"
+    carry_entry_end: str = "15:00"
     intraday_cutoff: str = "15:15"
-    overnight_signal: str = "15:45"
-    overnight_verify: str = "15:54"
-    overnight_entry: str = "15:55"
+    carry_verification: str = "15:45"
     market_close: str = "16:00"
 
 
 class FirewallConfig(Base):
-    """The dual-layer capital lock between the intraday and overnight books.
+    """The capital boundary between the resident carry book and the transient
+    intraday/opportunistic books.
 
     Layer 1 is temporal (a book trades only inside its own window); layer 2 is
-    capital (size is scaled against buying power measured *after* the other
-    book is proven flat).
+    capital (the transient lease is whatever Reg T leaves *after* the carry
+    book's requirement is reserved, measured on a fresh poll).
     """
 
     enabled: bool = True
     times: FirewallTimesConfig = Field(default_factory=FirewallTimesConfig)
+    #: Which book owns which leg. Persisted so a restart cannot cause the 15:15
+    #: cutoff to liquidate a multi-session carry structure.
+    ledger_path: str = "runs/position_ledger.json"
     #: How many liquidate-then-poll rounds the 15:15 cutoff will run.
     liquidation_confirm_attempts: int = 4
     liquidation_confirm_delay_seconds: float = 5.0
-    #: If positions are still open at 15:54, liquidate them before aborting.
+    #: Transient positions still open at 15:45: liquidate, then disable the
+    #: transient books for the following session anyway.
     emergency_liquidate: bool = True
-    #: Fraction of *verified* Reg T buying power the overnight book may use.
-    overnight_regt_utilisation: float = 0.95
-    #: Hard ceiling on overnight gross exposure as a fraction of equity.
-    overnight_max_equity_pct: float = 0.50
-    #: Fraction of day-trading buying power the intraday book may use.
-    intraday_dtbp_utilisation: float = 0.50
+    #: Hard ceiling on the resident book's gross exposure, as a fraction of equity.
+    carry_max_equity_pct: float = 0.50
+    #: Fraction of the REMAINING Reg T buying power the transient books may lease.
+    transient_utilisation: float = 0.50
+    #: Second, absolute ceiling on transient exposure as a fraction of equity.
+    transient_max_equity_pct: float = 0.15
+    #: Reg T cushion the carry book must clear at the 15:45 verification.
+    carry_margin_cushion: float = 1.25
     min_trade_value: float = 500.0
 
-    @field_validator("overnight_regt_utilisation", "intraday_dtbp_utilisation")
+    @field_validator("transient_utilisation")
     @classmethod
     def _sane_utilisation(cls, v: float) -> float:
         if not 0 < v <= 1.0:
@@ -214,7 +242,7 @@ class StrategyRef(Base):
     enabled: bool = True
     weight: float = 1.0
     #: Which capital book this strategy trades from. Gated by the firewall.
-    book: Literal["intraday", "overnight"] = "intraday"
+    book: Literal["carry", "intraday", "opportunistic"] = "intraday"
     params_file: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -251,7 +279,7 @@ class AgentsConfig(Base):
     #: This is the main cost dial - each entry is roughly one LLM cycle per day.
     #: Set to [] to run the whole system rules-only at zero token cost.
     agent_cycles: list[str] = Field(
-        default_factory=lambda: ["overnight_signal", "overnight_entry"]
+        default_factory=lambda: ["carry_scan"]
     )
     #: MCP read tools exposed to the model. null = the built-in allowlist.
     #: Every tool's schema is re-sent on every turn, so this is the second
@@ -270,13 +298,14 @@ CycleAction = Literal[
     "report",
     "flatten",
     # Firewall-driven cycles. These fire at fixed ET boundaries and are the
-    # mechanism by which the two books never hold capital at the same time.
-    "intraday_cutoff",
+    # mechanism by which the resident and transient books never hold
+    # conflicting claims on the same capital.
     "discover",
-    "overnight_signal",
-    "overnight_verify",
-    "overnight_entry",
-    "overnight_exit",
+    "carry_scan",
+    "intraday_scan",
+    "intraday_cutoff",
+    "carry_verify",
+    "submission_flatten",
 ]
 
 
@@ -298,6 +327,30 @@ class ScheduleConfig(Base):
 # --------------------------------------------------------------------------- #
 # telemetry / app / backtest / partners
 # --------------------------------------------------------------------------- #
+class CostModelConfig(Base):
+    """Modelled transaction costs, per COST_STRUCTURE.md.
+
+    Paper trading charges none of this and fills optimistically at mid. Reporting
+    a fee- and spread-adjusted P&L line alongside the raw number is cheap,
+    honest, and the difference between a judge discovering the gap and reading
+    that we measured it.
+    """
+
+    enabled: bool = True
+    occ_clearing: float = 0.025
+    orf: float = 0.015
+    cat_per_contract: float = 0.0003
+    taf_sell: float = 0.00329
+    sec_rate: float = 0.0000206
+    #: Half-spread assumption per leg, in dollars. Tune from live quotes.
+    modelled_slippage_per_leg: float = 0.02
+    margin_rate_annual: float = 0.0625
+    #: Index products carry exchange fees on top. symbol -> $/contract.
+    index_exchange_fees: dict[str, float] = Field(
+        default_factory=lambda: {"SPX": 0.66, "SPXW": 0.59, "VIX": 0.45, "XSP": 0.0}
+    )
+
+
 class TelemetryConfig(Base):
     run_dir: str = "runs"
     journal: str = "runs/journal.jsonl"
@@ -469,6 +522,7 @@ class Config(Base):
     app: AppConfig = Field(default_factory=AppConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     partners: PartnersConfig = Field(default_factory=PartnersConfig)
+    cost_model: CostModelConfig = Field(default_factory=CostModelConfig)
 
     def enabled_strategies(self, book: str | None = None) -> list[StrategyRef]:
         found = [s for s in self.strategies if s.enabled]

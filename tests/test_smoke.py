@@ -54,34 +54,40 @@ def settings(tmp_path):
     s.config.telemetry.db = str(tmp_path / "oaa.sqlite")
     s.config.telemetry.equity_curve = str(tmp_path / "equity.csv")
     s.config.agents.memory.path = str(tmp_path / "memory.sqlite")
+    s.config.firewall.ledger_path = str(tmp_path / "ledger.json")
+    # The dated submission controls are real config, but a test suite must not
+    # start failing the day the cutoff passes.
+    s.config.management.entry_cutoff_utc = None
+    for ref in s.config.strategies:
+        ref.params.setdefault("exits", {})["entry_cutoff_utc"] = None
     return s
 
 
-def _intraday_orchestrator(settings, chain, bars, frozen_clock):
-    """An orchestrator whose clock sits inside the intraday window.
+def _orchestrator(settings, chain, bars, frozen_clock, at="11:00"):
+    """An orchestrator whose clock sits inside a chosen session phase.
 
-    The firewall now gates every cycle on the ET session phase, so a smoke test
-    that runs at an arbitrary wall-clock time would be blocked - correctly.
+    The firewall gates every cycle on the ET session phase, so a smoke test that
+    ran at an arbitrary wall-clock time would be blocked - correctly.
     """
     from oaa.agents.orchestrator import Orchestrator
     from oaa.firewall.lock import TemporalFirewall
 
     broker = SimBroker(settings.config)
     firewall = TemporalFirewall(settings.config)
-    firewall.clock.freeze(frozen_clock("11:00"))
+    firewall.clock.freeze(frozen_clock(at))
     orch = Orchestrator(
         settings, broker, FakeData(settings.config, chain, bars), firewall=firewall
     )
     return orch, broker
 
 
-def test_full_cycle_runs_dry_without_network(settings, chain, bars, frozen_clock):
+def test_carry_cycle_runs_dry_without_network(settings, chain, bars, frozen_clock):
     for strategy in settings.config.strategies:
         strategy.params["universe"] = ["SPY"]
 
-    orch, broker = _intraday_orchestrator(settings, chain, bars, frozen_clock)
+    orch, broker = _orchestrator(settings, chain, bars, frozen_clock)
     try:
-        result = orch.run_cycle("scan_and_trade", "smoke")
+        result = orch.run_cycle("carry_scan", "smoke")
         assert result.symbols_scanned == 1
         assert result.ideas_generated >= 1
         assert not result.errors
@@ -92,16 +98,16 @@ def test_full_cycle_runs_dry_without_network(settings, chain, bars, frozen_clock
         orch.close()
 
 
-def test_the_intraday_book_takes_the_lock_before_trading(settings, chain, bars, frozen_clock):
+def test_the_transient_books_lease_headroom_before_trading(settings, chain, bars, frozen_clock):
     from oaa.firewall.lock import Book
 
     for strategy in settings.config.strategies:
         strategy.params["universe"] = ["SPY"]
 
-    orch, _ = _intraday_orchestrator(settings, chain, bars, frozen_clock)
+    orch, _ = _orchestrator(settings, chain, bars, frozen_clock)
     try:
         assert orch.firewall.holder() is None
-        orch.run_cycle("scan_and_trade", "smoke")
+        orch.run_cycle("intraday_scan", "smoke")
         assert orch.firewall.holder() is Book.INTRADAY
         assert orch.firewall.budget_for(Book.INTRADAY) > 0
     finally:
@@ -110,10 +116,10 @@ def test_the_intraday_book_takes_the_lock_before_trading(settings, chain, bars, 
 
 def test_a_cycle_outside_its_window_is_blocked_not_executed(settings, chain, bars, frozen_clock):
     """The firewall refusing a cycle is the system working, not failing."""
-    orch, _ = _intraday_orchestrator(settings, chain, bars, frozen_clock)
+    orch, _ = _orchestrator(settings, chain, bars, frozen_clock)
     try:
-        orch.firewall.clock.freeze(frozen_clock("15:56"))   # overnight entry window
-        result = orch.run_cycle("scan_and_trade", "smoke-blocked")
+        orch.firewall.clock.freeze(frozen_clock("15:20"))   # transient cutoff window
+        result = orch.run_cycle("intraday_scan", "smoke-blocked")
         assert result.orders_placed == 0
         assert result.firewall_passed is False
     finally:
@@ -121,21 +127,18 @@ def test_a_cycle_outside_its_window_is_blocked_not_executed(settings, chain, bar
 
 
 def test_the_full_daily_sequence_runs_end_to_end(settings, chain, bars, frozen_clock):
-    """09:35 exit -> 10:00 intraday -> 15:15 cutoff -> 15:45/15:54/15:55 overnight."""
-    from oaa.firewall.lock import Book
-
+    """discover -> intraday -> carry -> manage -> 15:15 cutoff -> 15:45 sign-off."""
     for strategy in settings.config.strategies:
         strategy.params["universe"] = ["SPY"]
 
-    orch, broker = _intraday_orchestrator(settings, chain, bars, frozen_clock)
+    orch, broker = _orchestrator(settings, chain, bars, frozen_clock)
     try:
         sequence = [
-            ("09:35", "overnight_exit"),
-            ("10:00", "scan_and_trade"),
+            ("09:50", "intraday_scan"),
+            ("11:00", "carry_scan"),
+            ("12:00", "manage_positions"),
             ("15:15", "intraday_cutoff"),
-            ("15:45", "overnight_signal"),
-            ("15:54", "overnight_verify"),
-            ("15:55", "overnight_entry"),
+            ("15:45", "carry_verify"),
             ("16:10", "report"),
         ]
         for time, action in sequence:
@@ -143,22 +146,43 @@ def test_the_full_daily_sequence_runs_end_to_end(settings, chain, bars, frozen_c
             result = orch.run_cycle(action, action)
             assert not result.errors, f"{action}: {result.errors}"
 
-        # After the cutoff the day book is locked out; the night book verified.
-        assert orch.firewall.state.intraday_disabled_until is not None
-        assert orch.firewall.holder() in (Book.OVERNIGHT, None)
+        # After the cutoff the transient books are locked out for the session.
+        assert orch.firewall.state.transient_disabled_until is not None
+        assert orch.firewall.holder() is None
         assert broker.cash == broker.starting_cash      # still a dry run
     finally:
         orch.close()
 
 
+def test_the_carry_book_is_not_flattened_at_the_cutoff(settings, chain, bars, frozen_clock):
+    """The whole point of a resident book: theta accrues on calendar days, and
+    a nightly round trip would pay the spread for nothing."""
+    from oaa.core.types import PositionSnapshot
+    from oaa.firewall.ledger import LedgerEntry
+
+    orch, broker = _orchestrator(settings, chain, bars, frozen_clock, at="15:20")
+    try:
+        broker._positions["SPY260911P00470000"] = PositionSnapshot(
+            symbol="SPY260911P00470000", qty=-1, avg_entry_price=1.0,
+            market_value=-100.0, underlying="SPY",
+        )
+        orch.firewall.ledger.entries["SPY260911P00470000"] = LedgerEntry(
+            symbol="SPY260911P00470000", book="carry"
+        )
+        result = orch.run_cycle("intraday_cutoff", "smoke-cutoff")
+        assert result.firewall_passed
+        assert "SPY260911P00470000" in broker._positions
+    finally:
+        orch.close()
+
+
 def test_status_reports_the_wiring(settings, chain, bars, frozen_clock):
-    orch, _ = _intraday_orchestrator(settings, chain, bars, frozen_clock)
+    orch, _ = _orchestrator(settings, chain, bars, frozen_clock)
     try:
         status = orch.status()
-        assert status["profile"] == "dev"
         assert status["dry_run"] is True
-        assert "vol_carry_condor" in status["strategies"]["intraday"]
-        assert "overnight_pairs" in status["strategies"]["overnight"]
+        assert "vol_carry" in status["strategies"]["carry"]
+        assert "event_premium" in status["strategies"]["opportunistic"]
         assert status["firewall"]["enabled"] is True
         assert status["regt_buying_power"] is not None
     finally:
@@ -185,5 +209,39 @@ def test_manage_cycle_closes_a_position_at_its_profit_target(settings, chain, ba
     try:
         result = orch.run_cycle("manage_positions", "smoke-manage")
         assert result.positions_closed == 1
+    finally:
+        orch.close()
+
+
+def test_the_submission_flatten_fires_from_the_clock_not_from_memory(
+    settings, chain, bars, frozen_clock
+):
+    """`entry_cutoff_utc` and `submission_flatten_utc` are set in config on
+    purpose. Relying on someone remembering to trigger a flatten manually on
+    deadline day is how a book ends up marked-to-mid at judging."""
+    import datetime as dtm
+
+    from oaa.agents.runner import Runner
+    from oaa.core.types import PositionSnapshot
+
+    settings.config.execution.dry_run = False
+    settings.config.management.submission_flatten_utc = "2020-01-01T00:00:00Z"
+    settings.config.agents.enabled = False
+
+    orch, broker = _orchestrator(settings, chain, bars, frozen_clock, at="11:00")
+    try:
+        broker._positions["SPY260911P00470000"] = PositionSnapshot(
+            symbol="SPY260911P00470000", qty=-1, avg_entry_price=1.0,
+            market_value=-100.0, underlying="SPY",
+        )
+        runner = Runner(orch)
+        runner._check_submission_flatten(dtm.datetime.now(dtm.timezone.utc))
+
+        assert orch.firewall.state.flattened_for_submission
+        assert broker._positions == {}
+        # And nothing may open afterwards.
+        from oaa.firewall.lock import Book
+
+        assert orch.firewall.may_open(Book.CARRY)[0] is False
     finally:
         orch.close()
