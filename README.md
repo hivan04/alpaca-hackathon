@@ -136,6 +136,8 @@ src/oaa/
   backtest/              replay harness, honestly labelled
 
 docs/ARCHITECTURE.md         the full system, outer frame down to each gate
+docs/OAA-pipeline-flowchart.pdf  the whole operating pipeline as one diagram
+docs/OAA-architecture.pdf        the architecture doc, print-ready
 docs/FIREWALL.md             the capital boundary, in detail
 docs/DISCOVERY.md            universe discovery and the macro lens
 docs/DEPLOYMENT.md           PM2, systemd, Docker, VS Code
