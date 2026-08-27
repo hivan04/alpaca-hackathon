@@ -84,6 +84,7 @@ def version() -> None:
 def doctor(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> None:
     """Check every prerequisite. Run this before you need it to work."""
     import importlib
+    import os
     import shutil
 
     from oaa.config.loader import load_settings
@@ -132,6 +133,16 @@ def doctor(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> None
         f"{creds.masked()} (profile={creds.profile}, paper={creds.paper})")
     row("judged account id", bool(creds.account_id),
         creds.account_id or "set ALPACA_JUDGED_ACCOUNT_ID in .env - required at submission",
+        warn=True)
+
+    # Paper vs live is decided by broker.paper in YAML and forced onto every
+    # subprocess from there. A stray ALPACA_PAPER_TRADE in .env looks like a
+    # switch and is not one, which is the dangerous kind of dead config.
+    stray = os.getenv("ALPACA_PAPER_TRADE")
+    row("paper/live switch", stray is None,
+        f"broker.paper={cfg.broker.paper} (YAML is authoritative)" if stray is None
+        else f"ALPACA_PAPER_TRADE={stray} in .env has NO effect - remove it, "
+             f"broker.paper={cfg.broker.paper} is what applies",
         warn=True)
 
     # live connection
