@@ -27,7 +27,11 @@ def test_strategy_params_are_inlined_from_files():
     cfg = load_config()
     carry = next(s for s in cfg.strategies if s.name == "vol_carry")
     assert carry.book == "carry"
-    assert carry.params["premium_gate"]["iv_rank_min"] >= 0.5
+    # Lowered to 0.35 on 27 Aug: at 0.70 this one gate rejected 304 of 304
+    # replayed candidates. The floor still has to be a floor, though - a carry
+    # book that sells premium at median richness is not a carry book, so pin a
+    # band rather than deleting the assertion.
+    assert 0.30 <= carry.params["premium_gate"]["iv_rank_min"] <= 0.50
     assert 7 <= carry.params["structures"]["dte_min"] <= carry.params["structures"]["dte_max"] <= 14
 
 

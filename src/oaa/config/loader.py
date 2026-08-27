@@ -137,6 +137,13 @@ def load_config(
     if overrides:
         merged = _deep_merge(merged, overrides)
 
+    # An explicit `--profile` beats OAA_PROFILE in .env, always. Without this
+    # the env overlay silently wins and `oaa <cmd> --profile judged` quietly
+    # keeps running on the dev account - the exact failure the profile split
+    # exists to prevent, and one that leaves no trace in the output.
+    if profile:
+        merged["profile"] = profile
+
     merged = _load_strategy_params(merged, root)
     return Config.model_validate(merged)
 

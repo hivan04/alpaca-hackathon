@@ -75,6 +75,14 @@ class RateLimitConfig(Base):
 
 
 class DataConfig(Base):
+    #: How realised volatility is measured. `vol_carry` gates on IV - RV, so
+    #: this is not a detail: the free IEX feed is ~2% of the tape and its daily
+    #: "close" is the last IEX print rather than the closing auction, which
+    #: inflates a close-to-close estimate. Measured on our own universe over 20
+    #: sessions, close-to-close ran 1.3-2.3x the Garman-Klass estimate from the
+    #: SAME bars (MSFT: 56.3% vs 24.1%). Garman-Klass reads the daily range
+    #: instead, so one bad closing print barely moves it.
+    volatility_estimator: Literal["garman_klass", "close_to_close"] = "garman_klass"
     provider: str = "alpaca"
     stock_feed: Literal["iex", "sip", "delayed_sip", "otc"] = "iex"
     option_feed: Literal["indicative", "opra"] = "indicative"
@@ -108,6 +116,11 @@ class UniverseConfig(Base):
         return [s for s in self.symbols if s not in excluded]
 
 
+class _VolEstimator:
+    CLOSE = "close_to_close"
+    GARMAN_KLASS = "garman_klass"
+
+
 class OptionsConfig(Base):
     min_days_to_expiry: int = 3
     max_days_to_expiry: int = 45
@@ -136,6 +149,12 @@ class RiskConfig(Base):
     max_net_vega: float = 50.0
     daily_loss_limit_pct: float = 0.04
     max_drawdown_halt_pct: float = 0.15
+    #: Minutes before the same strategy may open another structure on the
+    #: same underlying. Without this a book re-enters at every cycle: the
+    #: broker NETS identical legs into one position, so neither the
+    #: position count nor the per-underlying leg count changes and every
+    #: other portfolio limit stays blind to it. 0 disables the check.
+    reentry_cooldown_minutes: int = 60
     no_trade_open_minutes: int = 5
     no_trade_close_minutes: int = 10
 
@@ -248,12 +267,18 @@ class StrategyRef(Base):
 
 
 class LLMConfig(Base):
-    provider: Literal["anthropic", "openai"] | None = "anthropic"
+    provider: Literal["anthropic", "openai", "gemini"] | None = "anthropic"
     model: str = "claude-sonnet-4-5"
     temperature: float = 0.2
     max_tokens: int = 4000
     timeout_seconds: int = 90
     fallback_to_rules: bool = True
+    #: Which environment variable holds the key. Defaults per provider:
+    #: ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY.
+    api_key_env: str | None = None
+    #: Gemini only. Makes repeated calls far more reproducible, which is the
+    #: difference between a backtest and a coin flip.
+    seed: int | None = None
 
 
 class CriticConfig(Base):
@@ -371,13 +396,125 @@ class AppConfig(Base):
     refresh_seconds: int = 15
 
 
+class BacktestIVConfig(Base):
+    """How the replay harness models implied volatility. See backtest/ivmodel.py.
+
+    There is no historical option chain on the free tier, so IV rank and the
+    IV-RV spread - the two inputs the carry book actually trades on - have to
+    be modelled. These knobs are the model, and they belong in config rather
+    than in code so the deck can show what was assumed.
+    """
+
+    vrp_multiple: float = 1.13
+    anchor_halflife_days: float = 45.0
+    rv_lookback: int = 20
+    market_beta: float = 0.45
+    rank_lookback: int = 252
+    market_symbol: str = "SPY"
+
+
+class BacktestChainConfig(Base):
+    """The modelled volatility surface, spread and liquidity. See backtest/chain.py."""
+
+    skew: float = -0.11
+    smile: float = 0.06
+    term_slope: float = 0.02
+    rate: float = 0.04
+    strike_window_pct: float = 0.14
+    max_strikes_per_side: int = 30
+    min_quotable_mid: float = 0.03
+    #: symbol -> liquidity tier name; unknown symbols fall to `default_tier`
+    tier_map: dict[str, str] = Field(default_factory=dict)
+    default_tier: str = "single_name"
+    #: real     - list the actual contracts and mark them from real Alpaca
+    #:            option bars, recovering implied vol by inverting Black-Scholes
+    #:            on the traded price. Gaps (contract-days with no print) fall
+    #:            back to the surface below and are counted in the run's
+    #:            coverage. THE DEFAULT.
+    #: modelled - the whole chain from the surface. No option API calls at all;
+    #:            useful offline and for isolating what the pricing model does.
+    source: Literal["real", "modelled"] = "real"
+    #: calendar days of option history pulled before `start`, so implied vol has
+    #: something to be ranked against. Longer is better and costs more requests.
+    iv_history_days: int = 180
+    #: minimum sessions with a usable print before a symbol's real IV series is
+    #: trusted; below it the harness falls back to the modelled series and says so
+    min_iv_observations: int = 20
+    #: strike band for LISTING real contracts inside the replay window. Much
+    #: tighter than `strike_window_pct`, which sizes the modelled ladder: a
+    #: 14-delta short strike at 7-14 DTE sits ~3% from spot and the wings are
+    #: a few points beyond it, so anything past ~6% is a contract the strategy
+    #: will never look at and a bar request that buys nothing.
+    listing_band: float = 0.06
+    #: strike band for contracts BEFORE the replay window. Those exist only to
+    #: recover a historical ATM implied-vol series, so near-the-money is all
+    #: that is needed.
+    iv_history_band: float = 0.03
+    #: In the history period, keep at most one expiry per this many days. SPY
+    #: now lists an expiration almost every trading day; recovering one ATM
+    #: implied-vol reading per session does not need all of them, and listing
+    #: them all is tens of thousands of contracts.
+    iv_history_expiry_stride_days: int = 7
+    #: safety valve on the contract listing per underlying. Exceeding it is
+    #: logged, never silent.
+    max_contracts_per_symbol: int = 12_000
+
+
+class BacktestCriticConfig(Base):
+    """The critic, in replay. See backtest/critic.py.
+
+    `heuristic` is the default on purpose: it is the real `Critic` class with
+    the documented null-LLM fallback, so it is deterministic and free. `llm`
+    calls the actual model - useful for inspecting the quality of the reasoning
+    on a handful of trades, NOT for producing a P&L number, because the model
+    may have the replayed period in its training data.
+    """
+
+    mode: Literal["off", "heuristic", "llm"] = "heuristic"
+    #: hard cap on model calls per run; past it the critic degrades to the
+    #: heuristic, which is the same degradation the live system has
+    max_llm_calls: int = 250
+    #: feed the critic the outcomes of trades already closed in this replay,
+    #: exactly as the live agent feeds it
+    memory: bool = True
+    #: The provider the REPLAY uses, overriding `agents.llm`. Live trading is
+    #: a handful of calls a day; a replay scores every candidate in every
+    #: session and is re-run whenever a parameter moves, so the two have
+    #: completely different cost shapes and should not share a model. Set to
+    #: null to inherit `agents.llm` instead.
+    llm: LLMConfig | None = Field(
+        default_factory=lambda: LLMConfig(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            temperature=0.0,
+            max_tokens=1024,
+            api_key_env="GEMINI_API_KEY",
+            seed=7,
+        )
+    )
+
+
 class BacktestConfig(Base):
     start: str = "2026-06-01"
     end: str = "2026-08-22"
     initial_cash: float = 100_000.0
+    #: 0.0 fills at mid (what paper does); 1.0 pays the full quoted side.
     slippage_spread_fraction: float = 0.5
     commission_per_contract: float = 0.0
     output_dir: str = "runs/backtests"
+    #: sessions the replay evaluates, in Eastern time
+    session_times_et: list[str] = Field(default_factory=lambda: ["10:00"])
+    #: how far back a session looks for headlines feeding the catalyst read
+    news_lookback_hours: float = 18.0
+    fetch_news: bool = True
+    #: complete sessions of history required before a symbol becomes tradable
+    min_history_days: int = 40
+    #: extra calendar days of bars pulled before `start`, to warm the indicators
+    warmup_days: int = 400
+    cache_dir: str = "data/cache/backtest"
+    iv_model: BacktestIVConfig = Field(default_factory=BacktestIVConfig)
+    chain: BacktestChainConfig = Field(default_factory=BacktestChainConfig)
+    critic: BacktestCriticConfig = Field(default_factory=BacktestCriticConfig)
 
 
 # --------------------------------------------------------------------------- #

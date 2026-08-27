@@ -37,6 +37,13 @@ env: ## Create .env and config/local.yaml from the examples
 	@[ -f .env ] || (cp .env.example .env && echo "created .env - fill it in")
 	@[ -f config/local.yaml ] || cp config/local.example.yaml config/local.yaml
 
+.PHONY: requirements
+requirements: ## Regenerate the pinned requirements.txt from a .[all] install
+	$(BIN)/pip install -e '.[all]' >/dev/null
+	$(BIN)/pip freeze --exclude-editable > /tmp/oaa-freeze.txt
+	$(BIN)/python scripts/gen_requirements.py /tmp/oaa-freeze.txt requirements.txt
+	@echo "(pyproject.toml stays the source of truth)"
+
 .PHONY: tools
 tools: ## Install the Alpaca CLI, MCP server and agent skills
 	./scripts/install_tools.sh
@@ -93,6 +100,28 @@ report: ## Build the performance report (JSON + HTML)
 .PHONY: serve
 serve: ## Run the public dashboard
 	$(BIN)/oaa serve
+
+.PHONY: backtest
+backtest: ## Replay the strategies over Alpaca history (modelled option chain)
+	$(BIN)/oaa backtest --why 12
+
+.PHONY: bt
+bt: ## Terminal backtest: no critic, reasons + trades. Fetches and caches bars.
+	$(BIN)/oaa backtest --profile dev --critic off --no-save --why 15 --trades
+
+.PHONY: bt-offline
+bt-offline: ## Same, but refuses the network. Needs a warm cache - run `make bt` first.
+	$(BIN)/oaa backtest --profile dev --offline --critic off --no-save \
+		--why 15 --trades
+
+.PHONY: bt-wiring
+bt-wiring: ## Synthetic smoke test - proves the plumbing, NOT a result
+	$(BIN)/oaa backtest --profile dev --source synthetic --no-news --offline \
+		--critic off --no-save --why 15 --trades
+
+.PHONY: dashboard
+dashboard: ## Streamlit operator dashboard: backtesting + live trading
+	$(BIN)/oaa dashboard
 
 .PHONY: mcp-tools
 mcp-tools: ## List the tools the Alpaca MCP server exposes

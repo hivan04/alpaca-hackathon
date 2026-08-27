@@ -109,15 +109,29 @@ def test_carry_defers_to_the_macro_lens_on_an_idiosyncratic_flag(chain, bars, ac
     assert strat.generate(ctx) == []
 
 
-def test_carry_exits_at_thirty_percent_not_fifty(chain, bars, account):
+def test_carry_exits_leave_room_for_execution_cost(chain, bars, account):
+    """The exit pair sets the breakeven hit rate, and the breakeven hit rate
+    sets what the cost gate can afford.
+
+    A win is +target x credit and a loss is -stop x credit, so breakeven is
+    stop / (target + stop). The original 30% / 2.0x needed 87% BEFORE paying
+    any spread, against 88% observed on real data - one point of margin, and
+    the cost gate was admitting trades at 95.7% breakeven. 50% / 1.5x moves
+    breakeven to 75% and makes the same cost ceiling survivable.
+    """
     strat, cfg = strategy("vol_carry")
     strat.ref.params["universe"] = ["SPY"]
     ctx = StrategyContext(market=context(chain, bars), account=account,
                           config=cfg, params=strat.params)
     idea = strat.generate(ctx)[0]
-    assert strat.should_exit(ctx, idea, 0.20) is None
-    assert "profit target" in (strat.should_exit(ctx, idea, 0.32) or "")
-    assert "credit" in (strat.should_exit(ctx, idea, -2.5) or "")
+
+    target = strat.p("exits.profit_target_pct")
+    stop = strat.p("exits.loss_multiple_of_credit")
+    assert stop / (target + stop) <= 0.80
+
+    assert strat.should_exit(ctx, idea, target - 0.05) is None
+    assert "profit target" in (strat.should_exit(ctx, idea, target + 0.02) or "")
+    assert "credit" in (strat.should_exit(ctx, idea, -(stop + 0.5)) or "")
 
 
 def test_momentum_needs_a_confirmed_trend(chain, bars, account):

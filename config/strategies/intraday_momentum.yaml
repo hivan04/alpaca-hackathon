@@ -7,9 +7,9 @@
 # against a $10-30 target, so no edge survives.
 # =============================================================================
 
-enabled: false                     # explicit opt-in; this book is built second
+enabled: true                      # PRIMARY book from 27 Aug - see below
 universe: ["SPY", "QQQ"]
-bar_interval: 5m
+bar_interval: 1m
 
 momentum:
   min_bars: 30
@@ -19,10 +19,19 @@ momentum:
   # two 5-minute bars after the event; insisting on the very last bar would
   # discard real signals for a polling artefact. Keep it small - the signal
   # decays in minutes.
-  cross_lookback_bars: 3
+  # Widened from 3 on 27 Aug, and the unit changed with it: on 1-minute bars
+  # this is 15 minutes, which is exactly the gap between two session times. A
+  # cross can no longer fall between two cycles and go unseen. Do NOT raise it
+  # much further - beyond the polling interval it starts re-firing on a cross
+  # an earlier cycle already acted on.
+  cross_lookback_bars: 15
   atr_period: 14
   volume_zscore_min: 1.0
   volume_bucket_minutes: 30        # 09:45 volume is not comparable to 12:30
+  # The bucket baseline needs prior sessions. Replay now carries
+  # `data.intraday_lookback_days` of them, as live always did - before that
+  # it saw only the current day, the baseline never reached its three-sample
+  # floor, and `require_volume` vetoed every backtested candidate.
   require_volume: true
   persistence_bars: 2              # reject the single-bar spike that reverts
 

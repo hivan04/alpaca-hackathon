@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass, field
 
+from oaa.core import clock
 from oaa.core.errors import DataError
 from oaa.core.types import OptionQuote, Right
 
@@ -64,7 +65,7 @@ class ChainView:
         chain_filter: ChainFilter | None = None,
         asof: dt.date | None = None,
     ) -> ChainView:
-        day = asof or dt.date.today()
+        day = asof or clock.today()
         cf = chain_filter or ChainFilter()
         kept = [q for q in quotes if cf.accepts(q, day)]
         return cls(symbol=symbol, spot=spot, quotes=kept, asof=day)

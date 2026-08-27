@@ -18,12 +18,12 @@ Two design decisions worth stating, because both are safety properties:
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from oaa.core import clock
 from oaa.core.logging import get_logger
 
 log = get_logger("firewall.ledger")
@@ -87,7 +87,7 @@ class PositionLedger:
     def register(self, idea: Any, book: str | None = None) -> None:
         """Record every leg of an opened structure against its book."""
         owner = book or getattr(idea, "book", "intraday")
-        today = dt.date.today().isoformat()
+        today = clock.today().isoformat()
         for leg in getattr(idea, "legs", []):
             symbol = str(leg.symbol).upper()
             self.entries[symbol] = LedgerEntry(

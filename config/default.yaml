@@ -60,7 +60,11 @@ data:
   delayed_minutes: 15
   # The intraday book needs a session VWAP; daily bars cannot express one.
   fetch_intraday: true
-  intraday_timeframe: "5Min"
+  # 1Min from 27 Aug. On 5-minute bars the momentum book's `min_bars: 30` floor
+  # is not met until 12:00 ET, which with the lunch skip left it a 13:30-14:45
+  # window - 75 minutes a day for the book nominally running as PRIMARY. At one
+  # minute the floor clears by 10:00 and the whole session is reachable.
+  intraday_timeframe: "1Min"
   intraday_lookback_days: 5
   # Per-symbol headlines for the intraday catalyst gate - Alpaca-native, so
   # there is no scraper to maintain and nothing to break on day three.
@@ -251,8 +255,14 @@ firewall:
 # order is routed. No LLM can talk its way past them.
 # -----------------------------------------------------------------------------
 risk:
-  max_positions: 12
-  max_new_positions_per_day: 6
+  # Raised 27 Aug. These are SELF-IMPOSED limits, not hackathon rules - the
+  # event sets no position caps. The old 12/6 pair was the binding constraint
+  # on trade count (max_positions rejected 11 candidates in a 61-session run),
+  # and at 0.3 trades per session the judged 5-6 day window expected fewer
+  # than two trades. The portfolio risk cap below still bounds total exposure,
+  # so this raises TURNOVER rather than aggregate risk.
+  max_positions: 25
+  max_new_positions_per_day: 12
   max_positions_per_underlying: 2
   # Fraction of account equity at risk in a single defined-risk structure.
   max_risk_per_trade_pct: 0.02
@@ -307,7 +317,7 @@ strategies:
   # intraday loop firing junk orders is permanently on the record. The carry
   # book's P&L is the asset being protected here.
   - name: intraday_momentum
-    enabled: false
+    enabled: true
     weight: 1.0
     book: intraday
     params_file: "config/strategies/intraday_momentum.yaml"
@@ -341,7 +351,11 @@ strategies:
 agents:
   enabled: true
   llm:
-    provider: anthropic          # anthropic | openai | null (rules-only mode)
+    # The LIVE loop's provider. The backtest has its own - see
+    # backtest.critic.llm below - because a replay scores every candidate in
+    # every session and is re-run constantly, while a live cycle is a handful
+    # of calls a day.
+    provider: anthropic          # anthropic | openai | gemini | null (rules-only)
     model: "claude-sonnet-4-5"
     temperature: 0.2
     max_tokens: 4000
@@ -474,9 +488,104 @@ backtest:
   end: "2026-08-22"
   initial_cash: 100000.0
   # Conservative fill model: we cross a fraction of the spread on every fill.
+  # 0.0 fills at mid, which is what paper trading does and what flatters every
+  # options backtest ever written. Charged on entry AND exit.
   slippage_spread_fraction: 0.5
   commission_per_contract: 0.0     # Alpaca options are commission-free
   output_dir: "runs/backtests"
+  # Sessions the replay evaluates, Eastern time. The carry book's entry window
+  # is 10:00-15:00, so one 10:00 scan is the honest minimum.
+  # The intraday book enters between 09:45 and 14:45 and skips 11:30-13:30, so
+  # a single 10:00 scan can only ever catch one of its windows. The carry
+  # book's window is 10:00-15:00 and is unaffected by the extra scans - its
+  # gates still apply at each one.
+  # Every 15 minutes, 10:00-14:45. A VWAP cross is an EVENT that lasts minutes;
+  # sampling four times a day observed roughly 60 of 390 session minutes and
+  # required the cross to land inside one of them, which is why 86% of replayed
+  # candidates died at "no VWAP cross". `cross_lookback_bars` is set to cover
+  # the gap between these times so no cross falls between two cycles.
+  session_times_et: [
+    "10:00", "10:15", "10:30", "10:45", "11:00", "11:15",
+    "13:30", "13:45", "14:00", "14:15", "14:30", "14:45",
+  ]
+  news_lookback_hours: 18.0
+  fetch_news: true
+  min_history_days: 40
+  warmup_days: 400
+  cache_dir: "data/cache/backtest"
+
+  # The critic, in replay. The live decision path is
+  #   cost -> critic -> risk engine -> partner veto -> execute
+  # so the replay runs the same one. See docs/BACKTEST.md.
+  critic:
+    # off       - skip it; diff against this to measure what the critic adds
+    # heuristic - the real Critic class with the null-LLM fallback the live
+    #             system degrades to. Deterministic, free. THE DEFAULT.
+    # llm       - call the model. Verdicts are cached on disk by prompt hash,
+    #             so a re-run costs nothing and returns identical answers.
+    #             Read the reasoning with it; do NOT quote a P&L from it - the
+    #             model may have the replayed period in its training data.
+    mode: heuristic
+    max_llm_calls: 250
+    memory: true
+    # The REPLAY's provider, overriding agents.llm. Set to null to share the
+    # live one. Gemini here, Anthropic live: the replay is the expensive caller.
+    # Model IDs move - gemini-2.5-flash-lite is cheaper, gemini-3.x-flash newer.
+    llm:
+      provider: gemini
+      model: "gemini-2.5-flash"
+      api_key_env: GEMINI_API_KEY
+      temperature: 0.0             # a judge should not be creative
+      max_tokens: 1024
+      seed: 7                      # reproducibility, alongside the disk cache
+      timeout_seconds: 90
+      fallback_to_rules: true
+
+  iv_model:
+    # How implied vol is MODELLED - Alpaca serves no historical chain.
+    # IV is anchored to a slow EWMA of realised vol and scaled by the market's
+    # own vol level, so the IV-RV spread widens when vol collapses and goes
+    # negative when it spikes. A flat multiple of realised vol would make the
+    # premium gate meaningless. See docs/BACKTEST.md.
+    vrp_multiple: 1.13
+    anchor_halflife_days: 45.0
+    rv_lookback: 20
+    market_beta: 0.45
+    rank_lookback: 252
+    market_symbol: SPY
+
+  chain:
+    # real     - list the ACTUAL contracts (expired ones included) and mark them
+    #            from REAL Alpaca option bars, recovering implied vol by
+    #            inverting Black-Scholes on the traded price. Contract-days with
+    #            no print fall back to the surface below and are counted, so the
+    #            dashboard can show how much of a run was measured.
+    # modelled - the whole chain from the surface. No option API calls.
+    source: real
+    iv_history_days: 180           # option history pulled before `start`, so IV
+                                   # rank has something real to rank against
+    min_iv_observations: 20        # below this, fall back to the modelled series
+    # How WIDE to list real contracts. These matter more than they look: SPY
+    # lists an expiration almost every trading day, so a band that is twice as
+    # wide as it needs to be is thousands of pointless contracts and hundreds
+    # of pointless bar requests. A 14-delta short strike at 7-14 DTE sits ~3%
+    # from spot and the wings are a few points past it, so 6% is generous.
+    listing_band: 0.06
+    iv_history_band: 0.03          # pre-window contracts only recover ATM IV
+    iv_history_expiry_stride_days: 7   # one expiry per week is enough for that
+    max_contracts_per_symbol: 12000    # backstop; if it fires, narrow the bands
+
+    # The modelled surface. Used for gaps, for the bid-ask spread (bars are
+    # OHLCV, not quotes), and for everything when source: modelled.
+    skew: -0.11                    # negative = the standard equity put skew
+    smile: 0.06
+    term_slope: 0.02
+    rate: 0.04
+    strike_window_pct: 0.14
+    max_strikes_per_side: 30
+    min_quotable_mid: 0.03
+    default_tier: single_name
+    tier_map: {}                   # SYMBOL: index_etf | mega_cap | single_name | illiquid
 
 # -----------------------------------------------------------------------------
 # Technology partners. The hackathon requires sponsor tech in the pipeline; the

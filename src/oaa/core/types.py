@@ -157,9 +157,13 @@ class MarketContext(Model):
     spot: float
     prev_close: float | None = None
     bars: list[dict[str, Any]] = Field(default_factory=list)
-    #: Intraday bars (5m by default) for the momentum book. Daily bars cannot
-    #: express a session VWAP, and a VWAP that bleeds across days anchors to
-    #: yesterday's value area rather than the level anyone is trading against.
+    #: Intraday bars for the momentum book, spanning `data.intraday_lookback_days`
+    #: sessions - the same window the live provider fetches. `vwap_series`
+    #: restarts on each day boundary, so a multi-day window still yields a
+    #: SESSION VWAP; what the extra days buy is a time-of-day volume baseline
+    #: and enough bars for the momentum book's `min_bars` floor early in a
+    #: session. Replay carrying only the current day made the backtest a
+    #: strictly more restrictive strategy than the live one.
     intraday_bars: list[dict[str, Any]] = Field(default_factory=list)
     chain: list[OptionQuote] = Field(default_factory=list)
     realised_vol: float | None = None

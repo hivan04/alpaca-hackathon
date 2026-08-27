@@ -13,7 +13,14 @@ universe: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA"]
 # paid more than the stock has actually been moving. Both required; either
 # alone is a known false-positive generator.
 premium_gate:
-  iv_rank_min: 0.70
+  # Lowered from 0.70 on 27 Aug. Measured: 304 of 304 replayed candidates were
+  # rejected by this one gate, and observed IV rank never exceeded 38%. A 70%
+  # floor is a genuinely rare state - over a 5-6 session judged window it is
+  # close to a coin flip whether it occurs at all, which is not a strategy, it
+  # is a lottery ticket. 35% sells less-rich premium, so expect a lower win
+  # rate and a smaller credit per trade; the IV-RV spread gate below is what
+  # still has to be cleared, and it is the one carrying the actual edge.
+  iv_rank_min: 0.35
   iv_rank_lookback_days: 252
   iv_rv_spread_min: 0.03           # 3 vol points
 
@@ -38,7 +45,26 @@ event_gate:
 # deliberate trade of tail risk for realised P&L inside the window - right for
 # seven days, wrong for a live book. Say so in the deck.
 structures:
-  short_delta_target: 0.14         # 10-16 delta short strikes
+  # 25-delta shorts, raised from 14 on 27 Aug. The reasoning, because the number
+  # looks reckless next to conventional short-premium practice and is not:
+  #
+  # The BREAKEVEN hit rate is set entirely by the exit pair (stop / (target +
+  # stop) = 75% at 50%/1.5x). It does not move when the strikes move. What DOES
+  # move is the credit: 14-delta shorts collect ~17% of width, 25-delta ~30%,
+  # so return on risk per trade roughly doubles (10% -> 21%) against an
+  # unchanged bar.
+  #
+  # The cost is that the true hit rate falls as the shorts approach the money -
+  # roughly 72% of condors expire inside 14-delta wings against ~50% inside
+  # 25-delta ones, though taking 50% of max profit early beats both. Whether the
+  # realised hit rate stays above 75% is EMPIRICAL, and this setting is a
+  # hypothesis to be measured, not a conclusion. If backtests over a real chain
+  # show the hit rate falling below 75%, this goes back to 0.20 or 0.14.
+  #
+  # Side effect worth knowing: max loss per structure falls (width - credit =
+  # 5 - 1.5 = $350 against $424 at 14 delta), so risk-based sizing will trade
+  # MORE contracts for the same equity risk.
+  short_delta_target: 0.25         # 22-28 delta short strikes
   wing_width_points: 5
   dte_min: 7
   dte_max: 14
@@ -70,10 +96,27 @@ sizing:
 # exist for closed trades, and the equity curve becomes a curve rather than one
 # flat line with a single mark at the end. The cost is EV per trade. Over a
 # longer horizon 50% is better; over five sessions, realised beats theoretical.
+# BREAKEVEN ARITHMETIC (recomputed 27 Aug, and it drove the numbers below).
+# A win is +target x credit, a loss is -stop x credit, so the hit rate that
+# breaks even is  stop / (target + stop)  before costs:
+#
+#   target 30% / stop 2.0x  ->  87.0%   <- the old setting
+#   target 50% / stop 1.5x  ->  75.0%   <- this one
+#
+# The observed win rate on the first real-data run was 88%. At 30%/2.0x that
+# left ONE point of margin before any spread cost, and the affordable spread
+# was 2.4% of credit against a gate that admitted 20%. Every trade the cost
+# gate passed was one the arithmetic said would lose. 50%/1.5x moves breakeven
+# to 75% and makes the cost gate below honest.
+#
+# The cost: a 50% target closes fewer trades inside a five-session window, so
+# more positions are marked rather than realised at judging. That trade-off is
+# real and was the reason for 30% - but 30% was buying realised trades at the
+# price of negative expectancy, which is not a trade worth making.
 exits:
-  profit_target_pct: 0.30
+  profit_target_pct: 0.50
   dte_floor: 3                     # gamma rises sharply into expiry
-  loss_multiple_of_credit: 2.0
+  loss_multiple_of_credit: 1.5
   defensive_mode: close_tested_side
   entry_cutoff_utc: "2026-09-02T20:00:00Z"
 
@@ -87,4 +130,17 @@ cost:
   # §5 suggests 0.15, but that figure was written for a two-leg vertical; a
   # four-leg condor crosses four spreads on the way in and four on the way out,
   # so the same underlying quote width lands roughly twice as heavily here.
+  # Left at 0.20, and the reasoning matters more than the number.
+  #
+  # A four-leg condor crosses EIGHT half-spreads on a round trip. Even on
+  # 2%-wide quotes that is ~18% of a typical credit - so a ceiling much below
+  # 20% does not tighten the strategy, it deletes it. The gate was never the
+  # problem.
+  #
+  # What was wrong is that under the OLD exits (30% / 2.0x) a trade at this
+  # ceiling needed a 95.7% hit rate to break even, against 88% observed: the
+  # gate was admitting trades the arithmetic said would lose. Under 50% / 1.5x
+  # the same 20% ceiling implies an 85.0% breakeven - three points of margin.
+  #
+  # Same number, opposite meaning, because the exits changed underneath it.
   max_spread_cost_vs_credit: 0.20

@@ -38,6 +38,7 @@ import datetime as dt
 import statistics
 from typing import Any
 
+from oaa.core import clock
 from oaa.core.errors import DataError, StrategyError
 from oaa.core.logging import get_logger
 from oaa.core.types import MarketContext, Right, TradeIdea
@@ -61,7 +62,7 @@ class EventPremium(Strategy):
         if market is None:
             return []
         checks: list[GateResult] = []
-        now = dt.datetime.now(dt.timezone.utc)
+        now = clock.utcnow()
 
         # 1. is a qualifying print actually due? ---------------------------- #
         event = self._due_event(ctx, now)

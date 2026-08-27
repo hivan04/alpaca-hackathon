@@ -45,6 +45,57 @@ def realised_vol(bars: Sequence[Bar], lookback: int = 20, annualise: bool = True
     return round(vol * math.sqrt(252) if annualise else vol, 6)
 
 
+def garman_klass_vol(
+    bars: Sequence[Bar], lookback: int = 20, annualise: bool = True
+) -> float | None:
+    """Realised volatility from the daily range, not the closing print.
+
+    Why this exists: the free Alpaca feed is IEX, which is roughly 2% of the
+    consolidated tape, and its daily "close" is the last IEX trade rather than
+    the official closing auction. That injects noise straight into a
+    close-to-close estimate. Measured on our own universe, close-to-close
+    volatility runs 1.2-1.45x the Garman-Klass estimate from the same bars -
+    on MSFT, 30.4% against 21.0%, about nine volatility points of pure
+    microstructure noise.
+
+    That is not a cosmetic difference. `vol_carry` gates on IV - RV >= 3%, so an
+    RV inflated by noise makes rich premium look fairly priced and vetoes
+    trades that were never actually marginal. MSFT was rejected on a -19.7%
+    IV-RV spread; most of that was the estimator, not the market.
+
+    Garman-Klass uses the open, high, low and close of each bar, so a single
+    bad closing print moves it far less. It also has ~7x the efficiency of a
+    close-to-close estimator at the same sample size, which matters on a
+    20-day lookback.
+
+        sigma^2 = 0.5 * ln(H/L)^2 - (2 ln2 - 1) * ln(C/O)^2
+
+    Still an estimator over a thin feed - the honest fix is the SIP feed - but
+    it is strictly better than close-to-close on the data we have.
+    """
+    if len(bars) < lookback:
+        return None
+    window = list(bars)[-lookback:]
+    terms: list[float] = []
+    for bar in window:
+        high, low = float(bar.get("high", 0)), float(bar.get("low", 0))
+        close, open_ = float(bar.get("close", 0)), float(bar.get("open", 0))
+        if min(high, low, close, open_) <= 0 or low > high:
+            continue
+        hl = math.log(high / low)
+        co = math.log(close / open_)
+        terms.append(0.5 * hl * hl - (2 * math.log(2) - 1) * co * co)
+    if len(terms) < 2:
+        return None
+    variance = sum(terms) / len(terms)
+    if variance <= 0:
+        # Garman-Klass can go negative on a bar that closed outside its own
+        # range - a broken print. Fall back rather than return a nan.
+        return realised_vol(bars, lookback, annualise)
+    vol = math.sqrt(variance)
+    return round(vol * math.sqrt(252) if annualise else vol, 6)
+
+
 def atr(bars: Sequence[Bar], period: int = 14) -> float | None:
     if len(bars) < period + 1:
         return None
@@ -378,3 +429,13 @@ def crossed(values: Sequence[float], reference: Sequence[float], lookback: int =
 def _bar_date(bar: Bar):
     stamp = bar.get("timestamp")
     return stamp.date() if isinstance(stamp, dt_module.datetime) else None
+
+
+def vol_estimator(name: str = "garman_klass"):
+    """Resolve the configured realised-volatility estimator.
+
+    One place, so the backtest and the live agent cannot silently disagree
+    about what "realised vol" means - which would make every IV-RV comparison
+    between them meaningless.
+    """
+    return garman_klass_vol if name == "garman_klass" else realised_vol

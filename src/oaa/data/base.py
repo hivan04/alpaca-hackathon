@@ -11,6 +11,7 @@ import datetime as dt
 from typing import Any
 
 from oaa.config.schema import Config
+from oaa.core import clock
 from oaa.core.registry import Registry
 from oaa.core.types import MarketContext, OptionQuote
 
@@ -57,7 +58,7 @@ class MarketDataProvider(abc.ABC):
 
     @staticmethod
     def _today() -> dt.date:
-        return dt.date.today()
+        return clock.today()
 
 
 data_registry: Registry[MarketDataProvider] = Registry("data provider")

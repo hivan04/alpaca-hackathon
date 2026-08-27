@@ -50,6 +50,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+from oaa.core import clock
 from oaa.core.errors import DataError, StrategyError
 from oaa.core.logging import get_logger
 from oaa.core.types import MarketContext, Right, TradeIdea
@@ -75,7 +76,7 @@ class VolCarry(Strategy):
 
         # 0. dated window --------------------------------------------------- #
         cutoff = self.p("exits.entry_cutoff_utc") or ctx.config.management.entry_cutoff_utc
-        window = entry_window_gate(dt.datetime.now(dt.timezone.utc), cutoff)
+        window = entry_window_gate(clock.utcnow(), cutoff)
         checks.append(window)
         if not window:
             return self._reject(ctx, market, checks)
@@ -212,11 +213,11 @@ class VolCarry(Strategy):
     def _event_gate(self, market: MarketContext) -> GateResult:
         """Pure downside removal. No model input, no scoring."""
         dte_max = int(self.p("structures.dte_max", 14))
-        horizon = dt.date.today() + dt.timedelta(days=dte_max)
+        horizon = clock.today() + dt.timedelta(days=dte_max)
         metrics: dict[str, float] = {"window_days": float(dte_max)}
 
         if self.p("event_gate.exclude_earnings_in_window", True) and market.earnings_date:
-            if dt.date.today() <= market.earnings_date <= horizon:
+            if clock.today() <= market.earnings_date <= horizon:
                 return GateResult.veto(
                     "event",
                     f"earnings on {market.earnings_date} sits inside the expiry window - "
@@ -227,7 +228,7 @@ class VolCarry(Strategy):
         exdiv = market.enrichment.get("ex_dividend_date")
         if self.p("event_gate.exclude_exdiv_short_calls", True) and exdiv:
             parsed = exdiv if isinstance(exdiv, dt.date) else None
-            if parsed and dt.date.today() <= parsed <= horizon:
+            if parsed and clock.today() <= parsed <= horizon:
                 return GateResult.veto(
                     "event",
                     f"ex-dividend on {parsed} inside the window - assignment risk on "
@@ -370,7 +371,7 @@ class VolCarry(Strategy):
         expiry = idea.meta.get("expiry")
         if expiry:
             try:
-                remaining = (dt.date.fromisoformat(str(expiry)) - dt.date.today()).days
+                remaining = (dt.date.fromisoformat(str(expiry)) - clock.today()).days
             except ValueError:
                 remaining = None
             if remaining is not None and remaining <= floor:

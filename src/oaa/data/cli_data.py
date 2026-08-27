@@ -31,7 +31,13 @@ from oaa.core.errors import DataError
 from oaa.core.logging import get_logger
 from oaa.core.types import Greeks, MarketContext, OptionQuote, Right
 from oaa.data.base import MarketDataProvider, data_registry
-from oaa.data.indicators import adx, iv_rank, realised_vol, trend_strength, volume_ratio
+from oaa.data.indicators import (
+    adx,
+    iv_rank,
+    trend_strength,
+    vol_estimator,
+    volume_ratio,
+)
 from oaa.options.occ import parse_occ
 
 log = get_logger("data.cli")
@@ -295,7 +301,7 @@ class AlpacaCliDataProvider(MarketDataProvider):
             intraday_bars=intraday,
             news=headlines,
             chain=chain,
-            realised_vol=realised_vol(history, 20),
+            realised_vol=vol_estimator(self.cfg.data.volatility_estimator)(history, 20),
             implied_vol=atm_iv,
             iv_rank=iv_rank(atm_iv, self._iv_history.get(symbol, [])),
             trend_strength=trend_strength(history),

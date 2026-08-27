@@ -13,6 +13,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from oaa.core import clock
 from oaa.core.logging import get_logger
 
 log = get_logger("agents.memory")
@@ -61,7 +62,7 @@ class Memory:
                 "(ts,symbol,strategy,structure,pnl,pnl_pct,held_days,thesis,outcome,notes) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
-                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                    clock.utcnow().isoformat(),
                     symbol, strategy, structure, round(pnl, 2), round(pnl_pct, 5),
                     round(held_days, 2), thesis, outcome,
                     json.dumps(notes or {}, default=str),
@@ -70,7 +71,7 @@ class Memory:
 
     def recent(self, limit: int = 20) -> list[dict[str, Any]]:
         cutoff = (
-            dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.lookback_days)
+            clock.utcnow() - dt.timedelta(days=self.lookback_days)
         ).isoformat()
         with sqlite3.connect(self.path) as conn:
             conn.row_factory = sqlite3.Row

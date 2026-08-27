@@ -10,6 +10,7 @@ import datetime as dt
 import re
 from dataclasses import dataclass
 
+from oaa.core import clock
 from oaa.core.types import Right
 
 _OCC_RE = re.compile(r"^(?P<root>[A-Z]{1,6})(?P<ymd>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$")
@@ -26,7 +27,7 @@ class OccSymbol:
         return build_occ(self.root, self.expiry, self.right, self.strike)
 
     def dte(self, asof: dt.date | None = None) -> int:
-        return (self.expiry - (asof or dt.date.today())).days
+        return (self.expiry - (asof or clock.today())).days
 
 
 def build_occ(

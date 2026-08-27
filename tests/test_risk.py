@@ -124,3 +124,91 @@ def test_size_by_risk_is_floor_not_round():
 def test_kelly_is_capped():
     assert kelly_fraction(0.9, 5.0) <= 0.25
     assert kelly_fraction(0.1, 0.5) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Re-entering a position you already hold
+#
+# Both the sim broker and Alpaca NET identical option symbols, so opening the
+# same condor twice produces one position at double size, not two positions.
+# Every portfolio limit keyed on a COUNT - max_positions, the per-underlying leg
+# count - is therefore blind to it. Measured on a replay polled every fifteen
+# minutes: eight identical IWM condors in one session, every limit reading green.
+# --------------------------------------------------------------------------- #
+def _held(idea_, account_):
+    """The account, holding exactly the legs of `idea_` on the same sides."""
+    account_.positions = [
+        PositionSnapshot(
+            symbol=leg.symbol,
+            qty=1.0 if leg.side is Side.BUY else -1.0,
+            avg_entry_price=2.0,
+            market_value=200.0,
+            asset_class="us_option",
+            underlying="SPY",
+        )
+        for leg in idea_.legs
+    ]
+    return account_
+
+
+def test_refuses_a_structure_already_held_leg_for_leg(cfg, account):
+    proposal = idea()
+    verdict = RiskEngine(cfg).evaluate(proposal, _held(proposal, account), now=MIDDAY)
+    assert not verdict.approved
+    assert any("duplicate_structure" in r for r in verdict.reasons)
+
+
+def test_the_same_legs_on_the_OPPOSITE_side_are_a_close_not_a_duplicate(cfg, account):
+    """Holding the mirror image is the position being closed out, and must not
+    be mistaken for re-entry - otherwise the engine refuses to let a book flat
+    itself."""
+    proposal = idea()
+    account.positions = [
+        PositionSnapshot(
+            symbol=leg.symbol,
+            qty=-1.0 if leg.side is Side.BUY else 1.0,
+            avg_entry_price=2.0, market_value=200.0,
+            asset_class="us_option", underlying="SPY",
+        )
+        for leg in proposal.legs
+    ]
+    verdict = RiskEngine(cfg).evaluate(proposal, account, now=MIDDAY)
+    assert verdict.checks.get("duplicate_structure") is True
+
+
+def test_the_reentry_cooldown_stops_a_second_entry_within_the_window(cfg, account):
+    cfg.risk.reentry_cooldown_minutes = 60
+    engine = RiskEngine(cfg)
+    proposal = idea()
+    assert engine.evaluate(proposal, account, now=MIDDAY).approved
+    engine.record_open(proposal, now=MIDDAY)
+
+    soon = engine.evaluate(proposal, account, now=MIDDAY + dt.timedelta(minutes=15))
+    assert not soon.approved
+    assert any("reentry_cooldown" in r for r in soon.reasons)
+
+    later = engine.evaluate(proposal, account, now=MIDDAY + dt.timedelta(minutes=61))
+    assert later.approved
+
+
+def test_the_cooldown_is_per_strategy_not_per_symbol(cfg, account):
+    """Two books legitimately trade the same underlying. A cooldown keyed on the
+    symbol alone would let whichever ran first mute the other."""
+    cfg.risk.reentry_cooldown_minutes = 60
+    engine = RiskEngine(cfg)
+    first = idea()
+    engine.record_open(first, now=MIDDAY)
+
+    other = idea()
+    other.strategy = "a_different_book"
+    verdict = engine.evaluate(other, account, now=MIDDAY + dt.timedelta(minutes=5))
+    assert verdict.approved
+
+
+def test_a_zero_cooldown_disables_the_check(cfg, account):
+    cfg.risk.reentry_cooldown_minutes = 0
+    engine = RiskEngine(cfg)
+    proposal = idea()
+    engine.record_open(proposal, now=MIDDAY)
+    verdict = engine.evaluate(proposal, account, now=MIDDAY + dt.timedelta(minutes=1))
+    assert verdict.approved

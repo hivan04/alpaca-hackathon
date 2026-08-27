@@ -720,7 +720,7 @@ class Orchestrator:
 
     def _record_open(self, idea: TradeIdea, strategy: Strategy) -> None:
         """Attribute every leg to its book, so 15:15 liquidates the right ones."""
-        self.risk.record_open()
+        self.risk.record_open(idea)
         self._open_ideas[idea.id] = idea
         self.firewall.ledger.register(idea, book=strategy.capital_book)
 

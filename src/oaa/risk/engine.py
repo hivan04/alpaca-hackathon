@@ -15,8 +15,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from oaa.config.schema import Config
+from oaa.core import clock
 from oaa.core.logging import get_logger
-from oaa.core.types import AccountSnapshot, RiskVerdict, TradeIdea
+from oaa.core.types import AccountSnapshot, RiskVerdict, Side, TradeIdea
 from oaa.options.occ import underlying_of
 from oaa.risk.sizing import size_by_risk
 
@@ -53,6 +54,9 @@ class RiskEngine:
         self.cfg = cfg
         self.limits = cfg.risk
         self.state = DayState()
+        #: (symbol, strategy) -> when that pair last opened something.
+        #: Backs the re-entry cooldown; see `reentry_cooldown_minutes`.
+        self.last_entry: dict[tuple[str, str], dt.datetime] = {}
         #: The temporal firewall. When present it is checked FIRST, before any
         #: other rule: a trade from the wrong book at the wrong minute is not a
         #: sizing question, it is a categorical refusal.
@@ -60,7 +64,7 @@ class RiskEngine:
 
     # -- session control ---------------------------------------------------- #
     def observe(self, account: AccountSnapshot, now: dt.datetime | None = None) -> None:
-        now = now or dt.datetime.now(dt.timezone.utc)
+        now = now or clock.utcnow()
         self.state.roll(now.date(), account.equity)
 
         if self.state.start_equity > 0:
@@ -83,8 +87,20 @@ class RiskEngine:
         self.state.halted = False
         self.state.halt_reason = None
 
-    def record_open(self) -> None:
+    def record_open(
+        self,
+        idea: TradeIdea | None = None,
+        now: dt.datetime | None = None,
+    ) -> None:
+        """Count the entry, and stamp it for the re-entry cooldown.
+
+        `idea` is optional so older call sites keep working, but a caller that
+        omits it opts that (symbol, strategy) pair out of the cooldown - the
+        engine has nothing to key on.
+        """
         self.state.opened_today += 1
+        if idea is not None:
+            self.last_entry[(idea.symbol, idea.strategy)] = now or clock.utcnow()
 
     # -- the gate ----------------------------------------------------------- #
     def evaluate(
@@ -95,7 +111,7 @@ class RiskEngine:
         market_open: bool = True,
     ) -> RiskVerdict:
         checks: dict[str, bool] = {}
-        now = now or dt.datetime.now(dt.timezone.utc)
+        now = now or clock.utcnow()
         self.observe(account, now)
 
         def fail(rule: str, reason: str) -> RiskVerdict:
@@ -160,6 +176,41 @@ class RiskEngine:
                 f"{self.limits.max_new_positions_per_day}",
             )
         checks["max_new_per_day"] = True
+
+        # A structure whose every leg is ALREADY held on the same side is not a
+        # new position, it is the same one doubled. Both this broker and Alpaca
+        # net identical option symbols, so the position count and the leg count
+        # below are unchanged by it and cannot catch it - which is how a book
+        # polled every 15 minutes opened eight identical condors in one session
+        # while every portfolio limit read green.
+        held = {p.symbol: p.qty for p in account.option_positions()}
+        if idea.legs and all(
+            (leg.symbol in held)
+            and ((held[leg.symbol] > 0) == (leg.side is Side.BUY))
+            for leg in idea.legs
+        ):
+            return fail(
+                "duplicate_structure",
+                f"already holding this exact {idea.structure.value} on "
+                f"{idea.symbol} - re-entering would double the position, not "
+                "open a new one",
+            )
+        checks["duplicate_structure"] = True
+
+        cooldown = int(getattr(self.limits, "reentry_cooldown_minutes", 0) or 0)
+        if cooldown > 0:
+            previous = self.last_entry.get((idea.symbol, idea.strategy))
+            if previous is not None:
+                elapsed = (now - previous).total_seconds() / 60.0
+                if elapsed < cooldown:
+                    return fail(
+                        "reentry_cooldown",
+                        f"{idea.strategy} opened {idea.symbol} "
+                        f"{elapsed:.0f} minutes ago; the cooldown is "
+                        f"{cooldown}. Polling more often is not the same as "
+                        "finding more opportunities.",
+                    )
+        checks["reentry_cooldown"] = True
 
         same_underlying = [
             p for p in account.option_positions()

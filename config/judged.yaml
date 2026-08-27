@@ -11,7 +11,12 @@ execution:
   dry_run: false          # this profile actually trades
 
 risk:
-  max_new_positions_per_day: 4
+  # Raised from 4 on 27 Aug. Self-imposed, not a hackathon rule. At 4/day the
+  # judged 5-6 session window could open at most 20 positions and, measured,
+  # expected fewer than two. The daily loss halt below is the real protection
+  # for an account judges read in full - a position count is a poor proxy for
+  # it, because it caps upside and downside equally.
+  max_new_positions_per_day: 12
   max_risk_per_trade_pct: 0.015
   daily_loss_limit_pct: 0.03
 

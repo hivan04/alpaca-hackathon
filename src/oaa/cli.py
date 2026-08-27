@@ -16,7 +16,9 @@
     oaa report            performance report -> JSON + HTML
     oaa partners          list technology-partner adapters and their stages
     oaa mcp-tools         list the tools the Alpaca MCP server exposes
-    oaa serve             the public dashboard
+    oaa serve             the public read-only dashboard (FastAPI)
+    oaa backtest          replay the strategies over Alpaca history
+    oaa dashboard         the Streamlit operator dashboard (backtest + live)
 """
 
 from __future__ import annotations
@@ -111,7 +113,8 @@ def doctor(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> None
 
     # packages
     for module, required in [("alpaca", True), ("yaml", True), ("pydantic", True),
-                             ("mcp", False), ("anthropic", False), ("fastapi", False)]:
+                             ("mcp", False), ("anthropic", False), ("google.genai", False),
+                             ("fastapi", False), ("streamlit", False), ("plotly", False)]:
         try:
             importlib.import_module(module)
             row(f"python: {module}", True)
@@ -134,6 +137,32 @@ def doctor(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> None
     row("judged account id", bool(creds.account_id),
         creds.account_id or "set ALPACA_JUDGED_ACCOUNT_ID in .env - required at submission",
         warn=True)
+
+    # LLM providers - live and backtest are deliberately different
+    def _llm_row(label: str, llm_cfg) -> None:
+        env_names = {
+            "anthropic": ["ANTHROPIC_API_KEY"],
+            "openai": ["OPENAI_API_KEY"],
+            "gemini": [llm_cfg.api_key_env or "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        }.get(llm_cfg.provider or "", [])
+        found = next((n for n in env_names if os.getenv(n)), None)
+        detail = f"{llm_cfg.provider or 'none'} / {llm_cfg.model}"
+        if not env_names:
+            row(label, True, detail + " (rules-only)")
+            return
+        row(
+            label, bool(found),
+            f"{detail} - key from {found}" if found
+            else f"{detail} - set {env_names[0]} in .env",
+            warn=True,
+        )
+
+    _llm_row("llm: live agent", cfg.agents.llm)
+    backtest_llm = cfg.backtest.critic.llm
+    if backtest_llm is None:
+        row("llm: backtest critic", True, "shares the live provider")
+    else:
+        _llm_row("llm: backtest critic", backtest_llm)
 
     # Paper vs live is decided by broker.paper in YAML and forced onto every
     # subprocess from there. A stray ALPACA_PAPER_TRADE in .env looks like a
@@ -491,6 +520,287 @@ def serve(
     )
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Backtesting
+# --------------------------------------------------------------------------- #
+def _normalise_reason(reason: str) -> str:
+    """Collapse a rejection reason to its shape by blanking the numbers.
+
+    "IV rank 19% is below the 70% floor" and "IV rank 4% is below the 70%
+    floor" are one finding, not two. Without this the breakdown is a list of
+    every distinct percentage the run happened to observe.
+    """
+    import re
+
+    return re.sub(r"[-+]?\d*\.?\d+", "N", reason or "").strip()
+
+
+def _reason_table(rejections: list[object], limit: int) -> Table:
+    """The reasons candidates were declined, most common first."""
+    import collections
+
+    counts = collections.Counter(
+        (r.strategy, r.vetoed_by, _normalise_reason(r.reason)) for r in rejections
+    )
+    table = Table(
+        title=f"why candidates were declined (top {limit} of {len(counts)} distinct)",
+        show_lines=False,
+    )
+    table.add_column("n", justify="right", style="bold")
+    table.add_column("strategy")
+    table.add_column("gate")
+    table.add_column("reason", overflow="fold")
+    for (strategy, gate, reason), count in counts.most_common(limit):
+        share = count / len(rejections)
+        table.add_row(
+            f"{count}", strategy, gate,
+            f"{reason}  [dim]({share:.0%})[/dim]",
+        )
+    return table
+
+
+def _trade_table(trades: list[object]) -> Table:
+    """Every trade, with what opened it and what closed it.
+
+    Column widths are pinned rather than left to Rich: an 80-column terminal
+    wraps every cell onto four lines otherwise, which turns a 20-trade run into
+    a page of unreadable fragments.
+    """
+    table = Table(title="trades", show_lines=False, box=None, pad_edge=False)
+    table.add_column("id", width=6, no_wrap=True)
+    table.add_column("symbol", width=6, no_wrap=True)
+    table.add_column("strategy", width=9, no_wrap=True)
+    table.add_column("opened", width=11, no_wrap=True)
+    table.add_column("held", width=5, justify="right", no_wrap=True)
+    table.add_column("net", width=9, justify="right", no_wrap=True)
+    table.add_column("RoR", width=7, justify="right", no_wrap=True)
+    table.add_column("exit", width=22, no_wrap=True)
+    for t in trades:
+        net = t.net_pnl
+        table.add_row(
+            t.trade_id, t.symbol, t.strategy[:9],
+            str(t.opened_at)[5:16].replace("T", " "),
+            f"{t.held_days:.1f}d",
+            f"[green]{net:+,.2f}[/green]" if net >= 0 else f"[red]{net:+,.2f}[/red]",
+            f"{t.return_on_risk:.1%}" if t.return_on_risk else "-",
+            (getattr(t, "exit_reason", "") or "")[:22],
+        )
+    return table
+
+
+@app.command()
+def backtest(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    symbols: str | None = typer.Option(None, "--symbols", "-s", help="Comma separated; defaults to the configured universe"),
+    start: str | None = typer.Option(None, help="YYYY-MM-DD"),
+    end: str | None = typer.Option(None, help="YYYY-MM-DD"),
+    strategies: str | None = typer.Option(None, help="Comma separated; defaults to every enabled strategy"),
+    cash: float | None = typer.Option(None, help="Initial capital"),
+    slippage: float | None = typer.Option(None, help="0.0 fills at mid, 1.0 pays the full quoted side"),
+    source: str = typer.Option("alpaca", help="alpaca | synthetic (synthetic is a wiring test, not a backtest)"),
+    news: bool = typer.Option(True, help="Fetch Alpaca headlines for the catalyst read"),
+    offline: bool = typer.Option(False, help="Use only bars already cached on disk"),
+    critic: str | None = typer.Option(
+        None, "--critic",
+        help="off | heuristic | llm. Default heuristic: the real Critic class "
+             "with the null-LLM fallback, deterministic and free. 'llm' calls "
+             "the model - inspect reasoning with it, do not quote P&L from it.",
+    ),
+    critic_model: str | None = typer.Option(
+        None, "--critic-model",
+        help="Override backtest.critic.llm.model for this run, e.g. "
+             "gemini-2.5-flash-lite. Model IDs move; the config default is a "
+             "safe one, not necessarily the cheapest.",
+    ),
+    label: str = typer.Option("", help="Name for this run"),
+    save: bool = typer.Option(True, help="Write the run to runs/backtests/"),
+    why: int = typer.Option(
+        12, "--why", "-w",
+        help="How many distinct rejection REASONS to print. The gate funnel "
+             "names which gate declined a candidate; this names why it did. "
+             "0 hides the breakdown.",
+    ),
+    trades: bool = typer.Option(
+        False, "--trades", "-t",
+        help="Print every closed trade with the gates that let it through.",
+    ),
+) -> None:
+    """Replay the strategies over Alpaca history with a modelled option chain.
+
+    The underlying prices and the headlines are real. The chain is modelled -
+    Alpaca's free tier serves no historical chain - so this proves the logic
+    fires when intended and sizes correctly. It is not evidence of edge.
+    """
+    import datetime as dtm
+
+    from oaa.app.identity import print_banner, resolve
+    from oaa.backtest.runner import BacktestRequest, run_backtest, save_run
+
+    settings = _settings_only(profile, config)
+    print_banner(resolve(settings, "Backtest"))
+    cfg = settings.config
+    if critic_model:
+        if cfg.backtest.critic.llm is None:
+            console.print(
+                "[red]backtest.critic.llm is null (the replay shares the live "
+                "provider), so --critic-model has nothing to override.[/red]"
+            )
+            raise typer.Exit(1)
+        cfg.backtest.critic.llm.model = critic_model
+
+    universe = (
+        [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        if symbols else cfg.universe.active()
+    )
+    request = BacktestRequest(
+        symbols=universe,
+        start=dtm.date.fromisoformat(start or cfg.backtest.start),
+        end=dtm.date.fromisoformat(end or cfg.backtest.end),
+        strategies=[s.strip() for s in (strategies or "").split(",") if s.strip()],
+        initial_cash=cash,
+        slippage_spread_fraction=slippage,
+        source=source,
+        use_news=news,
+        offline=offline,
+        critic_mode=critic,
+        label=label,
+    )
+    from oaa.core.errors import DataError
+
+    try:
+        result = run_backtest(settings, request)
+    except DataError as exc:
+        console.print(Panel(
+            f"[red]{exc}[/red]\n\n"
+            "The replay needs Alpaca historical bars. Check that the keys for "
+            f"profile [bold]{settings.config.profile}[/bold] are valid and that "
+            "this machine can reach data.alpaca.markets. Once a window has been "
+            "fetched it is cached under "
+            f"[bold]{settings.config.backtest.cache_dir}[/bold] and "
+            "[bold]--offline[/bold] will replay it with no network at all.",
+            title="no historical data", expand=False,
+        ))
+        raise typer.Exit(1) from None
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    metrics = result.metrics()
+
+    table = Table(title=f"Backtest {request.start} -> {request.end}", show_header=False)
+    table.add_column("metric", style="bold")
+    table.add_column("value", justify="right")
+    for key in (
+        "sessions", "trades", "closed_trades", "net_pnl", "total_return", "sharpe",
+        "max_drawdown", "volatility_annual", "win_rate", "worst_trade", "best_trade",
+        "profit_factor", "avg_hold_days", "gross_pnl", "total_modelled_cost",
+        "ideas_generated", "ideas_approved", "rejections",
+    ):
+        table.add_row(key.replace("_", " "), str(metrics.get(key)))
+    console.print(table)
+
+    risk = result.provenance.get("risk") or {}
+    if risk.get("profile") != "judged":
+        console.print(Panel(
+            f"These results use the [bold]{risk.get('profile')}[/bold] risk "
+            f"limits: {risk.get('max_risk_per_trade_pct', 0):.2%} per trade, "
+            f"{risk.get('max_new_positions_per_day')} new positions/day.\n"
+            "[yellow]The judged account runs different limits.[/yellow] Add "
+            "[bold]--profile judged[/bold] to calibrate against the "
+            "configuration that will actually trade.",
+            title="risk profile", expand=False,
+        ))
+
+    critic_stats = result.provenance.get("critic") or {}
+    if critic_stats.get("mode") != "off":
+        line = (
+            f"mode {critic_stats.get('mode')}  scored {critic_stats.get('scored')}  "
+            f"declined {critic_stats.get('declined')}  "
+            f"llm calls {critic_stats.get('llm_calls')}  "
+            f"cache hits {critic_stats.get('cache_hits')}"
+        )
+        provider = critic_stats.get("provider_config") or {}
+        if critic_stats.get("mode") == "llm":
+            line += f"\nprovider {provider.get('provider')} / {provider.get('model')}"
+        if critic_stats.get("degraded_to_heuristic"):
+            line += (
+                f"\n[yellow]{critic_stats['degraded_to_heuristic']} call(s) fell back "
+                "to the heuristic[/yellow]"
+            )
+        if critic_stats.get("lookahead_warning"):
+            line += f"\n[red]{critic_stats['lookahead_warning']}[/red]"
+        console.print(Panel(line, title="critic", expand=False))
+
+    funnel = result.rejection_funnel()
+    if funnel:
+        console.print(Panel(
+            "\n".join(f"{gate:<16} {count:>5}" for gate, count in funnel.items()),
+            title="candidates declined, by gate", expand=False,
+        ))
+
+    if why and result.rejections:
+        console.print(_reason_table(result.rejections, why))
+
+    if trades and result.trades:
+        console.print(_trade_table(result.trades))
+
+    if not result.trades:
+        console.print(Panel(
+            "No trade was approved in this window. The gate funnel above names "
+            "which gate declined each candidate and [bold]--why[/bold] names "
+            "the reason it gave. A gate holding ~100% of candidates is usually "
+            "a threshold set past what the data ever reaches, or a gate that "
+            "cannot be evaluated at all - not a market with no opportunities.",
+            title="zero trades", expand=False,
+        ))
+
+    if save:
+        directory = save_run(settings, request, result)
+        console.print(f"[dim]run saved to {directory}[/dim]")
+
+
+@app.command()
+def dashboard(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    port: int = typer.Option(8501, help="Port Streamlit listens on"),
+    headless: bool = typer.Option(True, help="Do not open a browser automatically"),
+) -> None:
+    """The Streamlit operator dashboard: backtesting and live trading."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from oaa.app.identity import print_banner, resolve
+
+    settings = _settings_only(profile, config)
+    print_banner(resolve(settings, "Dashboard launch"))
+
+    script = Path(__file__).resolve().parent / "app" / "dashboard.py"
+    env = dict(os.environ)
+    if profile:
+        env["OAA_PROFILE"] = profile
+    if config:
+        env["OAA_CONFIG"] = config
+
+    command = [
+        sys.executable, "-m", "streamlit", "run", str(script),
+        "--server.port", str(port),
+        "--server.headless", "true" if headless else "false",
+        "--browser.gatherUsageStats", "false",
+    ]
+    console.print(f"[bold]dashboard[/bold] -> http://localhost:{port}")
+    try:
+        subprocess.run(command, env=env, check=False)
+    except FileNotFoundError:
+        console.print(
+            "[red]streamlit is not installed.[/red] "
+            "Install the dashboard extra:  pip install -e '.[dashboard]'"
+        )
+        raise typer.Exit(1) from None
 
 
 # --------------------------------------------------------------------------- #

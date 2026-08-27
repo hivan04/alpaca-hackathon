@@ -85,3 +85,90 @@ def overnight_option_cost(
 def intrinsic_at_open(spot: float, strike: float, is_call: bool) -> float:
     """Exit value assumed at 09:35: intrinsic only, time value surrendered."""
     return max(0.0, spot - strike) if is_call else max(0.0, strike - spot)
+
+
+def implied_vol_from_price(
+    price: float,
+    spot: float,
+    strike: float,
+    years: float,
+    is_call: bool,
+    rate: float = 0.04,
+    low: float = 0.01,
+    high: float = 5.0,
+    tolerance: float = 1e-5,
+    max_iterations: int = 60,
+) -> float | None:
+    """Invert Black-Scholes: what vol does this traded price imply?
+
+    This is the function that lets the replay stop guessing. Alpaca serves real
+    historical option BARS but no historical greeks or implied vol, so IV has
+    to be recovered rather than modelled - and IV recovered from a real traded
+    price is market data with one arithmetic step applied, while IV inferred
+    from realised volatility is an assumption dressed as a measurement.
+
+    Bisection rather than Newton: vega collapses on deep out-of-the-money and
+    near-expiry contracts, which is exactly where a Newton step diverges, and
+    those contracts are the wings this strategy sells. Sixty bisections on a
+    monotonic function is fast enough and cannot blow up.
+
+    Returns None when the price is not invertible - at or below intrinsic
+    (no time value to explain), or outside the bracket. The caller must treat
+    that as missing data, never as zero vol.
+    """
+    if price <= 0 or spot <= 0 or strike <= 0 or years <= 0:
+        return None
+
+    intrinsic = max(0.0, spot - strike) if is_call else max(0.0, strike - spot)
+    if price <= intrinsic + 1e-9:
+        return None
+    # No-arbitrage ceiling: a call cannot be worth more than the stock.
+    if price >= (spot if is_call else strike):
+        return None
+
+    lo, hi = low, high
+    if bs_price(spot, strike, years, hi, is_call, rate) < price:
+        return None                      # even 500% vol does not reach this print
+
+    # Converge on VOL, not on price. Deep in- or out-of-the-money contracts have
+    # almost no vega, so a whole range of vols prices within any sane price
+    # tolerance - stopping on |value - price| there returns whichever vol the
+    # bisection happened to land on, which looks like a measurement and is not.
+    for _ in range(max_iterations):
+        mid = (lo + hi) / 2
+        if hi - lo < tolerance:
+            break
+        if bs_price(spot, strike, years, mid, is_call, rate) < price:
+            lo = mid
+        else:
+            hi = mid
+    vol = (lo + hi) / 2
+
+    # Refuse to report a vol the price cannot actually pin down. One vol tick
+    # must move the price by at least a cent, or this contract carries no
+    # volatility information and the honest answer is "unknown".
+    sensitivity = abs(
+        bs_price(spot, strike, years, vol * 1.05, is_call, rate)
+        - bs_price(spot, strike, years, vol * 0.95, is_call, rate)
+    )
+    if sensitivity < 0.01:
+        return None
+    return round(vol, 6)
+
+
+def bs_greeks(
+    spot: float, strike: float, years: float, vol: float, is_call: bool, rate: float = 0.04
+) -> dict[str, float]:
+    """Analytic greeks at a given vol. Per share; theta is per calendar day."""
+    if spot <= 0 or strike <= 0 or years <= 0 or vol <= 0:
+        return {"delta": bs_delta(spot, strike, years, vol, is_call, rate),
+                "gamma": 0.0, "vega": 0.0, "theta": 0.0}
+    sqrt_t = math.sqrt(years)
+    d1 = (math.log(spot / strike) + (rate + 0.5 * vol * vol) * years) / (vol * sqrt_t)
+    pdf = math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
+    return {
+        "delta": round(bs_delta(spot, strike, years, vol, is_call, rate), 4),
+        "gamma": round(pdf / (spot * vol * sqrt_t), 6),
+        "vega": round(spot * pdf * sqrt_t / 100.0, 4),
+        "theta": round(-(spot * pdf * vol) / (2 * sqrt_t) / 365.0, 4),
+    }

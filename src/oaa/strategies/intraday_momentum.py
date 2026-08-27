@@ -44,6 +44,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+from oaa.core import clock as wallclock
 from oaa.core.errors import DataError, StrategyError
 from oaa.core.logging import get_logger
 from oaa.core.types import MarketContext, Right, TradeIdea
@@ -167,7 +168,7 @@ class IntradayMomentum(Strategy):
             / (abs(self.p("exits.stop_pct_of_premium", 0.15))
                + self.p("exits.target_pct_of_premium", 0.10)), 4
         )
-        idea.meta["opened_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        idea.meta["opened_at"] = wallclock.utcnow().isoformat()
         idea.meta["size_multiplier"] = ctx.macro_size_multiplier(self.name)
         return [idea]
 
@@ -310,7 +311,7 @@ class IntradayMomentum(Strategy):
 
         view = engine.view(
             market.symbol,
-            now=dt.datetime.now(dt.timezone.utc),
+            now=wallclock.utcnow(),
             news=market.news,
             snapshot=getattr(ctx, "attention", None),
         )
@@ -422,7 +423,7 @@ class IntradayMomentum(Strategy):
             except ValueError:
                 started = None
             if started is not None:
-                held = (dt.datetime.now(dt.timezone.utc) - started).total_seconds() / 60
+                held = (wallclock.utcnow() - started).total_seconds() / 60
                 if held >= limit:
                     return f"time stop: {held:.0f} minutes in trade, the signal has decayed"
 
@@ -444,7 +445,7 @@ class IntradayMomentum(Strategy):
             return firewall.clock.now()
         from zoneinfo import ZoneInfo
 
-        return dt.datetime.now(ZoneInfo("America/New_York"))
+        return wallclock.now(ZoneInfo("America/New_York"))
 
     def _reject(
         self,
