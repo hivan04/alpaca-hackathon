@@ -18,6 +18,7 @@
     oaa mcp-tools         list the tools the Alpaca MCP server exposes
     oaa serve             the public read-only dashboard (FastAPI)
     oaa backtest          replay the strategies over Alpaca history
+    oaa weekend           the BTC/USD weekend book: status | scan | backtest | run
     oaa dashboard         the Streamlit operator dashboard (backtest + live)
 """
 
@@ -591,6 +592,127 @@ def _trade_table(trades: list[object]) -> Table:
 
 
 @app.command()
+def runs(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    show: str | None = typer.Option(
+        None, "--show", help="Run id (or a unique prefix) to open in full"
+    ),
+    limit: int = typer.Option(15, "--limit", "-n", help="How many runs to list"),
+    trades: bool = typer.Option(False, "--trades", help="With --show, list every trade"),
+) -> None:
+    """Saved backtests: list them, or open one without re-running it.
+
+    A replay costs minutes and its result is already on disk. Comparing today's
+    settings against this morning's should not mean running this morning's
+    again - and re-running it is not even a comparison, because the code has
+    moved underneath it.
+
+    Runs written with --no-save are not here. That is the usual reason the
+    newest entry is older than the backtest you just watched finish.
+    """
+    settings = _settings_only(profile, config)
+    root = settings.path(settings.config.backtest.output_dir)
+    saved = sorted(
+        (p for p in root.glob("*") if (p / "result.json").exists()),
+        reverse=True,
+    )
+    if not saved:
+        console.print(Panel(
+            f"No saved runs under {root}.\n\n"
+            "`make bt` passes --no-save, which writes nothing to disk. Run\n"
+            "  oaa backtest --start YYYY-MM-DD --end YYYY-MM-DD\n"
+            "without --no-save to keep one.",
+            title="no runs", border_style="yellow",
+        ))
+        return
+
+    if show:
+        matches = [p for p in saved if p.name.startswith(show) or show in p.name]
+        if not matches:
+            console.print(f"[red]no run matching {show!r}[/red]")
+            raise typer.Exit(1)
+        if len(matches) > 1:
+            console.print(f"[yellow]{show!r} matches {len(matches)} runs:[/yellow]")
+            for m in matches[:10]:
+                console.print(f"  {m.name}")
+            raise typer.Exit(1)
+        run = matches[0]
+        result = json.loads((run / "result.json").read_text())
+        metrics = result.get("metrics") or {}
+        request = (result.get("provenance") or {}).get("request") or {}
+
+        table = Table(box=None, pad_edge=False)
+        table.add_column("", style="dim", width=20)
+        table.add_column("", justify="right")
+        for key in (
+            "trades", "closed_trades", "net_pnl", "total_return", "sharpe",
+            "max_drawdown", "win_rate", "profit_factor", "avg_hold_days",
+            "total_modelled_cost", "ideas_generated", "ideas_approved",
+        ):
+            if key in metrics and metrics[key] is not None:
+                value = metrics[key]
+                table.add_row(
+                    key.replace("_", " "),
+                    f"{value:,.4f}" if isinstance(value, float) else str(value),
+                )
+        console.print(Panel(
+            table,
+            title=f"{run.name}  |  {request.get('start')} -> {request.get('end')}"
+                  f"  |  source {request.get('source', '?')}",
+        ))
+
+        funnel = result.get("rejection_funnel") or {}
+        if funnel:
+            gates = Table(title="declined by gate", box=None, pad_edge=False)
+            gates.add_column("gate", width=20)
+            gates.add_column("n", justify="right", width=6)
+            for gate, count in sorted(funnel.items(), key=lambda kv: -kv[1])[:10]:
+                gates.add_row(gate, str(count))
+            console.print(gates)
+
+        if trades and result.get("trades"):
+            from types import SimpleNamespace
+            console.print(_trade_table(
+                [SimpleNamespace(**t) for t in result["trades"]]
+            ))
+        console.print(f"\n[dim]chart:[/dim] python scripts/plot_trades.py "
+                      f"--run {run}")
+        return
+
+    listing = Table(title=f"saved backtests in {root}", box=None, pad_edge=False)
+    # Widths pinned to fit an 80-column terminal. Left to Rich, every row wraps
+    # onto four lines and a listing becomes unreadable.
+    listing.add_column("id", width=15, no_wrap=True)
+    listing.add_column("window", width=13, no_wrap=True)
+    listing.add_column("src", width=4, no_wrap=True)
+    listing.add_column("n", justify="right", width=4)
+    listing.add_column("net", justify="right", width=10)
+    listing.add_column("win", justify="right", width=4)
+    listing.add_column("symbols", width=17, no_wrap=True)
+    for run in saved[:limit]:
+        try:
+            payload = json.loads((run / "result.json").read_text())
+        except (OSError, ValueError):
+            continue
+        metrics = payload.get("metrics") or {}
+        request = (payload.get("provenance") or {}).get("request") or {}
+        net = float(metrics.get("net_pnl") or 0.0)
+        symbols = request.get("symbols") or []
+        listing.add_row(
+            run.name.split("__")[0],
+            f"{str(request.get('start', '?'))[5:]}>{str(request.get('end', '?'))[5:]}",
+            "synt" if request.get("source") == "synthetic" else "real",
+            str(metrics.get("trades", 0)),
+            f"[green]{net:+,.2f}[/green]" if net >= 0 else f"[red]{net:+,.2f}[/red]",
+            f"{float(metrics.get('win_rate') or 0):.0%}",
+            ",".join(symbols)[:26],
+        )
+    console.print(listing)
+    console.print("\n[dim]open one:[/dim] oaa runs --show <id> --trades")
+
+
+@app.command()
 def backtest(
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
@@ -697,9 +819,32 @@ def backtest(
         "max_drawdown", "volatility_annual", "win_rate", "worst_trade", "best_trade",
         "profit_factor", "avg_hold_days", "gross_pnl", "total_modelled_cost",
         "ideas_generated", "ideas_approved", "rejections",
+        "mixed_surface_marks", "risk_bound_clamps",
     ):
         table.add_row(key.replace("_", " "), str(metrics.get(key)))
     console.print(table)
+
+    if metrics.get("risk_bound_clamps"):
+        console.print(Panel(
+            f"[red]{metrics['risk_bound_clamps']} mark(s) broke the structure's own "
+            "arithmetic bound and were clamped to its defined risk.[/red]\n"
+            "A defined-risk structure cannot lose more than max_loss before costs, "
+            "so this is a PRICING fault, not a market outcome. Usually a stale "
+            "print on one leg. The clamped P&L is the honest one; the count is a "
+            "bug to chase.",
+            title="risk bound violated", expand=False,
+        ))
+    if metrics.get("mixed_surface_marks"):
+        console.print(Panel(
+            f"{metrics['mixed_surface_marks']} structure mark(s) had legs "
+            "disagreeing about provenance - some real, some modelled - and were "
+            "re-priced onto a single surface anchored on the real prints.\n"
+            "This is expected where the real option tape is thin. It is also why "
+            "`real_mark_fraction` on those trades is lower than the raw coverage "
+            "figure: mixing surfaces breaks the width bound that makes a condor "
+            "defined-risk, so one surface is chosen over more real marks.",
+            title="mixed-surface marks", expand=False,
+        ))
 
     risk = result.provenance.get("risk") or {}
     if risk.get("profile") != "judged":
@@ -1074,6 +1219,202 @@ def gates(
         + ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
         + "[/]"
     )
+
+# --------------------------------------------------------------------------- #
+# THE WEEKEND BOOK
+# --------------------------------------------------------------------------- #
+weekend_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "The weekend book: BTC/USD z-score mean reversion, ADX-gated, live only "
+        "between the Friday equity close and the Sunday flatten."
+    ),
+)
+app.add_typer(weekend_app, name="weekend")
+
+_WEEKEND_PARAMS = typer.Option(
+    "config/strategies/weekend_crypto.yaml", "--params", help="Weekend params YAML"
+)
+
+
+def _weekend_params(path: str):
+    from oaa.strategies.weekend.params import load_params
+
+    return load_params(path)
+
+
+@weekend_app.command("status")
+def weekend_status(params_path: str = _WEEKEND_PARAMS) -> None:
+    """Where the clock is, what is open, and what the book would do now."""
+    import datetime as dt
+
+    from oaa.strategies.weekend.engine import WeekendState
+
+    params = _weekend_params(params_path)
+    now = dt.datetime.now(dt.timezone.utc)
+    state = WeekendState.load()
+    console.print(Panel(params.describe(), title="weekend book"))
+    console.print(params.window.describe(now))
+    if state.position:
+        p = state.position
+        console.print(
+            f"open: {p.symbol} {p.qty} @ {p.entry:,.0f} "
+            f"(stop {p.stop:,.0f} / target {p.target:,.0f}, entered {p.entered_at})"
+        )
+    else:
+        console.print("[dim]flat[/]")
+    if state.cooldown_until:
+        console.print(f"[yellow]cooling down until {state.cooldown_until}[/]")
+
+
+@weekend_app.command("scan")
+def weekend_scan(
+    params_path: str = _WEEKEND_PARAMS,
+    symbol: str | None = typer.Option(None, "--symbol"),
+) -> None:
+    """One evaluation, no orders. Prints the gate stack in the order it ran."""
+    from oaa.strategies.weekend.data import fetch_bars, latest_quote
+    from oaa.strategies.weekend.signals import evaluate
+
+    params = _weekend_params(params_path)
+    target = symbol or params.symbols[0]
+    import datetime as dt
+
+    end = dt.datetime.now(dt.timezone.utc)
+    bars = fetch_bars(target, params.signal.timeframe, end - dt.timedelta(days=5), end)
+    signal = evaluate(target, bars, params)
+
+    table = Table(title=f"{target} - weekend gate stack", show_lines=False)
+    for column in ("gate", "result", "detail"):
+        table.add_column(column)
+    for check in signal.checks:
+        table.add_row(
+            check.gate,
+            "[green]pass[/]" if check.passed else "[red]VETO[/]",
+            check.reason or ", ".join(f"{k}={v:.4g}" for k, v in check.metrics.items()),
+        )
+    console.print(table)
+    console.print(signal.summary())
+
+    # The cost model's half-spread assumption is the softest number in the
+    # stack. Print the measured one beside it so it can be corrected rather
+    # than trusted.
+    quote = latest_quote(target)
+    if quote:
+        assumed = params.costs.half_spread_bp
+        measured = quote["spread_bp"] / 2
+        verdict = "[green]inside[/]" if measured <= assumed else "[red]WIDER than[/]"
+        console.print(
+            f"quote {quote['bid']:,.0f} / {quote['ask']:,.0f} - half spread "
+            f"{measured:.1f}bp, {verdict} the {assumed:.1f}bp the cost model assumes"
+        )
+
+
+@weekend_app.command("backtest")
+def weekend_backtest(
+    params_path: str = _WEEKEND_PARAMS,
+    days: int = typer.Option(365, "--days", help="History to replay"),
+    equity: float = typer.Option(100_000.0, "--equity"),
+    refresh: bool = typer.Option(False, "--refresh", help="Ignore the bar cache"),
+    json_out: str | None = typer.Option(None, "--json", help="Write the summary here"),
+) -> None:
+    """Replay the book over Alpaca crypto history, costs included."""
+    import json as _json
+
+    from oaa.strategies.weekend.backtest import run_backtest, sharpe_of_weekends
+
+    params = _weekend_params(params_path)
+    result = run_backtest(params, days=days, equity=equity, refresh=refresh)
+    summary = result.summary()
+    summary["weekend_sharpe"] = sharpe_of_weekends(result, equity)
+
+    console.print(Panel(params.describe(), title="parameters"))
+    table = Table(title=f"{result.symbol} weekend backtest")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for key, value in summary.items():
+        table.add_row(key, str(value))
+    console.print(table)
+
+    if result.trades:
+        trades = Table(title="trades")
+        for column in ("entered", "z", "adx", "entry", "exit", "reason", "pnl", "bp"):
+            trades.add_column(column, justify="right")
+        for t in result.trades[-25:]:
+            trades.add_row(
+                f"{t.entered_at:%d %b %H:%M}",
+                f"{t.z:.2f}",
+                f"{t.adx:.0f}",
+                f"{t.entry:,.0f}",
+                f"{t.exit_price:,.0f}" if t.exit_price else "-",
+                t.exit_reason,
+                f"[{'green' if t.pnl >= 0 else 'red'}]{t.pnl:,.2f}[/]",
+                f"{t.pnl_bp:+.0f}",
+            )
+        console.print(trades)
+    if json_out:
+        from pathlib import Path as _Path
+
+        _Path(json_out).write_text(
+            _json.dumps({"summary": summary, "trades": [t.to_row() for t in result.trades]}, indent=2),
+            encoding="utf-8",
+        )
+        console.print(f"[dim]wrote {json_out}[/]")
+
+
+@weekend_app.command("run")
+def weekend_run(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    params_path: str = _WEEKEND_PARAMS,
+    live: bool = typer.Option(False, "--live", help="Actually send orders"),
+    once: bool = typer.Option(False, "--once", help="One cycle, then exit"),
+) -> None:
+    """The autonomous weekend loop. Dry run unless --live AND enabled: true."""
+    import time
+
+    from oaa.strategies.weekend.engine import WeekendEngine
+
+    params = _weekend_params(params_path)
+    if live:
+        if not params.enabled:
+            console.print("[red]refusing --live: enabled is false in the params YAML[/]")
+            raise typer.Exit(1)
+        params.execution.dry_run = False
+    settings, broker, _data = _boot(profile, config)
+    engine = WeekendEngine(params, broker, journal=_journal(settings))
+
+    console.print(
+        Panel(
+            f"{params.describe()}\nprofile={settings.config.profile} "
+            f"dry_run={params.execution.dry_run}",
+            title="weekend runner",
+        )
+    )
+    while True:
+        report = engine.cycle()
+        console.print(report.line())
+        if once:
+            break
+        time.sleep(params.execution.poll_seconds)
+
+
+@weekend_app.command("flatten")
+def weekend_flatten(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    params_path: str = _WEEKEND_PARAMS,
+    live: bool = typer.Option(False, "--live"),
+) -> None:
+    """Close every crypto position now. The manual version of the Sunday cutoff."""
+    from oaa.strategies.weekend.engine import WeekendEngine
+
+    params = _weekend_params(params_path)
+    if live:
+        params.execution.dry_run = False
+    settings, broker, _data = _boot(profile, config)
+    engine = WeekendEngine(params, broker, journal=_journal(settings))
+    console.print(f"closed {engine.flatten('manual')} crypto position(s)")
 
 
 if __name__ == "__main__":  # pragma: no cover

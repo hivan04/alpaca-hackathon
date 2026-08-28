@@ -212,3 +212,65 @@ def test_a_zero_cooldown_disables_the_check(cfg, account):
     engine.record_open(proposal, now=MIDDAY)
     verdict = engine.evaluate(proposal, account, now=MIDDAY + dt.timedelta(minutes=1))
     assert verdict.approved
+
+
+def test_a_strategy_can_override_the_reentry_cooldown(cfg, account):
+    """One global cooldown cannot serve a book that holds for days and one that
+    holds for minutes.
+
+    The 60-minute default is sized for the intraday book. On the carry book,
+    which holds ~6 days, it let the same NVDA condor open at 14:00 and again at
+    15:15 on a 10:00-15:15 scan grid - 75 minutes apart, so the check passed.
+    That single duplicate was $784 of a $4,852 drawdown.
+    """
+    cfg.risk.reentry_cooldown_minutes = 60
+    engine = RiskEngine(cfg)
+
+    patient = idea()
+    patient.meta["reentry_cooldown_minutes"] = 1440
+    engine.record_open(patient, now=MIDDAY)
+
+    # 75 minutes later: past the global cooldown, inside the strategy's own.
+    later = engine.evaluate(patient, account, now=MIDDAY + dt.timedelta(minutes=75))
+    assert not later.approved
+    assert any("reentry_cooldown" in r for r in later.reasons)
+
+    # A book that did NOT override still gets the global 60.
+    brisk = idea()
+    brisk.strategy = "intraday_momentum"
+    engine.record_open(brisk, now=MIDDAY)
+    assert engine.evaluate(
+        brisk, account, now=MIDDAY + dt.timedelta(minutes=75)
+    ).approved
+
+
+# --------------------------------------------------------------------------- #
+# Kickoff-day audit fixes
+# --------------------------------------------------------------------------- #
+def test_a_credit_structure_requires_collateral_not_zero(cfg, account):
+    """`max(0, net_price)` is zero for every credit structure, so the cash gate
+    charged $0 for short verticals, condors and butterflies - the entire carry
+    book - and could not bind on the structures that most need it."""
+    proposal = idea(max_loss=300.0)
+    proposal.net_price = -2.0                      # a credit
+    account.equity = 100_000.0
+    account.options_buying_power = 1_000.0         # far too little for collateral
+    account.buying_power = 1_000.0
+
+    verdict = RiskEngine(cfg).evaluate(proposal, account, now=MIDDAY)
+    assert not verdict.approved
+    assert any("cash_buffer" in r for r in verdict.reasons)
+
+
+def test_the_daily_loss_baseline_survives_a_restart(cfg, account):
+    """A restart mid-session used to re-baseline to the already-lossy equity,
+    re-arming the whole loss budget."""
+    engine = RiskEngine(cfg)
+    account.equity = 97_400.0
+    account.last_equity = 100_000.0                # the broker's previous close
+    engine.observe(account, now=MIDDAY)
+    assert engine.state.start_equity == 100_000.0
+
+    account.equity = 96_000.0                      # -4.0% on the day
+    engine.observe(account, now=MIDDAY)
+    assert engine.state.halted, "the 3-4% daily loss limit should have halted"

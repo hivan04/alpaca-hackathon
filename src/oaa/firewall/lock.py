@@ -614,7 +614,10 @@ class TemporalFirewall:
         requirement = round(sum(abs(p.market_value) for p in resident), 2)
         verdict.carry_requirement = requirement
         cushion = float(self._setting("carry_margin_cushion", 1.25))
-        covered = (regt or 0.0) >= requirement * (cushion - 1.0)
+        # The cushion is a MULTIPLIER, not a margin above 1. `(cushion - 1.0)`
+        # turned a 1.25x requirement into 0.25x, so the 15:45 sign-off passed a
+        # book with one fifth of the buying power it was supposed to demand.
+        covered = (regt or 0.0) >= requirement * cushion
         headroom_ok = (
             snapshot.leverage_headroom is None or snapshot.leverage_headroom <= 1.0
         )

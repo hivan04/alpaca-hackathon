@@ -38,7 +38,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any
 
-from oaa.backtest.chain import ChainModel, tier_for
+from oaa.backtest.chain import ChainModel, _as_date, tier_for, years_to_expiry
 from oaa.backtest.pricing import bs_greeks, bs_price, implied_vol_from_price
 from oaa.core.logging import get_logger
 from oaa.core.types import Greeks, OptionQuote, Right
@@ -261,22 +261,32 @@ class RealChainBuilder:
         self,
         contract: str,
         spot: float,
-        asof: dt.date,
+        asof: dt.date | dt.datetime,
         fallback_iv: float,
         strike: float,
         expiry: dt.date,
         is_call: bool,
         tier_symbol: str,
+        force_model: bool = False,
     ) -> dict[str, float]:
-        """Mark one open contract on a later session, preferring the real bar."""
-        dte = (expiry - asof).days
-        if dte <= 0:
+        """Mark one open contract on a later session, preferring the real bar.
+
+        `force_model` ignores the real bar and prices from the model. The caller
+        uses it to put every leg of one structure on a SINGLE surface - see
+        `BacktestEngine._leg_marks`, which explains why that matters.
+        """
+        asof_date = _as_date(asof)
+        dte = (expiry - asof_date).days
+        years = years_to_expiry(expiry, asof)
+        if years <= 0:
+            # Genuinely done: expired, or past the close on its expiry day.
+            # NOT the same as "expires today", which still carries time value -
+            # see `years_to_expiry`, and the -100% trades that came of it.
             intrinsic = max(0.0, spot - strike) if is_call else max(0.0, strike - spot)
             return {"mid": round(intrinsic, 4), "bid": round(intrinsic, 4),
                     "ask": round(intrinsic, 4), "iv": 0.0, "dte": 0, "real": 1.0}
 
-        years = max(dte, 0.5) / _DAYS
-        bar = self.bars.get(contract, {}).get(asof)
+        bar = None if force_model else self.bars.get(contract, {}).get(asof_date)
         if bar is not None:
             mark = float(bar["close"])
             vol = implied_vol_from_price(mark, spot, strike, years, is_call, self.rate)

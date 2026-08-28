@@ -9,6 +9,16 @@ broker:
 
 execution:
   dry_run: false          # this profile actually trades
+  # Chase DISABLED on the judged account, 28 Aug. The chase loop cancels a
+  # resting order without checking whether the cancel succeeded, then submits
+  # the next step under a DIFFERENT client_order_id - so the idempotency guard
+  # cannot see the first order. If the original fills in the moment the cancel
+  # is issued (a normal race; a filled order cannot be cancelled) the book ends
+  # up with 2x the risk-approved quantity and the risk engine counts one entry.
+  # A slightly worse fill is a far cheaper problem than a doubled position on
+  # the account judges read.
+  chase:
+    enabled: false
 
 risk:
   # Raised from 4 on 27 Aug. Self-imposed, not a hackathon rule. At 4/day the
@@ -16,7 +26,11 @@ risk:
   # expected fewer than two. The daily loss halt below is the real protection
   # for an account judges read in full - a position count is a poor proxy for
   # it, because it caps upside and downside equally.
-  max_new_positions_per_day: 12
+  # 20, raised from 12 on 27 Aug. intraday_momentum alone is now allowed 12 a
+  # day, so a global cap of 12 would have silently pre-empted the carry book
+  # entirely once the day book got going. The daily LOSS limit below is the
+  # control that should bind, not a position count.
+  max_new_positions_per_day: 20
   max_risk_per_trade_pct: 0.015
   daily_loss_limit_pct: 0.03
 

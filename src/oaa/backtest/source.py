@@ -382,6 +382,22 @@ class HistoricalContextSource(ContextSource):
             row for row in history.intraday.get(day, [])
             if _parse_ts(row["timestamp"]) <= moment
         ]
+        # The session OPEN is the right no-lookahead spot only at 09:30. Held
+        # for the whole day it makes the underlying immobile: every context
+        # from 10:00 to 15:10 saw the same price, so an option could only ever
+        # decay and an intraday momentum book could not win a single trade by
+        # construction. Measured 17-21 Aug: 38 trades, 38 losers, every one of
+        # them between -0.3% and -1.5% - the spread plus a little theta, which
+        # is exactly what "the underlying never moved" costs.
+        #
+        # The intraday bars are already filtered to `<= moment`, so their last
+        # close is the price at this moment with no lookahead at all. It also
+        # fixes strike selection, which was picking the strike that was ATM at
+        # the OPEN rather than the one that is ATM now.
+        if intraday:
+            last_close = float(intraday[-1]["close"])
+            if last_close > 0:
+                spot = last_close
         # Prior COMPLETE sessions, ahead of today's bars. This is the window
         # the LIVE provider fetches (`data.intraday_lookback_days`), and the
         # backtest carrying only the current day made replay a strictly more
@@ -420,7 +436,10 @@ class HistoricalContextSource(ContextSource):
                     if self.real_chain is not None
                     else "modelled - see backtest/chain.py"
                 ),
-                "spot_source": "real Alpaca bar (session open)",
+                "spot_source": (
+                    "real Alpaca intraday bar (last close at or before this "
+                    "moment)" if intraday else "real Alpaca bar (session open)"
+                ),
             },
         )
 

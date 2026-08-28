@@ -166,33 +166,35 @@ worth showing a judge.
 `agents.llm` is the LIVE agent's provider. `backtest.critic.llm` overrides it
 for replay only, and by default they are different:
 
-| | provider | model | why |
-|---|---|---|---|
-| live | `anthropic` | `claude-sonnet-4-5` | a handful of calls a day, on the account being judged |
-| backtest | `gemini` | `gemini-2.5-flash` | scores every candidate in every session, and gets re-run whenever a parameter moves |
+| | provider | model | settings | why |
+|---|---|---|---|---|
+| live | `featherless` | `Qwen/Qwen3-32B` | temp 0.2, 4000 tokens, seed 11 | a handful of calls a day, on the account being judged; needs tool calling for the MCP cycles |
+| backtest | `featherless` | `Qwen/Qwen3-32B` | temp 0.0, 1024 tokens, seed 7 | scores every candidate in every session, gets re-run whenever a parameter moves, and must return the same answer twice |
 
-That is a cost-shape decision, not a preference. One live cycle is cheap; a
-60-session replay over six symbols generates thousands of candidates, and you
-will run it many times. Keys: `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`
-(`GOOGLE_API_KEY` is accepted as a fallback name). `oaa doctor` reports both
-separately, so a missing backtest key cannot be mistaken for a missing live one.
+**These used to be two vendors.** Gemini sat in the backtest slot on a
+cost-shape argument: the replay is the heavier caller, so point it at the cheap
+model. Featherless dissolved that argument - open-weight inference, and the
+Chat plan bills requests flat rather than per token - and a second vendor,
+second key and second SDK to keep alive through a seven-day event is a real
+cost of its own. Gemini was removed on 28 Aug. One key now: `FEATHERLESS_API_KEY`.
 
-Set `backtest.critic.llm: null` to make the replay share the live provider.
+What survives is the *settings* split, which was always the part about
+correctness rather than money:
 
-Two things the Gemini path does that the Anthropic path cannot:
+- **temperature 0 and a fixed seed** (`backtest.critic.llm.seed`, default 7) -
+  a backtest whose numbers move when you re-run it is not a backtest. The seed
+  is the second line of defence; the on-disk verdict cache is the first.
+- **1024 tokens** - the replay wants a verdict, not an essay, and the live
+  budget of 4000 across thousands of candidates is pure waste.
 
-- **native JSON mode** (`response_mime_type="application/json"`) - the critic
-  gets a parseable object instead of prose with a code fence around it
-- **a seed** (`backtest.critic.llm.seed`, default 7) - repeated calls are far
-  more reproducible, which matters more in a replay than anywhere else
+`oaa doctor` still reports the two rows separately, so a misconfigured backtest
+critic cannot be mistaken for a healthy live one. Set `backtest.critic.llm: null`
+to make the replay share the live block wholesale.
 
-Model IDs move. `--critic-model gemini-2.5-flash-lite` overrides for one run
-without touching config; the run artefact records which model produced which
+Model IDs move. `--critic-model moonshotai/Kimi-K2-Instruct` overrides for one
+run without touching config; the run artefact records which model produced which
 verdicts, and the cache key includes the model so switching cannot silently
 replay the previous one's answers.
-
-The Gemini client refuses tool use rather than silently dropping the tools -
-the MCP agent cycles are Anthropic-only, and the critic needs no tools.
 
 **Why `llm` is not the default, and the caveat that must travel with any figure
 from it:** the model is being asked about a period that may sit inside its

@@ -81,3 +81,65 @@ def test_multileg_never_exceeds_alpacas_four_leg_cap(chain, today):
         dte_range=(10, 40), short_put_delta=-0.16, short_call_delta=0.16, wing_points=5
     )
     assert len(idea.legs) <= 4
+
+
+# --------------------------------------------------------------------------- #
+# Wing width across a universe that spans an order of magnitude in price
+# --------------------------------------------------------------------------- #
+def _view(spot: float, step: float) -> ChainView:
+    """Built directly, bypassing ChainFilter: these tests are about strike
+    geometry, and the default liquidity filter thins the ladder to one strike."""
+    import datetime as dt
+
+    from tests.conftest import option_chain_for
+
+    expiry = dt.date.today() + dt.timedelta(days=10)
+    quotes = option_chain_for("TEST", spot, expiry, step=step, days=10.0, width=0.30)
+    return ChainView(symbol="TEST", spot=spot, quotes=quotes, asof=dt.date.today())
+
+
+def test_a_percent_wing_scales_with_the_underlying_price():
+    """A flat 5-point wing is a few percent of a cheap ETF and under one percent
+    of SPY. The same config line therefore produced structures with completely
+    different max loss and delta depending only on share price - which is how
+    GLD failed 24 times on 'wing width does not fit the strike grid' the moment
+    the universe grew past mega-caps."""
+    for spot, step in ((80.0, 1.0), (600.0, 5.0)):
+        builder = StructureBuilder(view=_view(spot, step), strategy="t")
+        idea = builder.iron_condor_by_delta(
+            dte_range=(7, 14), short_put_delta=0.25, short_call_delta=0.25,
+            wing_pct=0.015, wing_points=5,
+        )
+        strikes = sorted(leg.quote.strike for leg in idea.legs if leg.quote)
+        width = strikes[1] - strikes[0]
+        assert 0.005 * spot <= width <= 0.05 * spot, (
+            f"spot {spot}: wing came out {width}, {width / spot:.1%} of spot"
+        )
+
+
+def test_a_wing_never_snaps_onto_the_short_strike():
+    """`must_clear` is the point of the fix: on a coarse or filter-thinned
+    ladder the nearest strike to `short - width` can BE the short strike, which
+    is not a condor. One strike out is a narrower condor and strictly better
+    than refusing to trade."""
+    view = _view(300.0, 25.0)
+    expiry = view.expiries()[0]
+    short = view.by_delta(expiry, Right.PUT, 0.25)
+    wing = view.strike_offset(expiry, Right.PUT, short.strike, -1.0, must_clear=True)
+    assert wing.strike < short.strike
+
+
+def test_the_wing_is_floored_at_one_rung_of_the_listed_ladder():
+    """1.5% of a $50 ETF is $0.75, below a $1 strike increment - the wing then
+    has nowhere to sit and the whole structure is declined. TLT and GLD were
+    both losing trades to this. The floor is read off the actual chain, so an
+    unusual or filter-thinned ladder is handled by observation."""
+    spot = 50.0
+    builder = StructureBuilder(view=_view(spot, 1.0), strategy="t")
+    idea = builder.iron_condor_by_delta(
+        dte_range=(7, 14), short_put_delta=0.25, short_call_delta=0.25,
+        wing_pct=0.015, wing_points=5,          # 0.015 * 50 = 0.75 < one rung
+    )
+    strikes = sorted(leg.quote.strike for leg in idea.legs if leg.quote)
+    assert strikes[1] - strikes[0] >= 1.0, "the wing collapsed inside one rung"
+    assert strikes[3] - strikes[2] >= 1.0

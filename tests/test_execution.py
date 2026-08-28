@@ -93,3 +93,42 @@ def test_sim_broker_tracks_legs_and_cash(cfg):
     account = broker.account()
     assert len(account.positions) == 2
     assert account.cash < 50_000.0  # a debit spread costs money
+
+
+def test_a_live_profile_refuses_to_fall_back_to_the_simulator():
+    """The most dangerous failure in the system: a thirty-second broker outage
+    at start-up silently downgraded a live run to an in-process simulator with
+    its own imaginary $100k. The agent would trade all day, journal the fills,
+    write an equity curve and report success - while the judged account sat
+    empty and the reported P&L was fabricated."""
+    import pytest
+
+    from oaa.brokers.factory import get_broker
+    from oaa.config.loader import load_config
+    from oaa.core.errors import BrokerError
+
+    cfg = load_config()
+    cfg.broker.primary = "rest"
+    cfg.broker.fallback = "sim"
+    cfg.execution.dry_run = False
+
+    with pytest.raises(BrokerError, match="traded against a simulator"):
+        get_broker(cfg, credentials=None)     # no credentials -> connect fails
+
+
+def test_the_simulator_closes_a_short_instead_of_doubling_it():
+    """`close_position` negated the caller's quantity unconditionally, but the
+    orchestrator passes a MAGNITUDE. On a -5 holding, close(5) applied another
+    -5: every exit doubled the short and reported it closed."""
+    from oaa.brokers.sim import SimBroker
+    from oaa.config.loader import load_config
+
+    broker = SimBroker(load_config(), None)
+    broker.connect()
+    broker._apply("SPY260918P00470000", -5, 2.00)
+    broker.close_position("SPY260918P00470000", 5)
+    assert broker._positions.get("SPY260918P00470000") is None
+
+    broker._apply("SPY260918C00500000", 3, 1.00)
+    broker.close_position("SPY260918C00500000", 3)
+    assert broker._positions.get("SPY260918C00500000") is None

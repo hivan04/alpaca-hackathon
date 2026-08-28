@@ -82,7 +82,13 @@ data:
 universe:
   # Liquid, tight-spread option underlyings. Keep this short - each name costs
   # chain requests, and the free data budget is 200 req/min.
-  symbols: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA"]
+  # Index and sector ETFs only - both books now trade the same ten names. See
+  # the rule in config/strategies/vol_carry.yaml: measured spread, effective
+  # independent bets, and no idiosyncratic event risk in a short-vol book.
+  # Each name costs chain requests against a 200/min budget.
+  symbols: [
+    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "TLT", "GLD",
+  ]
   min_underlying_price: 20.0
   max_underlying_price: 1500.0
   exclude: []
@@ -263,7 +269,11 @@ risk:
   # so this raises TURNOVER rather than aggregate risk.
   max_positions: 25
   max_new_positions_per_day: 12
-  max_positions_per_underlying: 2
+  # 1, lowered from 2 on 27 Aug. The check is `max_positions_per_underlying x
+  # len(legs)`, so 1 means ONE structure per underlying per book at a time.
+  # Measured: four NVDA condors open across 28-30 July contributed $2,863 of a
+  # $4,852 drawdown. Short vol on one name stacked is one bet, not four.
+  max_positions_per_underlying: 1
   # Fraction of account equity at risk in a single defined-risk structure.
   max_risk_per_trade_pct: 0.02
   # Total defined-risk exposure across all open structures.
@@ -355,11 +365,24 @@ agents:
     # backtest.critic.llm below - because a replay scores every candidate in
     # every session and is re-run constantly, while a live cycle is a handful
     # of calls a day.
-    provider: anthropic          # anthropic | openai | gemini | null (rules-only)
-    model: "claude-sonnet-4-5"
+    # Featherless AI, the event's inference partner, is the live provider.
+    # Two reasons beyond the partnership: the open-weight models are cheap
+    # enough to run every cycle of a seven-day event without metering, and
+    # Qwen3 supports OpenAI-style tool calling - which is what lets the agent
+    # drive the Alpaca MCP tools directly instead of being handed a summary.
+    provider: featherless        # featherless | anthropic | openai | null
+    model: "Qwen/Qwen3-32B"      # tool-calling capable; moonshotai/Kimi-K2-Instruct
+                                 # is the heavier alternative
+    api_key_env: FEATHERLESS_API_KEY
+    base_url: "https://api.featherless.ai/v1"
     temperature: 0.2
     max_tokens: 4000
     timeout_seconds: 90
+    seed: 11                     # same verdict twice from the same evidence
+    # Serverless inference cold-starts. A 429 one second into the 09:45 cycle
+    # must not cost that cycle its reasoning.
+    max_retries: 3
+    retry_backoff_seconds: 1.5
     # If the LLM is unreachable the loop degrades to deterministic rules
     # rather than stopping. Uptime beats cleverness on a P&L-scored week.
     fallback_to_rules: true
@@ -394,20 +417,91 @@ schedule:
     - name: discover
       at: "09:15"
       action: discover                # pre-market: candidate pool + regime read
-    - name: intraday_open
-      at: "09:45"
+    # The intraday book is scanned on a 15-minute grid, NOT twice a day. A VWAP
+    # cross is an event that lasts minutes: two scans observed ~30 of 390
+    # session minutes and required the cross to land inside one of them. These
+    # times mirror `backtest.session_times_et` exactly - when they diverged, the
+    # live agent saw a sixth of what the backtest was tuned against.
+    # The strategy's own time gate skips 11:30-13:30, so no lunch entries.
+    - name: intraday_1000
+      at: "10:00"
       action: intraday_scan           # transient books lease the headroom
     - name: carry_scan
       at: "10:00"
       action: carry_scan              # resident book looks for rich premium
-    - name: midday_manage
+    - name: intraday_1015
+      at: "10:15"
+      action: intraday_scan
+    - name: intraday_1030
+      at: "10:30"
+      action: intraday_scan
+    - name: intraday_1045
+      at: "10:45"
+      action: intraday_scan
+    - name: intraday_1100
+      at: "11:00"
+      action: intraday_scan
+    - name: intraday_1115
+      at: "11:15"
+      action: intraday_scan
+    # Lunch: no entries (the strategy's time gate refuses them), but the book
+    # is marked and managed on the same 15-minute grid as the rest of the day.
+    # A single 12:00 sweep left two 90-minute holes around it, and an intraday
+    # position that cannot be exited for 90 minutes is not an intraday
+    # position. These mirror `backtest.session_times_et` exactly.
+    - name: lunch_manage_1130
+      at: "11:30"
+      action: manage_positions
+    - name: lunch_manage_1145
+      at: "11:45"
+      action: manage_positions
+    - name: lunch_manage_1200
       at: "12:00"
       action: manage_positions
-    - name: intraday_afternoon
+    - name: lunch_manage_1215
+      at: "12:15"
+      action: manage_positions
+    - name: lunch_manage_1230
+      at: "12:30"
+      action: manage_positions
+    - name: lunch_manage_1245
+      at: "12:45"
+      action: manage_positions
+    - name: lunch_manage_1300
+      at: "13:00"
+      action: manage_positions
+    - name: lunch_manage_1315
+      at: "13:15"
+      action: manage_positions
+    - name: intraday_1330
+      at: "13:30"
+      action: intraday_scan
+    - name: intraday_1345
       at: "13:45"
+      action: intraday_scan
+    - name: intraday_1400
+      at: "14:00"
+      action: intraday_scan
+    - name: intraday_1415
+      at: "14:15"
+      action: intraday_scan
+    - name: intraday_1430
+      at: "14:30"
+      action: intraday_scan
+    - name: intraday_1445
+      at: "14:45"
       action: intraday_scan
     - name: carry_manage
       at: "14:30"
+      action: manage_positions
+    # Mirrors the backtest's 15:10 moment, which is where `exits.flat_by` fires.
+    # The 15:15 cutoff below is the firewall's hard liquidation - a backstop,
+    # not the plan. The book should already be flat when it runs.
+    - name: late_manage_1500
+      at: "15:00"
+      action: manage_positions
+    - name: flat_by_manage
+      at: "15:10"
       action: manage_positions
     - name: intraday_cutoff
       at: "15:15"
@@ -484,8 +578,8 @@ app:
   refresh_seconds: 15
 
 backtest:
-  start: "2026-06-01"
-  end: "2026-08-22"
+  start: "2026-08-17"
+  end: "2026-08-21"
   initial_cash: 100000.0
   # Conservative fill model: we cross a fraction of the spread on every fill.
   # 0.0 fills at mid, which is what paper trading does and what flatters every
@@ -506,7 +600,19 @@ backtest:
   # the gap between these times so no cross falls between two cycles.
   session_times_et: [
     "10:00", "10:15", "10:30", "10:45", "11:00", "11:15",
-    "13:30", "13:45", "14:00", "14:15", "14:30", "14:45",
+    # LUNCH: management-only. The strategy's own time gate vetoes entries from
+    # 11:30 to 13:29, so these moments open nothing - they exist so that an
+    # open position is still marked, stopped and time-stopped through lunch.
+    # Without them the grid jumped 11:15 -> 13:30 and a position opened at
+    # 11:00 ran 150 minutes unmanaged: it could not take a profit target, and
+    # a spike against it went unanswered until the afternoon.
+    "11:30", "11:45", "12:00", "12:15", "12:30", "12:45", "13:00", "13:15",
+    "13:30", "13:45", "14:00", "14:15", "14:30", "14:45", "15:00",
+    # A management-only sweep: the intraday time gate refuses entries after
+    # 14:45, so this cycle exists purely so `exits.flat_by` has a moment to
+    # fire on. Without it the last scan of the day was also the last chance to
+    # close, and anything opened at 14:45 ran to expiry.
+    "15:10",
   ]
   news_lookback_hours: 18.0
   fetch_news: true
@@ -528,17 +634,27 @@ backtest:
     mode: heuristic
     max_llm_calls: 250
     memory: true
-    # The REPLAY's provider, overriding agents.llm. Set to null to share the
-    # live one. Gemini here, Anthropic live: the replay is the expensive caller.
-    # Model IDs move - gemini-2.5-flash-lite is cheaper, gemini-3.x-flash newer.
+    # The REPLAY's settings, overriding agents.llm. Set to null to share the
+    # live block wholesale.
+    #
+    # Same provider as live since 28 Aug. Gemini used to sit here on a
+    # cost-shape argument - the replay is the heavier caller, so point it at
+    # the cheap model. Featherless makes that argument moot (open weights, and
+    # the Chat plan bills requests flat rather than per token), and a second
+    # vendor, key and SDK to keep alive through a seven-day event is a real
+    # cost of its own. What survives is the settings split, which is the part
+    # that was ever about correctness rather than money.
     llm:
-      provider: gemini
-      model: "gemini-2.5-flash"
-      api_key_env: GEMINI_API_KEY
+      provider: featherless
+      model: "Qwen/Qwen3-32B"      # swap to a smaller Qwen3 id if metering bites
+      api_key_env: FEATHERLESS_API_KEY
+      base_url: "https://api.featherless.ai/v1"
       temperature: 0.0             # a judge should not be creative
-      max_tokens: 1024
+      max_tokens: 1024             # a verdict, not an essay
       seed: 7                      # reproducibility, alongside the disk cache
       timeout_seconds: 90
+      max_retries: 3
+      retry_backoff_seconds: 1.5
       fallback_to_rules: true
 
   iv_model:

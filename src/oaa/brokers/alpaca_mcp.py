@@ -21,6 +21,13 @@ from oaa.brokers.alpaca_rest import _dry_fill
 from oaa.brokers.base import Broker, broker_registry
 from oaa.core.errors import BrokerError
 from oaa.core.logging import get_logger
+from oaa.core.mcp_compat import (
+    tool_description,
+    tool_input_schema,
+    tool_result_is_error,
+    tool_structured_content,
+    unwrap_tool_payload,
+)
 from oaa.core.types import AccountSnapshot, Fill, OrderTicket, PositionSnapshot, Right
 from oaa.options.occ import is_occ, parse_occ
 
@@ -135,8 +142,8 @@ class McpBridge:
         return [
             {
                 "name": t.name,
-                "description": (t.description or "")[:1000],
-                "input_schema": t.inputSchema or {"type": "object", "properties": {}},
+                "description": tool_description(t, 1000),
+                "input_schema": tool_input_schema(t),
             }
             for t in self._tools.values()
         ]
@@ -158,14 +165,14 @@ class McpBridge:
 
 def _unwrap(result: Any) -> Any:
     """MCP returns content blocks; we want the payload."""
-    if getattr(result, "isError", False):
+    if tool_result_is_error(result):
         raise BrokerError(f"MCP tool error: {_text(result)}")
-    structured = getattr(result, "structuredContent", None)
+    structured = tool_structured_content(result)
     if structured:
-        return structured
+        return unwrap_tool_payload(structured)
     text = _text(result)
     try:
-        return json.loads(text)
+        return unwrap_tool_payload(json.loads(text))
     except (json.JSONDecodeError, TypeError):
         return text
 

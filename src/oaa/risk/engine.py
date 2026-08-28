@@ -36,16 +36,27 @@ class DayState:
     halted: bool = False
     halt_reason: str | None = None
 
-    def roll(self, today: dt.date, equity: float) -> None:
+    def roll(
+        self, today: dt.date, equity: float, previous_close: float | None = None
+    ) -> None:
+        """`previous_close` is the broker's own last_equity - the baseline the
+        daily loss limit is supposed to measure from.
+
+        Without it a restart mid-session re-baselined to whatever equity had
+        already fallen to, silently re-arming the full loss budget: a -2.6%
+        morning followed by a crash and restart could lose another 3% before
+        the 3% halt fired. It also resets `halted`, so a halt did not survive
+        the restart that a halt makes likely.
+        """
         if today != self.date:
             self.date = today
             self.opened_today = 0
             self.realised_pl = 0.0
-            self.start_equity = equity
+            self.start_equity = previous_close or equity
             self.halted = False
             self.halt_reason = None
         if self.start_equity <= 0:
-            self.start_equity = equity
+            self.start_equity = previous_close or equity
         self.peak_equity = max(self.peak_equity, equity)
 
 
@@ -65,7 +76,7 @@ class RiskEngine:
     # -- session control ---------------------------------------------------- #
     def observe(self, account: AccountSnapshot, now: dt.datetime | None = None) -> None:
         now = now or clock.utcnow()
-        self.state.roll(now.date(), account.equity)
+        self.state.roll(now.date(), account.equity, account.last_equity)
 
         if self.state.start_equity > 0:
             day_return = (account.equity - self.state.start_equity) / self.state.start_equity
@@ -165,8 +176,29 @@ class RiskEngine:
         checks["duplicate_legs"] = True
 
         # 3. Portfolio shape ------------------------------------------------ #
-        if len(account.option_positions()) >= self.limits.max_positions:
-            return fail("max_positions", f"already at {self.limits.max_positions} positions")
+        # Counts STRUCTURES, not legs. `option_positions()` returns one entry per
+        # OCC contract, so a raw count made `max_positions: 25` bind at roughly
+        # six iron condors - and the config comment that justified raising it
+        # from 12 to 25 was reasoning in structures. The ledger knows which legs
+        # belong to the same idea; without it, fall back to the leg count.
+        open_positions = account.option_positions()
+        if self.firewall is not None:
+            entries = self.firewall.ledger.entries
+            grouped = {
+                entries[p.symbol.upper()].idea_id
+                for p in open_positions
+                if p.symbol.upper() in entries and entries[p.symbol.upper()].idea_id
+            }
+            loose = [p for p in open_positions if p.symbol.upper() not in entries]
+            structure_count = len(grouped) + len(loose)
+        else:
+            structure_count = len(open_positions)
+        if structure_count >= self.limits.max_positions:
+            return fail(
+                "max_positions",
+                f"already at {structure_count} open structures, cap is "
+                f"{self.limits.max_positions}",
+            )
         checks["max_positions"] = True
 
         if self.state.opened_today >= self.limits.max_new_positions_per_day:
@@ -197,12 +229,26 @@ class RiskEngine:
             )
         checks["duplicate_structure"] = True
 
-        cooldown = int(getattr(self.limits, "reentry_cooldown_minutes", 0) or 0)
+        # A book that holds for days needs a cooldown measured in days; a book
+        # that holds for minutes needs one measured in minutes. One global
+        # number cannot serve both, and the 60-minute default let the SAME NVDA
+        # condor open twice 75 minutes apart on a 10:00-15:15 scan grid - $784
+        # of a $4,852 drawdown, from one duplicate.
+        cooldown = int(
+            idea.meta.get("reentry_cooldown_minutes")
+            or getattr(self.limits, "reentry_cooldown_minutes", 0)
+            or 0
+        )
         if cooldown > 0:
             previous = self.last_entry.get((idea.symbol, idea.strategy))
             if previous is not None:
                 elapsed = (now - previous).total_seconds() / 60.0
-                if elapsed < cooldown:
+                # `<=`, not `<`. On a 15-minute scan grid an entry landing
+                # exactly `cooldown` minutes after the last one is the same
+                # trade re-taken, not a new opportunity - and a strict `<`
+                # let 14:00 and 15:00 through as a pair on a 60-minute
+                # cooldown, which is how NVDA and SPY ended up doubled.
+                if elapsed <= cooldown:
                     return fail(
                         "reentry_cooldown",
                         f"{idea.strategy} opened {idea.symbol} "
@@ -212,10 +258,21 @@ class RiskEngine:
                     )
         checks["reentry_cooldown"] = True
 
+        # Scoped per BOOK. Without the book dimension a single resident carry
+        # condor on SPY blocked EVERY intraday SPY trade for the three-to-ten
+        # sessions it was held - and SPY and QQQ sit in both universes, so the
+        # primary book would have been shut out of its two best underlyings by
+        # the secondary one. The config comment already claimed "per book"; the
+        # check did not implement it.
         same_underlying = [
             p for p in account.option_positions()
             if (p.underlying or underlying_of(p.symbol)) == idea.symbol
         ]
+        if self.firewall is not None and idea.book:
+            same_underlying = [
+                p for p in same_underlying
+                if self.firewall.ledger.book_of(p.symbol) == idea.book
+            ]
         if len(same_underlying) >= self.limits.max_positions_per_underlying * len(idea.legs):
             return fail(
                 "concentration",
@@ -248,7 +305,15 @@ class RiskEngine:
         checks["portfolio_risk"] = True
 
         # 6. Cash ------------------------------------------------------------- #
-        cash_needed = max(0.0, idea.net_price) * 100 * quantity
+        # A debit costs its premium; a CREDIT structure costs collateral, which
+        # for a defined-risk spread is its max loss. Charging max(0, net_price)
+        # made every short vertical, condor and butterfly - the entire carry
+        # book - require $0 of buying power, so the gate could not bind on the
+        # structures it most needed to.
+        if idea.net_price >= 0:
+            cash_needed = idea.net_price * 100 * quantity
+        else:
+            cash_needed = (idea.max_loss or 0.0) * quantity
         buffer = account.equity * self.limits.min_cash_buffer_pct
         available = (account.options_buying_power or account.buying_power)
         if available - cash_needed < buffer:

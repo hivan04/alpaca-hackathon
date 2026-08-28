@@ -8,13 +8,86 @@
 # =============================================================================
 
 enabled: true                      # PRIMARY book from 27 Aug - see below
-universe: ["SPY", "QQQ"]
+# Ten index and sector ETFs. Index products only - see COST_STRUCTURE.md S5:
+# a $0.10-wide single-name quote costs $20 round trip against a $10-30 target,
+# so no edge survives. Chosen for tight option markets AND enough movement to
+# produce a signal, with deliberate breadth: four broad equity, four sector,
+# one rates, one commodity. TLT and GLD are the only genuinely decorrelated
+# names here - the four equity ETFs move together, so a "diversified" book of
+# SPY/QQQ/IWM/DIA alone is close to one asset.
+#
+# UNVERIFIED: these tier assignments are assumptions. Measure real quote widths
+# with `oaa chain <SYM>` before trusting the spread gate on the sector names.
+# XLK and SMH removed 28 Aug on measured evidence, not on P&L:
+#
+#              spread @ chain      corr vs QQQ
+#   XLK              27.94%              0.96
+#   SMH              12.49%              0.91
+#   QQQ               2.85%              -
+#
+# XLK was the worst name in the universe on BOTH criteria at once - the widest
+# option market by an order of magnitude, and 0.96 correlated with a name we
+# already hold. It contributed nothing QQQ does not, at ten times the cost.
+# SMH is the same argument at 0.91/0.93.
+#
+# XLE is KEPT despite an 11.79% chain-median spread because it is the only name
+# in the table that is NEGATIVELY correlated with the rest (-0.18 to -0.36).
+# A short-premium book's entire failure mode is every position losing at once;
+# a negatively correlated name is worth more than three more equity ETFs.
+#
+# Measured 28 Aug: ten symbols behaved like 2.4 independent bets. Re-run
+# `python scripts/universe_report.py --live` after any change - the whole point
+# of the rule is that the list follows the measurement.
+# XLK and SMH removed 28 Aug on measured evidence, not on P&L:
+#
+#              chain spread      corr vs QQQ
+#   XLK             27.94%             0.96
+#   SMH             12.49%             0.91
+#   QQQ              2.85%              -
+#
+# XLK was the worst name in the universe on BOTH criteria at once - the widest
+# option market by an order of magnitude, and 0.96 correlated with a name we
+# already hold. It contributed nothing QQQ does not, at ten times the cost.
+# SMH is the same argument at 0.91/0.93.
+#
+# XLE is KEPT despite a wide chain-median spread because it is the only name in
+# the table NEGATIVELY correlated with the rest (-0.18 to -0.36). A
+# short-premium book's entire failure mode is every position losing at once, so
+# a negatively correlated name is worth more than three more equity ETFs.
+#
+# Measured 28 Aug: ten symbols behaved like 2.4 INDEPENDENT BETS. Re-run
+# `python scripts/universe_report.py --live` after any change - the point of the
+# rule is that the list follows the measurement, not the other way round.
+universe: [
+  "SPY", "QQQ", "IWM", "DIA",      # broad equity
+  "XLF", "XLE",                    # sectors - XLE is the only NEGATIVE correlation
+  "TLT", "GLD",                    # decorrelated: rates, gold
+]
 bar_interval: 1m
 
 momentum:
   min_bars: 30
   # VWAP = the TRIGGER (the only indicator with an opinion on direction)
-  vwap_band_atr_mult: 0.25
+  # The "price is on the VWAP band" test, expressed as a multiple of how far
+  # price NORMALLY sits from VWAP this session - not as a multiple of one bar's
+  # range.
+  #
+  # Measured in 1-minute ATR the band came to +/-$0.08 on SPY, 0.013% of spot:
+  # it asked price to be within eight cents of the session average. Session
+  # dispersion is typically 0.1-0.3% of spot, so the old test was 10-20x too
+  # tight, and "no VWAP cross and price is not on the band" became 75% of every
+  # rejection this book produced across every backtest ever run. It is also
+  # scale-free, which the dollar-denominated ATR version never was - and the
+  # universe now spans a $50 ETF to a $600 one.
+  #
+  # 1.0 = within one standard deviation of the session's usual gap to VWAP.
+  # Sweep it: `--only momentum.band_dispersion_mult`.
+  # 2.0, measured 28 Aug. Swept 0.5/1.0/1.5/2.0/3.0 on real bars: at 0.5 and
+  # 1.0 the top rejection was still "no VWAP cross"; at 1.5 and above it shifted
+  # to the volume gate. 2.0 is where the band stops being the wall.
+  band_dispersion_mult: 2.0
+  # Fallback only, used when a session has too few bars to measure dispersion.
+  vwap_band_atr_mult: 0.55
   # How many recent bars are searched for the cross. A cycle can land one or
   # two 5-minute bars after the event; insisting on the very last bar would
   # discard real signals for a polling artefact. Keep it small - the signal
@@ -26,7 +99,11 @@ momentum:
   # an earlier cycle already acted on.
   cross_lookback_bars: 15
   atr_period: 14
-  volume_zscore_min: 1.0
+  # 0.5, lowered from 1.0. A z of 1.0 demands the top ~16% of volume for that
+  # time-of-day bucket - a demanding bar for a gate that only CONFIRMS a move
+  # it did not choose. 0.5 is the top ~31%, still meaningful participation.
+  # Second-largest rejection at ~24% of intraday candidates.
+  volume_zscore_min: 0.5
   volume_bucket_minutes: 30        # 09:45 volume is not comparable to 12:30
   # The bucket baseline needs prior sessions. Replay now carries
   # `data.intraday_lookback_days` of them, as live always did - before that
@@ -34,6 +111,32 @@ momentum:
   # floor, and `require_volume` vetoed every backtested candidate.
   require_volume: true
   persistence_bars: 2              # reject the single-bar spike that reverts
+
+  # --- CONFIRMATIONS ARE COUNTED, NOT REQUIRED ------------------------------
+  # Volume, persistence, Bollinger width and RSI were four consecutive hard
+  # vetoes stacked behind the VWAP trigger and the catalyst gate. Eight vetoes
+  # in a row, each passing ~70% of candidates, is 0.7^8 = 6%: the book was
+  # arithmetically designed almost never to fire, and loosening any one gate
+  # only promoted the next to being the wall. Measured over 864 candidates in
+  # one 9-session window, 424 died on volume alone and NONE survived the chain.
+  #
+  # They ask genuinely different questions, so demanding unanimity is a tickbox
+  # exercise rather than a confluence. Each now votes. The VWAP trigger stays
+  # hard because it decides DIRECTION - without it there is no trade to make -
+  # and the spread gate stays hard because it is economics, not evidence.
+  confirmations_required: 3
+
+  # HIGHER TIMEFRAME confirmation. The 1-minute bars are resampled to hourly -
+  # no extra data, no extra API call - and the book asks whether the last few
+  # hours are drifting WITH the signal or against it. A 1-minute VWAP cross
+  # tells you a move started; it cannot tell you whether that move is running
+  # with the hour or is a retrace inside one going the other way.
+  #
+  # A vote, not a veto: the hour is often flat while a perfectly tradable
+  # 30-minute move sets up underneath it, and vetoing on the higher timeframe
+  # is how a book ends up back at the tickbox problem.
+  higher_timeframe_minutes: 60
+  higher_timeframe_bars: 3         # compare against the close 3 hours back
 
   # Bollinger WIDTH = the FILTER (regime, not direction). Width, not position:
   # position is a mean-reversion signal and would fight VWAP on every candidate.
@@ -57,7 +160,12 @@ momentum:
 # persist. Weights are applied AFTER rank-normalisation within each source -
 # raw units across sources are not comparable.
 catalyst_gate:
-  required: true
+  # false = the catalyst becomes a fifth CONFIRMATION rather than a veto. It is
+  # the most original part of this book, so it is worth weighting heavily - but
+  # requiring it outright meant a genuine, well-participated, persistent move
+  # with expanding bands was discarded because no headline happened to land in
+  # the preceding 30 minutes.
+  required: false
   lookback_minutes: 30
   min_headlines: 1
   relevance_floor: 0.5
@@ -73,7 +181,27 @@ catalyst_gate:
 # Expect this to reject more candidates than any other gate. That is the
 # finding, not a bug.
 spread_gate:
-  max_relative_spread: 0.02        # much tighter than the carry book's 0.10
+  # 0.04, raised from 0.02 on 28 Aug because 0.02 was UNPASSABLE. Measured at
+  # the strikes this book trades (3-21 DTE, within 10% of spot):
+  #
+  #   SPY 2.84%   DIA 2.84%   QQQ 3.22%   TLT 3.52%   IWM 4.13%
+  #   GLD 5.32%   XLE 9.80%   XLF 11.85%
+  #
+  # The 2% ceiling came from COST_STRUCTURE's assumption that index options are
+  # penny-wide. They are not, at least not on the feed we price against. With
+  # the ceiling below the tightest quote in the universe, NOTHING could pass -
+  # the gate was rejecting the market, not selecting within it.
+  #
+  # 0.04 admits the four names whose quotes are actually tight and excludes the
+  # sector ETFs, which is what a liquidity gate is supposed to do. The
+  # `spread_cost_fraction_of_target` test below is now the binding one, and it
+  # is the economically meaningful one: at a 10% target, a 3% round trip is 30%
+  # of the target - right at the ceiling.
+  #
+  # CAVEAT: the free tier serves INDICATIVE option quotes, not OPRA. These
+  # widths may overstate the tradable market. Re-measure against live quotes
+  # before quoting them, and before concluding the strategy is uneconomic.
+  max_relative_spread: 0.04
   spread_cost_fraction_of_target: 0.30
 
 time_gate:
@@ -97,8 +225,13 @@ structure:
 
 sizing:
   risk_fraction_per_trade: 0.005   # below the carry book's 1.5%: lower hit rate
-  max_concurrent: 2
-  max_trades_per_day: 6            # hard cap against a signal-storm spread bleed
+  # Raised 27 Aug with the book promoted to PRIMARY and the universe at ten
+  # names. At 0.5% risk per trade, 12 trades is 6% of equity committed across a
+  # day - and `max_daily_loss_pct` below still halts the book at 2%, which is
+  # the control that actually binds. The old 2/6 was set when this was a
+  # secondary book on two symbols.
+  max_concurrent: 6
+  max_trades_per_day: 12           # hard cap against a signal-storm spread bleed
   max_daily_loss_pct: 0.02         # on breach the book is disabled for the day
 
 # --- exits ---------------------------------------------------------------------
@@ -110,4 +243,10 @@ exits:
   target_pct_of_premium: 0.10
   stop_pct_of_premium: 0.15
   time_stop_minutes: 20
+  # Flat by 15:10 ET, five minutes ahead of the 15:15 firewall cutoff. Enforced
+  # here rather than assumed from `time_gate.no_entry_after`: that gate only
+  # stops new entries, and a 0 DTE long left open past the last scan settles at
+  # intrinsic - which is how a book designed around 30-minute holds produced
+  # twelve all-or-nothing expiry settlements in a nine-session window.
+  flat_by: "15:10"
   exit_on_vwap_recross: true

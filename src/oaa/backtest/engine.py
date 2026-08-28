@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import abc
 import datetime as dt
+import logging
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -141,6 +142,12 @@ class BacktestResult:
     equity_curve: list[tuple[dt.datetime, float]] = field(default_factory=list)
     trades: list[TradeRecord] = field(default_factory=list)
     rejections: list[RejectionRecord] = field(default_factory=list)
+    #: Structures re-priced onto a single surface because their legs
+    #: disagreed about provenance. High = a thin real option tape.
+    mixed_surface_marks: int = 0
+    #: Marks that broke the structure's own arithmetic bound and were
+    #: clamped. Should be zero; non-zero is a bug to chase.
+    risk_bound_clamps: int = 0
     ideas_generated: int = 0
     ideas_approved: int = 0
     start_equity: float = 0.0
@@ -225,6 +232,8 @@ class BacktestResult:
                 if self.ideas_generated else 0.0
             ),
             "rejections": len(self.rejections),
+            "mixed_surface_marks": self.mixed_surface_marks,
+            "risk_bound_clamps": self.risk_bound_clamps,
         }
 
     def rejection_funnel(self) -> dict[str, int]:
@@ -269,10 +278,17 @@ class _RejectionSink:
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
         self.journal = self
+        #: the replay moment the engine is currently on. Strategies do not pass
+        #: a timestamp with their rejections, so without this every row landed
+        #: with an empty `ts` and the funnel could not be sliced by session or
+        #: by weekday - which is exactly the cut you need when a book is quiet.
+        self.moment: dt.datetime | None = None
 
     def event(self, kind: str, **fields: Any) -> None:
-        if kind == "gate_rejection":
-            self.rows.append(fields)
+        if kind != "gate_rejection":
+            return
+        fields.setdefault("ts", self.moment.isoformat() if self.moment else "")
+        self.rows.append(fields)
 
 
 # --------------------------------------------------------------------------- #
@@ -314,6 +330,13 @@ class BacktestEngine:
         self.commission = self.cfg.backtest.commission_per_contract
         self._open: list[OpenStructure] = []
         self._seq = 0
+        #: Times a structure had to be re-priced onto one surface because
+        #: its legs disagreed about provenance. Reported per run: a high
+        #: count means the real option tape is thin for this universe.
+        self._mixed_surface_marks = 0
+        #: Times the mark-to-market loss exceeded the structure's own
+        #: arithmetic bound and had to be clamped. Should be ZERO.
+        self._risk_bound_clamps = 0
 
     # ------------------------------------------------------------------ #
     def run(self, source: ContextSource, progress: Any = None) -> BacktestResult:
@@ -334,6 +357,7 @@ class BacktestEngine:
 
                 # 2. manage what is already on, then look for new risk
                 self._manage(contexts, moment, result)
+                sink.moment = moment
                 self._scan(contexts, moment, result, sink, source)
 
                 equity = self.broker.account().equity
@@ -376,6 +400,8 @@ class BacktestEngine:
         # read at the end.
         if hasattr(source, "describe"):
             result.provenance["source"] = source.describe()
+        result.mixed_surface_marks = self._mixed_surface_marks
+        result.risk_bound_clamps = self._risk_bound_clamps
         return result
 
     # ------------------------------------------------------------------ #
@@ -394,10 +420,80 @@ class BacktestEngine:
         pricer = self.real_chain or self.chain
         for leg in legs:
             marks[leg["symbol"]] = pricer.reprice(
-                leg["symbol"], market.spot, moment.date(), atm_iv,
+                leg["symbol"], market.spot, moment, atm_iv,
                 leg["strike"], leg["expiry"], leg["is_call"], symbol,
             )
+
+        # Every leg of a structure must be priced on ONE surface.
+        #
+        # `reprice` decides per CONTRACT: a leg with a real bar is marked at its
+        # traded close, a leg without one is marked from the model. In a condor
+        # the short strikes trade and the far wings often do not, so on a
+        # stressed session the short is marked at a real, elevated print while
+        # its own wing is marked on a calm modelled vol. The value of a vertical
+        # is then no longer bounded by its strike width, and the arithmetic that
+        # makes the structure defined-risk stops holding: measured, a 5-wide put
+        # spread marked 4.69 across a mixed surface against 2.96 on a single
+        # one, and losses of 170% of `max_loss` appeared in the trade log.
+        #
+        # Where the mark is mixed, re-price EVERY leg from the model, anchored
+        # on the vol the real prints actually imply - so the real information is
+        # kept, but one surface prices the whole structure.
+        provenance = [marks[leg["symbol"]].get("real", 0.0) for leg in legs]
+        if len(legs) > 1 and 0.0 < sum(provenance) < len(provenance):
+            observed = [
+                float(marks[leg["symbol"]].get("iv") or 0.0)
+                for leg in legs
+                if marks[leg["symbol"]].get("real", 0.0) >= 1.0
+                and marks[leg["symbol"]].get("iv")
+            ]
+            anchor = sum(observed) / len(observed) if observed else atm_iv
+            self._mixed_surface_marks += 1
+            for leg in legs:
+                marks[leg["symbol"]] = pricer.reprice(
+                    leg["symbol"], market.spot, moment, anchor,
+                    leg["strike"], leg["expiry"], leg["is_call"], symbol,
+                    force_model=True,
+                )
         return marks
+
+    def _bounded_gross(
+        self, gross: float, position: OpenStructure, spread: float = 0.0
+    ) -> float:
+        """Hold the structure to the risk it was approved on.
+
+        `RiskEngine` approved this trade on a `max_loss` computed from the
+        strike widths. A defined-risk structure cannot lose more than that
+        before costs - if the marks say otherwise, the marks are wrong, not the
+        arithmetic. Clamping here means a pricing artefact cannot manufacture a
+        loss the position could never actually take, and the counter says how
+        often it happened. A non-zero count is a bug to chase, not a setting.
+
+        Costs are charged OUTSIDE this bound on purpose: `max_loss` is a
+        pre-cost concept, and a trade realising slightly worse than its defined
+        risk after crossing the spread twice is honest, not an artefact.
+        """
+        # `max_loss` is a MID-price concept: it is (width - credit) computed from
+        # quotes at mid. The fills cross the spread on the way in and out, and
+        # that cost sits inside `gross`, so a trade may legitimately realise a
+        # little worse than its defined risk. Widening the bound by the modelled
+        # spread keeps the clamp for genuine pricing faults and stops it eating
+        # real, honest execution cost.
+        allowance = abs(spread) * position.quantity
+        max_loss = (position.idea.max_loss or 0.0) * position.quantity + allowance
+        max_profit = (position.idea.max_profit or 0.0) * position.quantity
+        if max_loss > 0 and gross < -max_loss:
+            self._risk_bound_clamps += 1
+            log.warning(
+                "%s: marked loss %.2f exceeds defined risk %.2f - clamped. The "
+                "legs disagreed about provenance or a print was stale.",
+                position.record.trade_id, gross, max_loss,
+            )
+            return -max_loss
+        if max_profit > 0 and gross > max_profit:
+            self._risk_bound_clamps += 1
+            return max_profit
+        return gross
 
     def _mark(self, contexts: dict[str, MarketContext], moment: dt.datetime) -> None:
         for position in self._open:
@@ -481,7 +577,30 @@ class BacktestEngine:
                 try:
                     ideas = strategy.generate(ctx)
                 except Exception as exc:  # noqa: BLE001
-                    log.debug("%s/%s: %s", symbol, strategy.name, exc)
+                    # A strategy that THROWS used to be indistinguishable from a
+                    # strategy that declines: DEBUG-level, no rejection record,
+                    # nothing in the funnel. A book could fail on every single
+                    # candidate of a run and the report would show it as simply
+                    # quiet - which is exactly how a month-long replay produced
+                    # zero intraday trades AND zero intraday rejections while
+                    # the same code traded 40 times over five days.
+                    #
+                    # An error is not a decision. It gets a record of its own so
+                    # it shows up in the funnel and cannot be read as restraint.
+                    log.warning(
+                        "%s/%s raised during generate(): %s: %s",
+                        symbol, strategy.name, type(exc).__name__, exc,
+                        exc_info=log.isEnabledFor(logging.DEBUG),
+                    )
+                    result.rejections.append(
+                        RejectionRecord(
+                            ts=moment.isoformat(), symbol=symbol,
+                            strategy=strategy.name, stage="error",
+                            vetoed_by="strategy_error",
+                            reason=f"{type(exc).__name__}: {exc}",
+                            metrics={},
+                        )
+                    )
                     continue
 
                 for idea in ideas:
@@ -581,6 +700,10 @@ class BacktestEngine:
         }
         net, spread = self._net_price(legs, marks, closing=False)
 
+        # Time-based exits read this. Stamped here and in the live
+        # orchestrator so a hold rule means the same thing in both paths.
+        idea.meta["opened_at"] = moment.isoformat()
+
         self._seq += 1
         trade_id = f"BT{self._seq:04d}"
         fees_open = self.commission * len(idea.legs) * quantity
@@ -641,13 +764,25 @@ class BacktestEngine:
             marks = self._leg_marks(contexts, moment, position.legs, position.record.symbol)
             if not marks:
                 continue
-            expired = any(leg["expiry"] <= moment.date() for leg in position.legs)
+            # `<` not `<=`. A 0 DTE option is NOT expired at 11:15 on its
+            # expiry day - it expires at the close, and until then it is worth
+            # intrinsic PLUS the remaining time value. Settling it at intrinsic
+            # on the next scan discarded every cent of that premium, which for
+            # an at-the-money long is the entire position: it turned the whole
+            # intraday book into a -100%-or-jackpot lottery (measured 11-22 Aug:
+            # twelve trades settled this way, -$4,602 of a -$4,272 result, one
+            # of them +254%). The defect only became reachable once the chain
+            # started listing the front expiry this book is built to buy.
+            expired = any(leg["expiry"] < moment.date() for leg in position.legs)
             if expired:
                 self._close(position, contexts, moment, "expiry - settled at intrinsic", result)
                 continue
 
             proceeds, _ = self._net_price(position.legs, marks, closing=True)
-            gross = (proceeds - position.entry_net) * MULTIPLIER * position.quantity
+            gross = self._bounded_gross(
+                (proceeds - position.entry_net) * MULTIPLIER * position.quantity,
+                position,
+            )
             denominator = (
                 (position.idea.max_profit or 0.0) * position.quantity
                 or (position.idea.max_loss or 1.0) * position.quantity
@@ -692,7 +827,14 @@ class BacktestEngine:
 
         proceeds, spread = self._net_price(position.legs, marks, closing=True)
         quantity = position.quantity
-        gross = (proceeds - position.entry_net) * MULTIPLIER * quantity
+        raw_gross = (proceeds - position.entry_net) * MULTIPLIER * quantity
+        gross = self._bounded_gross(raw_gross, position, spread)
+        if gross != raw_gross:
+            # Clamp the FILL, not just the number printed. Adjusting `gross`
+            # alone left the trade log claiming a better result than the account
+            # actually took, so the equity curve and the sum of trade P&L
+            # disagreed - the one thing a backtest must never do.
+            proceeds = position.entry_net + gross / (MULTIPLIER * quantity)
 
         held_days = max(0.0, (moment - position.opened_at).total_seconds() / 86400)
         margin_balance = (position.idea.max_loss or 0.0) * quantity

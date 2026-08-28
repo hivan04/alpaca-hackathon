@@ -178,16 +178,84 @@ def test_chop_is_rejected_by_the_band_width_filter(
     assert strat.generate(ctx) == []
 
 
-def test_no_catalyst_means_no_trade(intraday_chain, intraday_bars, attention, account):
-    """A VWAP cross with no mechanism behind it is drift, and drift reverts."""
+def test_a_missing_catalyst_costs_a_vote_rather_than_vetoing(
+    intraday_chain, intraday_bars, attention, account
+):
+    """A VWAP cross with no mechanism behind it is weaker evidence - but it is
+    evidence, not a disqualification.
+
+    The catalyst used to be a hard veto sitting behind the trigger and in front
+    of four more hard vetoes. Eight conjunctive gates at ~70% each is 0.7^8 = 6%:
+    the book was arithmetically designed never to fire, and over 864 measured
+    candidates none survived the chain. The catalyst is now one confirmation of
+    five, so what is asserted here is that the VOTE is lost, not the trade.
+    """
+    with_news, ctx_news = scenario(intraday_chain, intraday_bars, attention, account)
+    without, ctx_none = scenario(intraday_chain, intraday_bars, attention, account, news=[])
+
+    confirmed = with_news.generate(ctx_news)
+    drifting = without.generate(ctx_none)
+    assert confirmed, "the baseline scenario should trade"
+    assert drifting, "one missing confirmation is not a veto"
+
+    scored = confirmed[0].meta["gates"]["metrics"]["confirmation.confirmations"]
+    unscored = drifting[0].meta["gates"]["metrics"]["confirmation.confirmations"]
+    assert unscored == scored - 1, "the missing catalyst must cost exactly one vote"
+
+
+def test_a_demoted_catalyst_is_still_measured(
+    intraday_chain, intraday_bars, attention, account
+):
+    """Demoted, not deleted. The gate returns passed=True when it is not
+    mandatory, so the tally has to read what it MEASURED - reading the pass bit
+    handed the book a free fifth vote on every single candidate and removed the
+    catalyst from the decision entirely."""
     strat, ctx = scenario(intraday_chain, intraday_bars, attention, account, news=[])
+    ideas = strat.generate(ctx)
+    assert ideas
+    metrics = ideas[0].meta["gates"]["metrics"]
+    assert metrics["catalyst.confirmed"] == 0.0
+
+
+def test_the_catalyst_can_still_be_made_mandatory(
+    intraday_chain, intraday_bars, attention, account
+):
+    """The veto behaviour is a config flag, not a deleted idea - if live
+    sessions show drift entries paying the spread for nothing, flip it back."""
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account, news=[])
+    strat.params["catalyst_gate"]["required"] = True
     assert strat.generate(ctx) == []
 
 
-def test_mixed_breadth_means_no_trade(intraday_chain, intraday_bars, attention, account):
-    """An index rising on mixed breadth is one mega-cap dragging the tape."""
+def test_mixed_breadth_costs_the_catalyst_vote(
+    intraday_chain, intraday_bars, attention, account
+):
+    """An index rising on mixed breadth is one mega-cap dragging the tape, so
+    the catalyst does not confirm - one vote lost, and a hard block only when
+    the catalyst is configured as mandatory."""
     attention.breadth = {"gainers": 10, "losers": 10}
     strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+    ideas = strat.generate(ctx)
+    assert ideas
+    assert ideas[0].meta["gates"]["metrics"]["catalyst.confirmed"] == 0.0
+
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+    strat.params["catalyst_gate"]["required"] = True
+    assert strat.generate(ctx) == []
+
+
+def test_enough_failed_confirmations_do_block_the_trade(
+    intraday_chain, intraday_bars, attention, account
+):
+    """The counter is a real bar, not a formality: demand more agreement than
+    the evidence supports and the book stands down."""
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account, news=[])
+    # Unanimity. `needed` is capped at the number of votes actually cast, so
+    # this asks for every one of them - and the catalyst vote is lost here
+    # because the scenario has no headline. Pinned as "more than the evidence
+    # supports" rather than a literal count, so adding a confirmation (the
+    # hourly trend filter did exactly this) does not silently defuse the test.
+    strat.params["momentum"]["confirmations_required"] = 999
     assert strat.generate(ctx) == []
 
 
@@ -217,9 +285,28 @@ def test_extremely_rich_vol_declines_the_trade(intraday_chain, intraday_bars, at
 
 def test_the_universe_is_index_only(intraday_chain, intraday_bars, attention, account):
     """Not a preference - arithmetic. A $0.10-wide single-name quote costs $20
-    round trip against a $10-30 target."""
+    round trip against a $10-30 target.
+
+    Asserted against the liquidity model's OWN classification rather than a
+    hard-coded list, so growing the universe is allowed but sneaking a single
+    name into it is not. The previous version pinned {SPY, QQQ, IWM} literally
+    and failed the moment the universe legitimately grew to ten ETFs - a test
+    that encodes today's list instead of the rule behind it.
+    """
+    from oaa.backtest.chain import is_index_etf
+
     strat, _ = build()
-    assert set(strat.universe()) <= {"SPY", "QQQ", "IWM"}
+    universe = strat.universe()
+    assert universe, "the intraday book cannot trade an empty universe"
+    misclassified = [
+        symbol for symbol in universe
+        if not is_index_etf(symbol)
+    ]
+    assert not misclassified, (
+        f"{misclassified} are not index_etf tier - a single-name quote does not "
+        "survive this book's spread arithmetic. Add the symbol to "
+        "DEFAULT_TIER_MAP only if its real quote width justifies it."
+    )
 
 
 def test_the_spread_gate_is_mandatory_and_bites(intraday_chain, intraday_bars, attention, account):
@@ -247,3 +334,39 @@ def test_the_stop_is_wider_than_the_target_on_purpose():
     stop = strat.p("exits.stop_pct_of_premium")
     assert stop > target
     assert CostModel().breakeven_hit_rate(target, stop) == pytest.approx(0.60, abs=0.01)
+
+
+def test_the_thesis_does_not_claim_confirmations_that_did_not_happen(
+    intraday_chain, intraday_bars, attention, account
+):
+    """The rationale a judge reads has to describe THIS trade.
+
+    Written for the veto design, it asserted "Bollinger width expanding" and
+    "breadth confirming" because reaching that line used to mean every gate had
+    passed. Under a score it does not: measured over 624 candidates the
+    catalyst confirmed in three, so that sentence would have been false on
+    essentially every trade in the judged journal.
+
+    Asserted against the GENERATED text, not the source - a rationale is a
+    claim about a trade, and the only way to test a claim is to make one.
+    """
+    attention.breadth = {"gainers": 10, "losers": 10}
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account, news=[])
+    ideas = strat.generate(ctx)
+    assert ideas, "this scenario should still trade on its other confirmations"
+    thesis = ideas[0].thesis
+    # neither the catalyst nor breadth confirmed in this scenario
+    assert "breadth confirming" not in thesis
+    assert "confirmations agree" in thesis, "it must report the tally it got"
+
+
+def test_the_thesis_reports_the_confirmations_it_missed(
+    intraday_chain, intraday_bars, attention, account
+):
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account, news=[])
+    ideas = strat.generate(ctx)
+    assert ideas
+    thesis = ideas[0].thesis
+    assert "confirmations agree" in thesis
+    # the catalyst vote was lost here, so the rationale must say so
+    assert "Not confirming" in thesis or "0 headline" in thesis

@@ -101,7 +101,14 @@ def tradable_dte_range(cfg: Any, strategies: list[Any] | None = None) -> tuple[i
             lows.append(int(low))
         if high is not None:
             highs.append(int(high))
-    _ = strategies
+    # Instantiated strategies state their own window and are authoritative;
+    # the YAML sniffing above is the fallback for callers that have none.
+    for strategy in strategies or []:
+        window = getattr(strategy, "chain_dte_window", None)
+        declared = window() if callable(window) else None
+        if declared:
+            lows.append(int(declared[0]))
+            highs.append(int(declared[1]))
     if not lows or not highs:
         return cfg.options.min_days_to_expiry, cfg.options.max_days_to_expiry
     return (
@@ -153,6 +160,8 @@ def build_source(
             news = feed.news(symbols, request.start - dt.timedelta(days=2), request.end)
 
     chain_cfg = bt.chain
+    chain_dte = tradable_dte_range(cfg)
+    log.info("chain DTE window: %d-%d days", chain_dte[0], chain_dte[1])
     tier_map = {**DEFAULT_TIER_MAP, **{k.upper(): v for k, v in chain_cfg.tier_map.items()}}
     chain_model = ChainModel(
         skew=chain_cfg.skew,
@@ -164,8 +173,14 @@ def build_source(
         min_quotable_mid=chain_cfg.min_quotable_mid,
         tier_map=tier_map,
         default_tier=chain_cfg.default_tier,
-        min_dte=cfg.options.min_days_to_expiry,
-        max_dte=cfg.options.max_days_to_expiry,
+        # The window every ENABLED strategy needs to see, not the global
+        # options envelope. Building it at options.min_days_to_expiry (3) while
+        # the intraday book filters for 0-2 DTE handed that book a chain with
+        # zero qualifying contracts on every session of every symbol - it read
+        # as "no contracts survived the liquidity filter" and was in fact an
+        # empty shelf.
+        min_dte=chain_dte[0],
+        max_dte=chain_dte[1],
     )
     iv_cfg = bt.iv_model
     iv_model = IVModel(
@@ -207,7 +222,7 @@ def build_source(
         real_chain=real_chain,
         intraday_by_symbol=intraday,
         min_iv_observations=chain_cfg.min_iv_observations,
-        options_dte=(cfg.options.min_days_to_expiry, cfg.options.max_days_to_expiry),
+        options_dte=chain_dte,
     )
     source.chain_source_requested = chain_cfg.source
     return source

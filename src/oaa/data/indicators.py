@@ -350,6 +350,44 @@ def rsi(values: Sequence[float], period: int = 14) -> float | None:
     return round(100 - (100 / (1 + rs)), 4)
 
 
+def resample(bars: Sequence[Bar], minutes: int = 60) -> list[Bar]:
+    """Aggregate bars into fixed intraday buckets, e.g. 1-minute into 1-hour.
+
+    Buckets are anchored to the clock hour rather than to the first bar, so the
+    result is the same whether the window starts at 09:30 or 10:07 - two runs
+    over the same tape must not produce different bars. The final bucket is
+    included even though it is still forming: it is the one carrying the
+    current price, and dropping it would mean acting on an hour-old close.
+    """
+    grouped: dict[tuple[Any, int], list[Bar]] = {}
+    order: list[tuple[Any, int]] = []
+    for bar in bars:
+        stamp = bar.get("timestamp")
+        if not isinstance(stamp, dt_module.datetime):
+            continue
+        slot = (stamp.hour * 60 + stamp.minute) // minutes
+        key = (stamp.date(), slot)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(bar)
+
+    out: list[Bar] = []
+    for key in order:
+        rows = grouped[key]
+        highs = [float(b["high"]) for b in rows if b.get("high") is not None]
+        lows = [float(b["low"]) for b in rows if b.get("low") is not None]
+        out.append({
+            "timestamp": rows[0]["timestamp"],
+            "open": float(rows[0]["open"]),
+            "high": max(highs) if highs else float(rows[0]["open"]),
+            "low": min(lows) if lows else float(rows[0]["open"]),
+            "close": float(rows[-1]["close"]),
+            "volume": sum(float(b.get("volume") or 0.0) for b in rows),
+        })
+    return out
+
+
 def time_bucket(bar: Bar, minutes: int = 30) -> str:
     """Label a bar by its half-hour slot, e.g. '09:30'.
 

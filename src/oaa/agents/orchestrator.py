@@ -39,6 +39,7 @@ from oaa.agents.llm import get_llm
 from oaa.agents.memory import Memory
 from oaa.brokers.base import Broker
 from oaa.config.loader import Settings
+from oaa.core import clock
 from oaa.core.errors import DataError, StrategyError
 from oaa.core.logging import get_logger
 from oaa.core.types import (
@@ -452,12 +453,31 @@ class Orchestrator:
             )
             try:
                 decision.fill = self.executor.close(position.symbol, abs(position.qty))
+                # Only a confirmed close counts as one. Every broker backend
+                # returns None on failure rather than raising, so counting the
+                # attempt meant a leg that could not be closed was logged as
+                # closed AND had its book attribution erased - after which the
+                # 15:15 cutoff treats the unattributed leg as transient and
+                # liquidates one leg of a multi-session condor. Dry run also
+                # returns None, and must not mutate the ledger either.
+                confirmed = decision.fill is not None
+                if not confirmed:
+                    if not self.cfg.execution.dry_run:
+                        result.errors.append(
+                            f"close {position.symbol}: broker returned no fill - "
+                            "position left open and still attributed"
+                        )
+                        log.error("close NOT confirmed for %s: %s",
+                                  position.symbol, reason)
+                    self.journal.record(decision)
+                    continue
+                book = self.firewall.ledger.book_of(position.symbol)
                 self.firewall.ledger.forget(position.symbol)
                 result.positions_closed += 1
                 log.info("closing %s: %s", position.symbol, reason)
                 if self.memory:
                     self.memory.record(
-                        symbol=symbol, strategy=self.firewall.ledger.book_of(position.symbol),
+                        symbol=symbol, strategy=book,
                         structure="leg", pnl=position.unrealized_pl,
                         pnl_pct=position.unrealized_plpc, held_days=0.0, thesis=reason,
                     )
@@ -720,6 +740,7 @@ class Orchestrator:
 
     def _record_open(self, idea: TradeIdea, strategy: Strategy) -> None:
         """Attribute every leg to its book, so 15:15 liquidates the right ones."""
+        idea.meta.setdefault("opened_at", clock.utcnow().isoformat())
         self.risk.record_open(idea)
         self._open_ideas[idea.id] = idea
         self.firewall.ledger.register(idea, book=strategy.capital_book)

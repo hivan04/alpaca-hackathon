@@ -6,7 +6,70 @@
 # paper over an earnings date, which is the one trade this must never take.
 # =============================================================================
 
-universe: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA"]
+# INDEX AND SECTOR ETFs ONLY. The rule, stated so it can be applied rather than
+# argued case by case:
+#
+#   1. measured median option spread <= 2% of mid  (COST_STRUCTURE.md S5 - the
+#      arithmetic that decides whether an edge survives execution at all)
+#   2. a name earns its place only if it raises the number of EFFECTIVE
+#      independent bets, not the ticker count
+#   3. no idiosyncratic event risk in a short-volatility book
+#
+# Rule 3 is what removes single names, and it is mechanical rather than a P&L
+# observation: the event gate excludes SCHEDULED earnings, but nothing protects
+# a short condor from a surprise product headline. A basket has no such
+# headline. NVDA was the demonstration - $2,863 of a $4,852 drawdown - but the
+# reason to exclude it holds a priori, which is why AAPL and MSFT went too even
+# though both were profitable. Keeping the winners and dropping the loser would
+# have been fitting the last backtest.
+#
+# Run `python scripts/universe_report.py --live` to re-derive this list from
+# measured spreads and correlations rather than trusting the comment.
+# XLK and SMH removed 28 Aug on measured evidence, not on P&L:
+#
+#              spread @ chain      corr vs QQQ
+#   XLK              27.94%              0.96
+#   SMH              12.49%              0.91
+#   QQQ               2.85%              -
+#
+# XLK was the worst name in the universe on BOTH criteria at once - the widest
+# option market by an order of magnitude, and 0.96 correlated with a name we
+# already hold. It contributed nothing QQQ does not, at ten times the cost.
+# SMH is the same argument at 0.91/0.93.
+#
+# XLE is KEPT despite an 11.79% chain-median spread because it is the only name
+# in the table that is NEGATIVELY correlated with the rest (-0.18 to -0.36).
+# A short-premium book's entire failure mode is every position losing at once;
+# a negatively correlated name is worth more than three more equity ETFs.
+#
+# Measured 28 Aug: ten symbols behaved like 2.4 independent bets. Re-run
+# `python scripts/universe_report.py --live` after any change - the whole point
+# of the rule is that the list follows the measurement.
+# XLK and SMH removed 28 Aug on measured evidence, not on P&L:
+#
+#              chain spread      corr vs QQQ
+#   XLK             27.94%             0.96
+#   SMH             12.49%             0.91
+#   QQQ              2.85%              -
+#
+# XLK was the worst name in the universe on BOTH criteria at once - the widest
+# option market by an order of magnitude, and 0.96 correlated with a name we
+# already hold. It contributed nothing QQQ does not, at ten times the cost.
+# SMH is the same argument at 0.91/0.93.
+#
+# XLE is KEPT despite a wide chain-median spread because it is the only name in
+# the table NEGATIVELY correlated with the rest (-0.18 to -0.36). A
+# short-premium book's entire failure mode is every position losing at once, so
+# a negatively correlated name is worth more than three more equity ETFs.
+#
+# Measured 28 Aug: ten symbols behaved like 2.4 INDEPENDENT BETS. Re-run
+# `python scripts/universe_report.py --live` after any change - the point of the
+# rule is that the list follows the measurement, not the other way round.
+universe: [
+  "SPY", "QQQ", "IWM", "DIA",      # broad equity
+  "XLF", "XLE",                    # sectors - XLE is the only NEGATIVE correlation
+  "TLT", "GLD",                    # decorrelated: rates, gold
+]
 
 # --- 3.1 premium gate: is vol rich? -----------------------------------------
 # IV rank says vol is high FOR THIS NAME. The IV-RV spread says you are being
@@ -65,6 +128,12 @@ structures:
   # 5 - 1.5 = $350 against $424 at 14 delta), so risk-based sizing will trade
   # MORE contracts for the same equity risk.
   short_delta_target: 0.25         # 22-28 delta short strikes
+  # Wings as a FRACTION OF SPOT. 1.5% is close to the 5 points this book has
+  # been trading on SPY, so index behaviour is roughly unchanged - but it now
+  # means the same thing on TLT and GLD as it does on SPY, instead of being a
+  # several-percent wing on the cheap names and under one percent on the dear
+  # ones. `wing_width_points` below is the fallback if this is unset.
+  wing_width_pct: 0.015
   wing_width_points: 5
   dte_min: 7
   dte_max: 14
@@ -115,8 +184,31 @@ sizing:
 # price of negative expectancy, which is not a trade worth making.
 exits:
   profit_target_pct: 0.50
-  dte_floor: 3                     # gamma rises sharply into expiry
+  dte_floor: 3
+  # Hard time stop in days. 0 = off, which is the default and the tested
+  # setting. Decay goes as sqrt(time), cost is fixed per round trip: measured
+  # at a 10-DTE entry, a 2-day hold collects 10.6% of the credit and pays 70%
+  # of it back in spread and fees; 3 days collects 16.3% and pays 45%. If you
+  # enable this, drop `profit_target_pct` to roughly the decay the hold can
+  # actually reach - a 50% target needs 7-8 days.
+  max_hold_days: 0                     # gamma rises sharply into expiry
   loss_multiple_of_credit: 1.5
+  # Hard per-structure dollar stop, checked before the credit-relative one.
+  # 1.5x the credit is a ratio, so a wide structure with a fat credit is allowed
+  # a proportionally fat loss - which is backwards when the constraint that
+  # actually matters is `risk.daily_loss_limit_pct` on a $100k account. At 3%
+  # the daily halt is $3,000; a single trade should not be able to spend a
+  # third of that. 0 disables the check.
+  # Lowered from 900 to 450 on 27 Aug. At 900 the stop NEVER FIRED: measured
+  # over 55 real trades the six largest losses were $780-$868, all of them
+  # sitting just underneath it, and every one exited on the DTE floor instead -
+  # which realises whatever has accumulated rather than capping it. A stop set
+  # above the loss distribution is decoration.
+  max_loss_usd: 450
+  # One entry per underlying per SESSION for this book. The global 60-minute
+  # default is sized for the intraday book; on a 10:00-15:15 scan grid it let
+  # the same NVDA condor open at 14:00 and again at 15:15.
+  reentry_cooldown_minutes: 1440
   defensive_mode: close_tested_side
   entry_cutoff_utc: "2026-09-02T20:00:00Z"
 

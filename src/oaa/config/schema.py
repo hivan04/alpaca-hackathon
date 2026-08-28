@@ -267,16 +267,23 @@ class StrategyRef(Base):
 
 
 class LLMConfig(Base):
-    provider: Literal["anthropic", "openai", "gemini"] | None = "anthropic"
-    model: str = "claude-sonnet-4-5"
+    provider: Literal["anthropic", "openai", "featherless"] | None = "featherless"
+    model: str = "Qwen/Qwen3-32B"
     temperature: float = 0.2
     max_tokens: int = 4000
     timeout_seconds: int = 90
     fallback_to_rules: bool = True
     #: Which environment variable holds the key. Defaults per provider:
-    #: ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY.
+    #: ANTHROPIC_API_KEY / OPENAI_API_KEY / FEATHERLESS_API_KEY.
     api_key_env: str | None = None
-    #: Gemini only. Makes repeated calls far more reproducible, which is the
+    #: OpenAI-compatible providers only. Featherless defaults to
+    #: https://api.featherless.ai/v1; override to pin a region or a proxy.
+    base_url: str | None = None
+    #: Featherless only. Serverless inference cold-starts and rate-limits, so a
+    #: transient 429 retries rather than costing the cycle its reasoning.
+    max_retries: int = 3
+    retry_backoff_seconds: float = 1.5
+    #: Featherless. Makes repeated calls far more reproducible, which is the
     #: difference between a backtest and a coin flip.
     seed: int | None = None
 
@@ -477,18 +484,20 @@ class BacktestCriticConfig(Base):
     #: feed the critic the outcomes of trades already closed in this replay,
     #: exactly as the live agent feeds it
     memory: bool = True
-    #: The provider the REPLAY uses, overriding `agents.llm`. Live trading is
-    #: a handful of calls a day; a replay scores every candidate in every
-    #: session and is re-run whenever a parameter moves, so the two have
-    #: completely different cost shapes and should not share a model. Set to
-    #: null to inherit `agents.llm` instead.
+    #: The settings the REPLAY uses, overriding `agents.llm`. Same provider
+    #: since 28 Aug - one vendor, one key - but deliberately different
+    #: settings: temperature 0 and a fixed seed, because a judge should not be
+    #: creative and a backtest whose numbers move on re-run is not a backtest.
+    #: The smaller token budget matters too: a replay scores every candidate in
+    #: every session and is re-run whenever a parameter moves, so it is by far
+    #: the heavier caller. Set to null to inherit `agents.llm` wholesale.
     llm: LLMConfig | None = Field(
         default_factory=lambda: LLMConfig(
-            provider="gemini",
-            model="gemini-2.5-flash",
+            provider="featherless",
+            model="Qwen/Qwen3-32B",
             temperature=0.0,
             max_tokens=1024,
-            api_key_env="GEMINI_API_KEY",
+            api_key_env="FEATHERLESS_API_KEY",
             seed=7,
         )
     )

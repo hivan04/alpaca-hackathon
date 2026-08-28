@@ -8,6 +8,7 @@ pinned to a property rather than to a golden number.
 
 from __future__ import annotations
 
+import collections
 import datetime as dt
 
 import pytest
@@ -59,6 +60,42 @@ def test_expiries_are_fridays_and_weeklies_are_a_tier_privilege():
     assert len(monthly) < len(weekly)
 
 
+def test_an_index_etf_lists_an_expiry_inside_two_days_on_every_weekday():
+    """A Fridays-only calendar silently disabled the entire intraday book.
+
+    That book buys 0-2 DTE. On a Monday or a Tuesday a Fridays-only ladder has
+    NOTHING inside that window, so the book's own filter was being applied to a
+    chain that could not contain a qualifying contract - reported forever as
+    "no contracts survived the liquidity filter", which reads as a liquidity
+    problem and is in fact an empty shelf.
+    """
+    monday = dt.date(2026, 6, 1)
+    for offset in range(5):                       # Mon .. Fri
+        day = monday + dt.timedelta(days=offset)
+        daily = listed_expiries(day, 0, 2, weeklies=True, weekdays=(0, 1, 2, 3, 4))
+        mwf = listed_expiries(day, 0, 2, weeklies=True, weekdays=(0, 2, 4))
+        assert daily, f"a daily-expiry name has no 0-2 DTE contract on {day:%a}"
+        assert mwf, f"an M/W/F name has no 0-2 DTE contract on {day:%a}"
+
+
+def test_the_daily_series_is_near_dated_only():
+    """The Monday/Wednesday and daily series are near-dated in reality, and
+    bounding them is also what stops the replay building five times the chain
+    for contracts no strategy here would ever look at."""
+    far = listed_expiries(
+        dt.date(2026, 6, 1), 0, 45, weeklies=True, weekdays=(0, 1, 2, 3, 4),
+        daily_horizon=7,
+    )
+    assert all(d.weekday() == 4 for d in far if (d - dt.date(2026, 6, 1)).days > 7)
+
+
+def test_a_weekly_only_name_never_gets_a_midweek_expiry():
+    single_name = listed_expiries(
+        dt.date(2026, 6, 1), 0, 45, weeklies=False, weekdays=(0, 1, 2, 3, 4)
+    )
+    assert single_name and all(d.weekday() == 4 for d in single_name)
+
+
 def test_the_strike_ladder_brackets_spot_and_is_capped():
     ladder = strike_ladder(560.0, 0.14, step=1.0, max_per_side=10)
     assert min(ladder) <= 560.0 <= max(ladder)
@@ -104,12 +141,73 @@ def test_a_built_chain_quotes_both_rights_with_a_crossable_spread():
 
 
 def test_repricing_at_expiry_is_intrinsic_only():
+    """Intrinsic once there is genuinely no time left - AFTER the close on the
+    expiry day, or any time past it."""
+    from zoneinfo import ZoneInfo
+
     model = ChainModel()
+    expiry = dt.date(2026, 6, 19)
+    for asof in (
+        dt.datetime(2026, 6, 19, 16, 0, tzinfo=ZoneInfo("America/New_York")),
+        dt.datetime(2026, 6, 22, 11, 0, tzinfo=ZoneInfo("America/New_York")),
+    ):
+        mark = model.reprice(
+            "SPY", spot=560.0, asof=asof, atm_iv=0.14,
+            strike=550.0, expiry=expiry, is_call=True, tier_symbol="SPY",
+        )
+        assert mark["mid"] == pytest.approx(10.0)
+
+
+def test_a_zero_dte_contract_still_carries_time_value_during_the_session():
+    """The defect that made every intraday trade a -100%.
+
+    `build` priced a 0 DTE contract with half a day of life; `reprice` used
+    whole days, hit zero, and returned pure INTRINSIC. So the book bought
+    premium and marked it away fifteen minutes later - for an at-the-money long
+    that is the entire position. Measured 17-21 Aug: 28 trades, 28 losers, the
+    big ones all exiting "stop 15% of premium hit" at -88% to -100%.
+    """
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    model = ChainModel()
+    expiry = dt.date(2026, 6, 19)
+    atm = {"strike": 560.0, "expiry": expiry, "is_call": True, "tier_symbol": "SPY"}
+
+    morning = model.reprice("SPY", 560.0, dt.datetime(2026, 6, 19, 11, 0, tzinfo=et),
+                            0.14, **atm)
+    afternoon = model.reprice("SPY", 560.0, dt.datetime(2026, 6, 19, 15, 0, tzinfo=et),
+                              0.14, **atm)
+
+    assert morning["mid"] > 0.10, "an ATM 0 DTE option at 11:00 is not worthless"
+    assert afternoon["mid"] > 0.0
+    assert afternoon["mid"] < morning["mid"], "and it decays through the session"
+
+
+def test_the_entry_price_and_the_mark_agree_on_the_same_contract():
+    """One clock, one surface. The two paths disagreeing by half a day of vega
+    is a guaranteed loss on every front-expiry trade, and it shows up as a
+    strategy failure rather than as the pricing fault it is."""
+    from zoneinfo import ZoneInfo
+
+    from oaa.backtest.chain import DEFAULT_TIER_MAP
+
+    moment = dt.datetime(2026, 6, 19, 11, 0, tzinfo=ZoneInfo("America/New_York"))
+    model = ChainModel(tier_map=DEFAULT_TIER_MAP, min_dte=0, max_dte=7)
+    chain = model.build("SPY", 560.0, moment, 0.14)
+    front = [
+        q for q in chain
+        if q.expiry == moment.date() and q.right.value == "call"
+    ]
+    assert front, "no 0 DTE calls listed"
+    quote = min(front, key=lambda q: abs(q.strike - 560.0))
     mark = model.reprice(
-        "SPY", spot=560.0, asof=dt.date(2026, 6, 19), atm_iv=0.14,
-        strike=550.0, expiry=dt.date(2026, 6, 19), is_call=True, tier_symbol="SPY",
+        quote.symbol, 560.0, moment, 0.14,
+        strike=quote.strike, expiry=quote.expiry, is_call=True, tier_symbol="SPY",
     )
-    assert mark["mid"] == pytest.approx(10.0)
+    assert mark["mid"] == pytest.approx(quote.last, rel=0.02), (
+        f"built at {quote.last} and marked at {mark['mid']} on the same moment"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -714,7 +812,9 @@ def test_atm_iv_comes_back_at_the_vol_the_prints_were_made_at():
 
 
 def test_a_real_chain_source_drives_the_context_and_records_provenance():
-    from oaa.backtest.source import HistoricalContextSource
+    from oaa.backtest.source import (
+        HistoricalContextSource,
+    )
 
     builder = _builder()
     bars = synthetic_bars("SPY", dt.date(2024, 1, 1), END)
@@ -735,7 +835,9 @@ def test_an_empty_real_chain_is_not_quietly_replaced_by_a_modelled_one():
     """Falling through to the model when nothing was listed would manufacture
     a chain that did not exist on that date."""
     from oaa.backtest.realchain import RealChainBuilder
-    from oaa.backtest.source import HistoricalContextSource
+    from oaa.backtest.source import (
+        HistoricalContextSource,
+    )
 
     empty = RealChainBuilder.from_payload({}, {}, ChainModel())
     source = HistoricalContextSource(
@@ -750,7 +852,9 @@ def test_an_empty_real_chain_is_not_quietly_replaced_by_a_modelled_one():
 
 def test_iv_rank_falls_back_to_the_model_when_prints_are_too_thin():
     """Ranking a percentile over three observations is not a percentile."""
-    from oaa.backtest.source import HistoricalContextSource
+    from oaa.backtest.source import (
+        HistoricalContextSource,
+    )
 
     source = HistoricalContextSource(
         {"SPY": synthetic_bars("SPY", dt.date(2024, 1, 1), END)},
@@ -855,6 +959,48 @@ def test_the_listing_dte_range_comes_from_the_strategies_not_the_envelope():
     assert high < cfg.options.max_days_to_expiry
 
 
+def test_the_chain_window_reaches_the_intraday_books_expiries():
+    """The window is what strategies must SEE, not what the global options
+    envelope allows. Built at options.min_days_to_expiry (3) while the intraday
+    book filters for 0-2 DTE, it handed that book a chain with zero qualifying
+    contracts on every session of every symbol."""
+    from oaa.backtest.runner import tradable_dte_range
+
+    cfg = load_config()
+    low, _high = tradable_dte_range(cfg)
+    assert low == 0, "the intraday book buys the front expiry - 0 DTE must be visible"
+    assert low < cfg.options.min_days_to_expiry
+
+
+def test_a_declared_window_widens_the_chain_but_a_silent_one_does_not():
+    """`chain_dte_window` returning None means 'the inferred window covers me'.
+    If the base class returned the global envelope instead, every strategy
+    would widen the chain to 45 days and the narrowing would be pointless."""
+    from oaa.backtest.runner import tradable_dte_range
+    from oaa.strategies.base import load_strategies
+
+    cfg = load_config()
+    strategies = load_strategies(cfg)
+    assert any(s.chain_dte_window() is not None for s in strategies)
+    assert tradable_dte_range(cfg, strategies) == tradable_dte_range(cfg)
+
+
+def test_the_modelled_chain_actually_contains_a_front_expiry():
+    """The end-to-end version of the two tests above: build the chain the way
+    the runner does and assert a 0-2 DTE contract exists on a Monday, the day
+    a Fridays-only calendar was emptiest."""
+    from oaa.backtest.chain import DEFAULT_TIER_MAP
+    from oaa.backtest.runner import tradable_dte_range
+
+    cfg = load_config()
+    low, high = tradable_dte_range(cfg)
+    model = ChainModel(tier_map=DEFAULT_TIER_MAP, min_dte=low, max_dte=high)
+    monday = dt.datetime(2026, 6, 1, 14, 40, tzinfo=dt.timezone.utc)
+    quotes = model.build("SPY", 640.0, monday, 0.14)
+    front = [q for q in quotes if (q.expiry - monday.date()).days <= 2]
+    assert front, "no 0-2 DTE contract on a Monday - the intraday book cannot trade"
+
+
 def test_history_expiries_are_thinned_to_one_per_stride():
     """SPY lists an expiration almost every trading day. One ATM implied-vol
     reading per session needs one expiry per week, not thirty-five."""
@@ -953,7 +1099,9 @@ def test_a_run_that_prices_nothing_says_so_rather_than_reporting_zero_percent():
     """0 real and 0 modelled is not '0% real' - it is 'nothing was measured',
     and the two must not render the same."""
     from oaa.backtest.realchain import RealChainBuilder
-    from oaa.backtest.source import HistoricalContextSource
+    from oaa.backtest.source import (
+        HistoricalContextSource,
+    )
 
     empty = RealChainBuilder.from_payload({}, {}, ChainModel())
     source = HistoricalContextSource(
@@ -1071,3 +1219,206 @@ def test_a_trades_own_mark_provenance_agrees_with_the_run_total():
         pytest.skip("modelled chain: no per-mark provenance to reconcile")
     any_real = any(t.real_mark_fraction > 0 for t in marked)
     assert any_real == (coverage["marks_from_real_bars"] > 0)
+
+
+# --------------------------------------------------------------------------- #
+# Defined risk has to survive the marks
+#
+# `reprice` decides per CONTRACT whether to use a real bar or the model. In a
+# condor the short strikes trade and the far wings often do not, so on a
+# stressed session the short is marked at a real elevated print and its own wing
+# on a calm modelled vol. The vertical's value is then not bounded by its strike
+# width and the structure stops being defined-risk. Losses of 170% of max_loss
+# appeared in a real run because of this.
+# --------------------------------------------------------------------------- #
+def test_a_mixed_surface_breaks_the_width_bound_which_is_why_we_reprice():
+    """The arithmetic behind `_leg_marks` re-pricing onto one surface."""
+    from oaa.backtest.pricing import bs_price
+
+    spot, years, rate, width = 93.0, 7 / 365, 0.04, 5.0
+    calm, stressed = 0.20, 0.55
+
+    short_real = bs_price(spot, 97, years, stressed, False, rate)   # traded close
+    wing_calm = bs_price(spot, 92, years, calm, False, rate)        # modelled
+    wing_same = bs_price(spot, 92, years, stressed, False, rate)    # one surface
+
+    mixed = short_real - wing_calm
+    single = short_real - wing_same
+    assert mixed > single * 1.4          # the mix is materially worse
+    assert single < width                # one surface respects the bound
+    assert mixed > single                # and the mix inflates the loss
+
+
+def test_the_engine_clamps_a_loss_that_exceeds_the_structures_defined_risk():
+    """`_bounded_gross` holds a position to the risk it was approved on."""
+    import datetime as dt
+
+    from oaa.backtest.engine import BacktestEngine, OpenStructure, TradeRecord
+    from oaa.core.types import StructureType, TradeIdea
+
+    engine = BacktestEngine(load_settings())
+    idea = TradeIdea(
+        symbol="SPY", strategy="vol_carry", structure=StructureType.IRON_CONDOR,
+        legs=[], quantity=1, net_price=-1.5, max_loss=350.0, max_profit=150.0,
+        thesis="t",
+    )
+    position = OpenStructure(
+        record=TradeRecord(
+            trade_id="BT9999", symbol="SPY", strategy="vol_carry", book="carry",
+            structure="iron_condor", quantity=2, opened_at="2026-07-01T14:00:00+00:00",
+        ),
+        idea=idea, strategy=None, quantity=2, entry_net=-1.5,
+        opened_at=dt.datetime(2026, 7, 1, 14, tzinfo=dt.timezone.utc), legs=[],
+    )
+
+    assert engine._bounded_gross(-200.0, position) == -200.0      # inside the bound
+    assert engine._bounded_gross(-5_000.0, position) == -700.0    # 350 x 2, clamped
+    assert engine._bounded_gross(9_999.0, position) == 300.0      # 150 x 2, clamped
+    assert engine._risk_bound_clamps == 2
+
+
+def test_the_hard_dollar_stop_fires_before_the_credit_relative_one():
+    """`exits.max_loss_usd` caps the trade in the units the daily loss limit is
+    written in. The credit-relative stop scales with the credit taken, which is
+    backwards when what matters is the account."""
+    from oaa.core.types import StructureType, TradeIdea
+    from oaa.strategies import strategy_registry
+
+    cfg = load_config()
+    ref = next(s for s in cfg.strategies if s.name == "vol_carry")
+    ref.params.setdefault("exits", {}).update(
+        {"max_loss_usd": 900, "loss_multiple_of_credit": 1.5,
+         "profit_target_pct": 0.50, "dte_floor": 3}
+    )
+    strategy = strategy_registry.get("vol_carry")(ref, cfg)
+    idea = TradeIdea(
+        symbol="SPY", strategy="vol_carry", structure=StructureType.IRON_CONDOR,
+        legs=[], quantity=1, net_price=-8.0, max_loss=2_000.0, max_profit=800.0,
+        thesis="t", meta={},
+    )
+
+    class _Ctx:
+        contexts: dict = {}
+
+        def macro_flagged(self, _symbol):
+            return False
+
+    # -1.2x credit on an $800 credit is -$960: past the hard stop, but the
+    # credit-relative stop at 1.5x would not have fired until -$1,200.
+    reason = strategy.should_exit(_Ctx(), idea, -1.2)
+    assert reason is not None
+    assert "hard stop" in reason
+
+    assert strategy.should_exit(_Ctx(), idea, -1.0) is None   # -$800, inside both
+
+
+def test_a_zero_dte_option_is_not_expired_on_the_morning_of_its_expiry():
+    """The single most expensive line in the replay.
+
+    `expired = any(leg["expiry"] <= moment.date())` marked a 0 DTE long as
+    expired on the very next scan after it was opened - fifteen minutes later,
+    hours before the close - and settled it at INTRINSIC. For an at-the-money
+    long that is the whole position: measured over 11-22 Aug, twelve trades
+    settled this way for -$4,602 of a -$4,272 result, one of them at +254%.
+    The book looked like a lottery because the harness was running one.
+    """
+    import datetime as _dt
+    import inspect
+
+    from oaa.backtest.engine import BacktestEngine
+
+    src = inspect.getsource(BacktestEngine._manage)
+    assert 'leg["expiry"] < moment.date()' in src
+    assert 'leg["expiry"] <= moment.date()' not in src
+
+    # and the rule itself, stated plainly
+    today = _dt.date(2026, 8, 21)
+    assert not (today < today), "a contract expiring today has not expired yet"
+    assert _dt.date(2026, 8, 20) < today
+
+
+def test_the_intraday_book_is_forced_flat_before_the_firewall_cutoff():
+    """`time_gate.no_entry_after` stops new entries; it closes nothing. Without
+    an exit rule of its own, a position opened at the last scan of the day had
+    no later scan and ran into settlement."""
+    from oaa.config.loader import load_config
+    from oaa.strategies.base import load_strategies
+
+    cfg = load_config()
+    book = next(s for s in load_strategies(cfg) if s.name == "intraday_momentum")
+    flat_by = str(book.p("exits.flat_by", ""))
+    assert flat_by, "the intraday book must declare a flat-by time"
+
+    cutoff = [c for c in cfg.schedule.cycles if c.action == "intraday_cutoff"]
+    assert cutoff, "live has a hard cutoff cycle - the backtest must match it"
+    assert flat_by < cutoff[0].at, "the book must be flat BEFORE the firewall fires"
+
+    # and the replay needs a moment on which that rule can actually run
+    assert any(t > book.p("time_gate.no_entry_after", "14:45")
+               for t in cfg.backtest.session_times_et), (
+        "no session moment after the last entry time - nothing can close a "
+        "position opened at the final scan"
+    )
+
+
+def test_the_replay_spot_moves_through_the_session():
+    """The single line that made an intraday book unable to win.
+
+    `spot = bar["open"]` is the correct no-lookahead price at 09:30 and only at
+    09:30. Held for the whole day it freezes the underlying: every context from
+    10:00 to 15:10 saw one price, so an option could only decay. Measured over
+    17-21 Aug that produced 38 trades and 38 losers, each between -0.3% and
+    -1.5% - the round trip plus theta, which is what "the underlying never
+    moved" costs.
+
+    The intraday bars are already truncated at the moment, so their last close
+    is this moment's price with no lookahead.
+    """
+    import datetime as _dt
+
+    from oaa.backtest.source import (
+        HistoricalContextSource,
+        synthetic_intraday_bars,
+    )
+
+    start, end = _dt.date(2026, 6, 1), _dt.date(2026, 6, 5)
+    bars = {"SPY": synthetic_bars("SPY", _dt.date(2026, 1, 1), end)}
+    intraday = {"SPY": synthetic_intraday_bars("SPY", bars["SPY"], interval_minutes=5)}
+    source = HistoricalContextSource(
+        bars, start=start, end=end,
+        session_times_et=("10:00", "11:00", "14:00"),
+        intraday_by_symbol=intraday,
+        market_symbol="SPY",
+    )
+    spots: dict = collections.defaultdict(set)
+    for moment, contexts in source:
+        market = contexts.get("SPY")
+        if market is not None:
+            spots[moment.date()].add(round(market.spot, 4))
+
+    assert spots, "no sessions replayed"
+    moving = [day for day, seen in spots.items() if len(seen) > 1]
+    assert moving, (
+        "spot never changed within any session - the underlying is frozen and "
+        "no intraday strategy can be evaluated"
+    )
+
+
+def test_a_strategy_that_throws_is_recorded_not_swallowed():
+    """An error is not a decision.
+
+    `_scan` caught every exception from generate() at DEBUG level and moved on,
+    with no rejection record. A book failing on every candidate of a run was
+    reported as simply quiet - which is how a month-long replay showed zero
+    intraday trades AND zero intraday rejections while the same code traded 40
+    times over five days. Silence has to mean "declined", never "crashed".
+    """
+    import inspect
+
+    from oaa.backtest.engine import BacktestEngine
+
+    src = inspect.getsource(BacktestEngine._scan)
+    marker = src.index("except Exception")
+    handler = src[marker:marker + 1600]
+    assert "strategy_error" in handler, "a raising strategy must leave a record"
+    assert "log.warning" in handler, "and must not be logged at DEBUG"

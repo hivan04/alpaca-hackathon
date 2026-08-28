@@ -177,7 +177,14 @@ class SimBroker(Broker):
         pos = self._positions.get(symbol)
         if pos is None:
             return None
-        closing = -(qty if qty is not None else pos.qty)
+        # The caller passes a MAGNITUDE (orchestrator sends abs(position.qty)),
+        # so the direction has to come from the position, not from the argument.
+        # Negating the argument blindly meant close_position(sym, 5) on a -5
+        # holding applied another -5: the exit DOUBLED every short leg and
+        # reported it as closed.
+        size = abs(qty) if qty is not None else abs(pos.qty)
+        size = min(size, abs(pos.qty))
+        closing = -size if pos.qty > 0 else size
         price = pos.avg_entry_price
         self.cash += -closing * price * 100
         self._apply(symbol, closing, price)

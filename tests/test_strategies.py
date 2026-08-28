@@ -131,6 +131,20 @@ def test_carry_exits_leave_room_for_execution_cost(chain, bars, account):
 
     assert strat.should_exit(ctx, idea, target - 0.05) is None
     assert "profit target" in (strat.should_exit(ctx, idea, target + 0.02) or "")
+
+    # With the hard dollar stop live it fires FIRST on any structure whose
+    # credit is large enough - which is the point of it: `loss_multiple_of_
+    # credit` is a ratio, so a fat credit buys a proportionally fat loss, and
+    # the account limit that actually binds is written in dollars.
+    hard = strat.p("exits.max_loss_usd", 0.0)
+    deep = strat.should_exit(ctx, idea, -(stop + 0.5)) or ""
+    if hard and (idea.max_profit or 0) * (stop + 0.5) >= hard:
+        assert "hard stop" in deep
+    else:
+        assert "credit" in deep
+
+    # Disable it and the credit-relative stop must still be the backstop.
+    strat.ref.params.setdefault("exits", {})["max_loss_usd"] = 0
     assert "credit" in (strat.should_exit(ctx, idea, -(stop + 0.5)) or "")
 
 
@@ -189,3 +203,92 @@ def test_every_generated_idea_is_defined_risk(chain, bars, account):
         for idea in strat.generate(ctx):
             assert idea.structure.is_defined_risk, idea.structure
             assert idea.max_loss is not None
+
+
+def test_the_critic_can_actually_approve_a_carry_trade(chain, bars, account):
+    """A regression guard for the failure that muted the whole book.
+
+    `_confidence` scored against a hard-coded 0.70 IV-rank threshold. When the
+    gate moved to 0.35 the formula kept marking to the old one, and the
+    heuristic critic - which starts from that confidence and then subtracted
+    0.10 for a "poor" reward/risk every defined-risk credit spread has by
+    construction - declined 100% of candidates. Backtests were being run with
+    `--critic off` and so never saw it; the live agent runs the critic ON and
+    would have traded nothing at all.
+
+    This asserts the two are wired to the same threshold: a candidate that
+    clears the premium gate must be able to clear the critic.
+    """
+    from oaa.agents.critic import Critic
+    from oaa.agents.llm import NullClient
+
+    strat, cfg = strategy("vol_carry")
+    strat.ref.params["universe"] = ["SPY"]
+    ctx = StrategyContext(market=context(chain, bars), account=account,
+                          config=cfg, params=strat.params)
+    ideas = strat.generate(ctx)
+    if not ideas:
+        return  # the fixture did not clear the premium gate; nothing to assert
+    idea = ideas[0]
+
+    # The exit policy's breakeven must be published for the critic to read.
+    assert idea.meta.get("breakeven_hit_rate")
+
+    verdict = Critic(cfg, llm=NullClient(cfg.agents.llm)).score(
+        idea, ctx.market, account, opened_today=0
+    )
+    assert verdict["source"] == "heuristic"
+    assert "poor reward/risk" not in verdict["reasoning"], (
+        "a defined-risk credit spread must not be penalised for the "
+        "reward/risk ratio that defines it"
+    )
+    assert verdict["score"] >= cfg.agents.critic.min_score_to_trade, (
+        f"the heuristic critic declined a candidate that passed every strategy "
+        f"gate (score {verdict['score']} < {cfg.agents.critic.min_score_to_trade})"
+    )
+
+
+def test_no_book_trades_single_names():
+    """The universe rule, encoded so it cannot quietly drift back.
+
+    Single names are excluded for a mechanical reason, not a P&L one: the event
+    gate excludes SCHEDULED earnings, but nothing protects a short condor from a
+    surprise company headline, and a basket has no such headline. Keeping the
+    single names that happened to be profitable while dropping the one that
+    happened to lose would have been fitting the last backtest.
+    """
+    from oaa.backtest.chain import is_index_etf
+    from oaa.config.loader import load_config
+
+    cfg = load_config()
+    offenders: dict[str, list[str]] = {}
+    for ref in cfg.enabled_strategies():
+        universe = ref.params.get("universe") or cfg.universe.active()
+        bad = [
+            s for s in universe
+            if not is_index_etf(str(s))
+        ]
+        if bad:
+            offenders[ref.name] = bad
+    assert not offenders, (
+        f"{offenders} are not index_etf tier. A short-volatility book carries "
+        "idiosyncratic headline risk on a single name that its event gate "
+        "cannot see."
+    )
+
+
+def test_the_carry_book_will_not_sell_the_front_expiry():
+    """The replay chain is now built from 0 DTE so the intraday book has
+    something to buy. That must not become a licence for the carry book to sell
+    a 0-2 DTE condor: short gamma into expiry is the one trade this system is
+    designed never to make, and the protection is vol_carry's OWN filter rather
+    than the shape of the chain it happens to be handed."""
+    from oaa.config.loader import load_config
+    from oaa.strategies.base import load_strategies
+
+    cfg = load_config()
+    carry = next(s for s in load_strategies(cfg) if s.name == "vol_carry")
+    assert carry.chain_dte_window() is None, "carry must not widen the chain"
+    # vol_carry builds with ctx.default_filter(), whose floor is this value.
+    assert cfg.options.min_days_to_expiry >= 3
+    assert int(carry.p("exits.dte_floor", 0)) >= 3

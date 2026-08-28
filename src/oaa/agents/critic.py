@@ -93,7 +93,18 @@ class Critic:
         score = idea.confidence
         notes: list[str] = []
 
-        if idea.reward_risk and idea.reward_risk >= 1.5:
+        # A defined-risk CREDIT structure has reward/risk bounded by
+        # credit/(width - credit). A 25-delta condor is 0.43 by construction, so
+        # a flat "below 0.5 is poor" bar penalises every one of them for having
+        # the shape that defines them - and combined with a confidence formula
+        # anchored on a stale threshold, that alone declined 100% of this book's
+        # candidates. Credit structures are judged on whether the hit rate the
+        # EXIT policy needs looks attainable; debit structures keep the ratio
+        # test, where it means what it says.
+        breakeven = idea.meta.get("breakeven_hit_rate")
+        if idea.is_credit and breakeven:
+            notes.append(f"breakeven hit rate {float(breakeven):.0%}")
+        elif idea.reward_risk and idea.reward_risk >= 1.5:
             score += 0.10
             notes.append(f"reward/risk {idea.reward_risk:.2f}")
         elif idea.reward_risk and idea.reward_risk < 0.5:

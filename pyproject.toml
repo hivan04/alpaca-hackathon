@@ -27,7 +27,6 @@ dependencies = [
 [project.optional-dependencies]
 agents = [
     "anthropic>=0.34",
-    "google-genai>=1.0",
     "mcp>=1.2",
 ]
 app = [

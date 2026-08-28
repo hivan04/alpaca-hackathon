@@ -74,3 +74,96 @@ def test_partners_for_stage_filters_and_sorts():
     cfg = load_config()
     # The example adapter ships disabled, so no stage should be populated.
     assert cfg.partners.for_stage("data_enrichment") == []
+
+
+def test_the_lunch_window_is_managed_even_though_it_is_not_traded():
+    """Ivan's rule: no entries at lunch, but do watch what the tape does to the
+    positions already on.
+
+    The entry gate skipped 11:30-13:30 and the SCAN grid skipped it too, so a
+    position opened at 11:00 went 150 minutes with no mark, no stop and no
+    profit target - measured in the 17-21 Aug replay as holds of "150 minutes"
+    and "135 minutes" on a book whose time stop is 20. An intraday position
+    that cannot be exited for 150 minutes is not an intraday position.
+    """
+    from oaa.config.loader import load_config
+
+    cfg = load_config()
+    moments = sorted(cfg.backtest.session_times_et)
+    lunch = [t for t in moments if "11:30" <= t < "13:30"]
+    assert len(lunch) >= 4, f"lunch is still unmanaged: {lunch}"
+
+    gaps = [
+        (a, b) for a, b in zip(moments, moments[1:], strict=False)
+        if (int(b[:2]) * 60 + int(b[3:])) - (int(a[:2]) * 60 + int(a[3:])) > 20
+    ]
+    assert not gaps, f"a position could sit unmanaged across {gaps}"
+
+
+def test_the_live_grid_still_mirrors_the_backtest_grid():
+    """When these diverged the live agent saw a sixth of what the backtest was
+    tuned against. Lunch moments are `manage_positions` in live and
+    entry-refused by the time gate in replay - same moments, same behaviour."""
+    from oaa.config.loader import load_config
+
+    cfg = load_config()
+    live = {c.at for c in cfg.schedule.cycles
+            if c.action in {"intraday_scan", "manage_positions"}}
+    replay = set(cfg.backtest.session_times_et)
+    assert replay <= live, f"replay moments with no live cycle: {sorted(replay - live)}"
+
+
+def test_no_entry_cycle_lands_inside_the_lunch_window():
+    """Managed, not traded. A scan cycle at lunch would be refused by the time
+    gate anyway, but the schedule should say what it means."""
+    from oaa.config.loader import load_config
+
+    cfg = load_config()
+    scans = [c.at for c in cfg.schedule.cycles if c.action == "intraday_scan"]
+    assert not [t for t in scans if "11:30" <= t < "13:30"]
+
+
+def test_a_half_written_strategy_package_does_not_take_down_the_system(tmp_path):
+    """One incomplete module used to break EVERY command.
+
+    `load_strategies` calls `registry.autoload`, which imports every module
+    under oaa.strategies. A package mid-write - an __init__ importing a
+    `signals` module that does not exist yet - raised ModuleNotFoundError out
+    of `oaa backtest`, `oaa scan`, `oaa doctor` and the live agent's loop
+    alike. An agent holding real positions must still be able to run `manage`
+    and `flatten` when some unrelated strategy is half-finished.
+    """
+    import sys
+    import types
+
+    from oaa.core.registry import Registry
+
+    package = types.ModuleType("oaa_probe_pkg")
+    package.__path__ = [str(tmp_path)]
+    sys.modules["oaa_probe_pkg"] = package
+    (tmp_path / "fine.py").write_text("VALUE = 1\n")
+    (tmp_path / "broken.py").write_text("import definitely_not_a_module\n")
+    try:
+        registry = Registry("probe")
+        registry.autoload("oaa_probe_pkg")          # must not raise
+        assert "broken" in registry.import_errors
+        assert "definitely_not_a_module" in registry.import_errors["broken"]
+        assert "fine" not in registry.import_errors
+    finally:
+        sys.modules.pop("oaa_probe_pkg", None)
+        for name in ("oaa_probe_pkg.fine", "oaa_probe_pkg.broken"):
+            sys.modules.pop(name, None)
+
+
+def test_an_enabled_strategy_that_cannot_import_is_a_hard_error():
+    """Tolerated only while nothing asks for it. Running without a strategy the
+    operator believes is enabled would mean trading a book that silently is not
+    there - so that case raises, naming the import failure rather than the
+    misleading "unknown strategy" the registry would otherwise report."""
+    import inspect
+
+    from oaa.strategies.base import load_strategies
+
+    src = inspect.getsource(load_strategies)
+    assert "import_errors" in src
+    assert "failed to" in src

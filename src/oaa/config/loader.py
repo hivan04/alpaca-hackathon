@@ -157,7 +157,17 @@ class Credentials:
     secret_key: str
     paper: bool
     profile: str
+    #: The JUDGED account, always - this is the submission field, and it stays
+    #: the judged one whatever profile is active so the dashboard and
+    #: `oaa doctor` never report a dev account as the thing being submitted.
     account_id: str | None = None
+    #: The account the ACTIVE profile is expected to reach: the dev account on
+    #: dev, the judged account on judged. Kept separate from `account_id`
+    #: because they answer different questions - "what am I submitting?" versus
+    #: "am I pointed at the right account right now?" - and conflating them
+    #: made every dev-profile identity check compare against the judged ID and
+    #: fail for the one reason that is not a problem.
+    expected_account_id: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -175,6 +185,10 @@ def resolve_credentials(cfg: Config) -> Credentials:
     dev    -> ALPACA_DEV_API_KEY / ALPACA_DEV_SECRET_KEY (falls back to the
               primary pair if the dev pair is unset)
     judged -> ALPACA_API_KEY / ALPACA_SECRET_KEY
+
+    Account IDs follow the same split: `ALPACA_DEV_ACCOUNT_ID` is what dev
+    should reach, `ALPACA_JUDGED_ACCOUNT_ID` is what judged should reach AND
+    what gets submitted.
     """
     load_dotenv(project_root() / ".env", override=False)
 
@@ -186,12 +200,20 @@ def resolve_credentials(cfg: Config) -> Credentials:
     else:
         key, secret = primary
 
+    judged_id = os.getenv("ALPACA_JUDGED_ACCOUNT_ID") or None
+    dev_id = os.getenv("ALPACA_DEV_ACCOUNT_ID") or None
     return Credentials(
         api_key=key,
         secret_key=secret,
         paper=cfg.broker.paper,
         profile=cfg.profile,
-        account_id=os.getenv("ALPACA_JUDGED_ACCOUNT_ID") or None,
+        account_id=judged_id,
+        # Unset on dev is fine and stays fine: the check that uses this skips
+        # rather than fails when there is nothing to compare against. Setting
+        # it turns "am I on the dev account?" into something verifiable, which
+        # is worth having precisely because the dev account is where careless
+        # experiments are supposed to land.
+        expected_account_id=dev_id if cfg.profile == "dev" else judged_id,
     )
 
 

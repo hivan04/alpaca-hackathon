@@ -206,6 +206,10 @@ class Signal(Model):
 class AssetKind(str, Enum):
     OPTION = "option"
     EQUITY = "equity"
+    #: Spot crypto (BTC/USD). Fractional quantities, no contract multiplier,
+    #: no position_intent, and `day` is not a valid time-in-force on a 24/7
+    #: asset. The weekend book is the only thing that emits these.
+    CRYPTO = "crypto"
 
 
 class Leg(Model):
@@ -221,7 +225,22 @@ class Leg(Model):
 
     @property
     def is_equity(self) -> bool:
-        return self.kind is AssetKind.EQUITY
+        """True for anything that is not an option contract.
+
+        Kept deliberately broad: every call site that asks this is really
+        asking "should I skip the options-only plumbing (position_intent, the
+        x100 multiplier, OCC parsing)?", and for spot crypto the answer is the
+        same as for a share.
+        """
+        return self.kind in {AssetKind.EQUITY, AssetKind.CRYPTO}
+
+    @property
+    def is_option(self) -> bool:
+        return self.kind is AssetKind.OPTION
+
+    @property
+    def is_crypto(self) -> bool:
+        return self.kind is AssetKind.CRYPTO
 
     def resolved_intent(self, closing: bool = False) -> Intent:
         if self.intent:
@@ -276,9 +295,21 @@ class TradeIdea(Model):
             return round(self.max_profit / self.max_loss, 3)
         return None
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_crypto(self) -> bool:
+        return any(leg.is_crypto for leg in self.legs)
+
     def net_cash(self) -> float:
-        """Signed dollars: negative = cash leaves the account."""
-        return round(-self.net_price * 100 * self.quantity, 2)
+        """Signed dollars: negative = cash leaves the account.
+
+        Options are quoted per share and trade in 100-lots; spot crypto is
+        quoted in dollars and trades in fractions. Applying the option
+        multiplier to a coin overstates the cash movement by 100x, which is the
+        sort of error that only shows up as a buying-power rejection.
+        """
+        multiplier = 1 if self.is_crypto else 100
+        return round(-self.net_price * multiplier * self.quantity, 2)
 
     def describe(self) -> str:
         legs = " / ".join(f"{leg.side.value[0].upper()}{leg.ratio} {leg.symbol}" for leg in self.legs)

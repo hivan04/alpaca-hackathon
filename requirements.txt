@@ -39,10 +39,10 @@ numpy==2.2.6
 tenacity==9.1.4
 structlog==26.1.0
 
-# [agents] - the reasoning layer. anthropic drives LIVE trading;
-# google-genai drives the BACKTEST critic (see backtest.critic.llm).
+# [agents] - the reasoning layer. Featherless drives BOTH the live loop and
+# the backtest critic and needs no SDK: it is httpx, already a core dep above.
+# anthropic is kept only as an optional alternate for agents.llm.provider.
 anthropic==1.1.0
-google-genai==2.20.0
 mcp==2.1.1
 
 # [app] - the read-only FastAPI page behind `oaa serve`

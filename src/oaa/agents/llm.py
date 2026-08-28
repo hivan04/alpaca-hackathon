@@ -11,9 +11,13 @@ Three providers, and the live loop and the backtest may use DIFFERENT ones.
 `agents.llm` is what the live agent runs on; `backtest.critic.llm` overrides it
 for replay only. The reason is cost shape rather than preference: one live
 cycle is a handful of calls a day, while a replay scores every candidate over
-every session and is re-run whenever a parameter moves. Pointing the replay at
-a cheap model and the live loop at the good one is the whole point of the
-split, and the run artefact records which model produced which verdicts.
+every session and is re-run whenever a parameter moves.
+
+Both now point at Featherless. The split survives because it is still the right
+shape - the replay runs at temperature 0 with a seed and a smaller token budget,
+and the run artefact records which model produced which verdicts - but there is
+no longer a second vendor, a second key or a second SDK to keep alive during a
+seven-day event. Gemini was removed on 28 Aug for exactly that reason.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from __future__ import annotations
 import abc
 import json
 import os
+import time
 from typing import Any
 
 from oaa.config.schema import LLMConfig
@@ -31,6 +36,10 @@ log = get_logger("agents.llm")
 
 class LLMUnavailable(RuntimeError):
     pass
+
+
+class _Transient(RuntimeError):
+    """A failure worth retrying. Never escapes the client."""
 
 
 class LLMClient(abc.ABC):
@@ -188,85 +197,207 @@ class OpenAIClient(LLMClient):
         return response.choices[0].message.content or ""
 
 
-class GeminiClient(LLMClient):
-    """Google Gemini, via the `google-genai` SDK.
+class FeatherlessClient(LLMClient):
+    """Featherless AI - the hackathon's inference partner.
 
-    Two things this provider gives that matter for a backtest specifically:
+    Featherless serves open-weight models behind an OpenAI-compatible REST
+    surface, so this client is deliberately written against `httpx` (already a
+    core dependency) rather than the OpenAI SDK: one fewer package to install
+    on a competition host, and the wire format is small enough to own.
 
-      * **native JSON mode.** `response_mime_type="application/json"` makes the
-        model return a parseable object instead of prose with a code fence
-        around it, so `json_complete` stops guessing.
-      * **a seed.** Set `agents.llm.seed` (or the backtest's own) and repeated
-        calls are far more reproducible. A backtest whose numbers move when you
-        re-run it is not a backtest - and the replay caches every verdict on
-        disk anyway, so the seed is the second line of defence, not the first.
+    Why it is the LIVE provider rather than a second opinion:
+
+      * It is the reasoning layer the agent actually runs on. Every critic
+        verdict, macro read and agent cycle in the judged account is produced
+        here, so the technology is load-bearing, not decorative.
+      * `run_tools` implements OpenAI-style tool calling, which is what lets
+        the model drive the Alpaca MCP tools directly. That is the bridge
+        between the strategy layer and Alpaca: the model reads the account,
+        the chain and the positions through the same seven-tool allowlist the
+        broker uses, and narrates what it did. It still cannot authorise a
+        trade - `RiskEngine` signs every ticket, and the router refuses
+        unsigned ones.
+
+    Everything else about the LLM contract is unchanged: if Featherless is
+    unreachable the loop degrades to deterministic rules and keeps trading.
     """
 
-    provider = "gemini"
+    provider = "featherless"
+    default_base_url = "https://api.featherless.ai/v1"
+    #: Worth trying again: cold starts, rate limits, gateway blips.
+    RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
     def __init__(self, cfg: LLMConfig) -> None:
         super().__init__(cfg)
         try:
-            from google import genai
-        except ImportError as exc:
-            raise LLMUnavailable(
-                "google-genai package missing - pip install -e '.[agents]'"
-            ) from exc
-        key = os.getenv(cfg.api_key_env or "GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            import httpx
+        except ImportError as exc:  # pragma: no cover - httpx is a core dep
+            raise LLMUnavailable("httpx package missing") from exc
+        env_name = cfg.api_key_env or "FEATHERLESS_API_KEY"
+        key = os.getenv(env_name)
         if not key:
-            raise LLMUnavailable(
-                f"{cfg.api_key_env or 'GEMINI_API_KEY'} is not set "
-                "(GOOGLE_API_KEY is also accepted)"
-            )
-        self._genai = genai
-        self._client = genai.Client(api_key=key)
+            raise LLMUnavailable(f"{env_name} is not set")
+        self.base_url = (cfg.base_url or self.default_base_url).rstrip("/")
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            timeout=cfg.timeout_seconds,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+        )
+        self._json_mode = True
 
-    def _config(self, system: str, json_mode: bool = False) -> Any:
-        from google.genai import types
+    # -- wire ---------------------------------------------------------------- #
+    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST /chat/completions with a short retry on transient failures.
 
-        kwargs: dict[str, Any] = {
-            "system_instruction": system,
+        Serverless inference cold-starts and rate-limits; a 429 or a 5xx one
+        second into a 09:45 cycle must not cost the cycle its reasoning.
+        """
+        last: Exception | None = None
+        for attempt in range(self.cfg.max_retries):
+            try:
+                response = self._client.post("/chat/completions", json=payload)
+                if response.status_code >= 400:
+                    detail = f"featherless returned {response.status_code}: {response.text[:200]}"
+                    # A 4xx that is not a rate limit is a REQUEST problem - a
+                    # model that will not accept `response_format`, a bad
+                    # model id, a dead key. Retrying it three times just
+                    # spends the cycle's latency budget arriving at the same
+                    # answer, so it fails immediately and lets the caller
+                    # choose a different shape of request.
+                    if response.status_code not in self.RETRYABLE_STATUS:
+                        raise LLMUnavailable(detail)
+                    raise _Transient(detail)
+                return response.json()
+            except LLMUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                if attempt == self.cfg.max_retries - 1:
+                    break
+                delay = self.cfg.retry_backoff_seconds * (2**attempt)
+                log.warning(
+                    "featherless call failed (attempt %d/%d): %s - retrying in %.1fs",
+                    attempt + 1, self.cfg.max_retries, exc, delay,
+                )
+                time.sleep(delay)
+        raise LLMUnavailable(f"featherless unreachable: {last}") from last
+
+    def _messages(self, system: str, user: str) -> list[dict[str, Any]]:
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+    def _body(self, messages: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": self.cfg.model,
+            "messages": messages,
             "temperature": self.cfg.temperature,
-            "max_output_tokens": self.cfg.max_tokens,
+            "max_tokens": self.cfg.max_tokens,
         }
         if self.cfg.seed is not None:
-            kwargs["seed"] = self.cfg.seed
-        if json_mode:
-            kwargs["response_mime_type"] = "application/json"
-        return types.GenerateContentConfig(**kwargs)
+            body["seed"] = self.cfg.seed
+        body.update(extra)
+        return body
 
-    def complete(
-        self, system: str, user: str, tools: list[dict[str, Any]] | None = None
-    ) -> str:
+    @staticmethod
+    def _text(data: dict[str, Any]) -> str:
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        return (choices[0].get("message") or {}).get("content") or ""
+
+    # -- the LLMClient contract ---------------------------------------------- #
+    def complete(self, system: str, user: str, tools: list[dict[str, Any]] | None = None) -> str:
+        body = self._body(self._messages(system, user))
         if tools:
-            # The live MCP agent loop is Anthropic-only. Gemini is wired up for
-            # the critic, which needs no tools - saying so beats silently
-            # dropping them and returning a toolless answer.
-            raise LLMUnavailable(
-                "the Gemini client does not implement tool use; point "
-                "agents.llm at anthropic for the MCP agent cycles"
-            )
-        response = self._client.models.generate_content(
-            model=self.cfg.model,
-            contents=user,
-            config=self._config(system),
-        )
-        return getattr(response, "text", "") or ""
+            body["tools"] = _openai_tools(tools)
+        return self._text(self._post(body))
 
     def json_complete(
         self, system: str, user: str, default: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Ask for JSON natively rather than asking nicely in the prompt."""
+        """Native JSON mode, with the prompt-nicely path as the fallback.
+
+        Not every open-weight model on Featherless supports `response_format`.
+        The first rejection flips `_json_mode` off for the life of the process
+        so we pay for that discovery once, not on every critic call.
+        """
+        messages = self._messages(
+            system + "\n\nRespond with a single JSON object and nothing else.", user
+        )
+        if self._json_mode:
+            try:
+                data = self._post(
+                    self._body(messages, response_format={"type": "json_object"})
+                )
+                return _extract_json(self._text(data)) or (default or {})
+            except LLMUnavailable as exc:
+                log.warning("featherless JSON mode failed (%s) - falling back to prompted JSON", exc)
+                self._json_mode = False
         try:
-            response = self._client.models.generate_content(
-                model=self.cfg.model,
-                contents=user,
-                config=self._config(system, json_mode=True),
-            )
+            return _extract_json(self._text(self._post(self._body(messages)))) or (default or {})
         except Exception as exc:  # noqa: BLE001
-            log.warning("Gemini call failed (model=%s): %s", self.cfg.model, exc)
+            log.warning("featherless call failed: %s", exc)
             return default or {}
-        return _extract_json(getattr(response, "text", "") or "") or (default or {})
+
+    def run_tools(
+        self,
+        system: str,
+        user: str,
+        tools: list[dict[str, Any]],
+        call_tool: Any,
+        max_turns: int = 6,
+    ) -> str:
+        """Agentic loop over Alpaca's MCP tools, in the OpenAI tool-call dialect.
+
+        `call_tool(name, arguments)` is McpBridge.call, so the model is driving
+        the same MCP server the broker reads through.
+        """
+        messages: list[dict[str, Any]] = self._messages(system, user)
+        specs = _openai_tools(tools)
+        for turn in range(max_turns):
+            data = self._post(self._body(messages, tools=specs))
+            choices = data.get("choices") or []
+            message = (choices[0].get("message") if choices else None) or {}
+            calls = message.get("tool_calls") or []
+            messages.append({
+                "role": "assistant",
+                "content": message.get("content") or "",
+                **({"tool_calls": calls} if calls else {}),
+            })
+            if not calls:
+                return message.get("content") or ""
+
+            for call in calls:
+                function = call.get("function") or {}
+                name = function.get("name", "")
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    arguments = {}
+                try:
+                    payload = json.dumps(call_tool(name, arguments), default=str)[:8000]
+                except Exception as exc:  # noqa: BLE001
+                    payload = f"tool error: {exc}"
+                    log.warning("tool %s failed: %s", name, exc)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.get("id", ""),
+                    "name": name,
+                    "content": payload,
+                })
+            log.debug("featherless agent turn %d: %d tool call(s)", turn + 1, len(calls))
+        return "reached the tool-turn limit without a final answer"
+
+    def teardown(self) -> None:
+        try:
+            self._client.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
 
 
 class NullClient(LLMClient):
@@ -286,13 +417,39 @@ def get_llm(cfg: LLMConfig) -> LLMClient:
             return AnthropicClient(cfg)
         if cfg.provider == "openai":
             return OpenAIClient(cfg)
-        if cfg.provider == "gemini":
-            return GeminiClient(cfg)
+        if cfg.provider == "featherless":
+            return FeatherlessClient(cfg)
     except LLMUnavailable as exc:
         if not cfg.fallback_to_rules:
             raise
         log.warning("LLM unavailable (%s) - running rules-only", exc)
     return NullClient(cfg)
+
+
+def _openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Anthropic-shaped tool specs -> the OpenAI function-calling shape.
+
+    `agents/tools.py` and the MCP bridge both emit `{name, description,
+    input_schema}` because Anthropic was the first provider wired up. Rather
+    than fork the tool registry per provider, the OpenAI-dialect clients
+    translate at the edge. A spec that is already in the OpenAI shape passes
+    through untouched, so a future provider can hand its own specs straight in.
+    """
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        if tool.get("type") == "function" and "function" in tool:
+            converted.append(tool)
+            continue
+        converted.append({
+            "type": "function",
+            "function": {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", "") or "",
+                "parameters": tool.get("input_schema")
+                or {"type": "object", "properties": {}},
+            },
+        })
+    return converted
 
 
 def _accepted_params(func: Any) -> set[str]:

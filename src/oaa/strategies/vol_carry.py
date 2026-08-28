@@ -130,10 +130,29 @@ class VolCarry(Strategy):
         if not cost:
             return self._reject(ctx, market, checks, idea=idea)
 
-        idea.confidence = self._confidence(market, premium, trend)
+        idea.confidence = self._confidence(
+            market, premium, trend,
+            anchor=float(self.p("premium_gate.iv_rank_min", 0.70)),
+        )
         idea.book = self.capital_book
         idea.tags = ["short_vol", "defined_risk", "carry", "resident"]
         idea.probability_of_profit = _pop(idea)
+        # The reward/risk the EXIT POLICY implies, not the one expiry implies.
+        # This book never holds to expiry: it takes `profit_target_pct` of max
+        # profit or stops at `loss_multiple_of_credit`. Judging it on the
+        # expiry payoff describes a trade it does not take.
+        target = float(self.p("exits.profit_target_pct", 0.50))
+        stop = float(self.p("exits.loss_multiple_of_credit", 1.5))
+        if target > 0 and stop > 0:
+            idea.meta["exit_reward_risk"] = round(target / stop, 4)
+            idea.meta["breakeven_hit_rate"] = round(stop / (target + stop), 4)
+        # This book holds for ~6 days. Re-entering the same underlying the same
+        # session is not a second opportunity, it is the first one taken twice -
+        # and because brokers NET identical legs it does not even show up as a
+        # second position.
+        idea.meta["reentry_cooldown_minutes"] = int(
+            self.p("exits.reentry_cooldown_minutes", 1440)
+        )
         idea.meta["gates"] = gates_summary(checks)
         idea.meta["size_multiplier"] = ctx.macro_size_multiplier(self.name)
         return [idea]
@@ -289,6 +308,7 @@ class VolCarry(Strategy):
                 short_put_delta=-delta,
                 short_call_delta=delta,
                 wing_points=self.p("structures.wing_width_points", 5),
+                wing_pct=self.p("structures.wing_width_pct", None),
                 quantity=quantity,
                 thesis=thesis,
             )
@@ -359,6 +379,21 @@ class VolCarry(Strategy):
         trades, which is what makes an equity curve a curve rather than one flat
         line with a single mark at the end.
         """
+        # A hard dollar floor, checked FIRST and independently of the
+        # credit-relative stop. `loss_multiple_of_credit` scales with the credit
+        # taken, so a fat credit on a wide structure buys a proportionally fatter
+        # loss before the stop trips - which is exactly backwards when what
+        # matters is the account, not the trade. This caps the trade in the units
+        # the daily loss limit is written in. 0 disables it.
+        hard = float(self.p("exits.max_loss_usd", 0.0) or 0.0)
+        if hard > 0:
+            credit = float(idea.max_profit or 0.0)
+            if credit > 0 and pnl_pct * credit <= -hard:
+                return (
+                    f"loss reached the ${hard:,.0f} hard stop "
+                    f"(${abs(pnl_pct * credit):,.0f} on the structure)"
+                )
+
         target = self.p("exits.profit_target_pct", 0.30)
         if pnl_pct >= target:
             return f"profit target {target:.0%} of max profit reached ({pnl_pct:.0%})"
@@ -366,6 +401,28 @@ class VolCarry(Strategy):
         loss_multiple = self.p("exits.loss_multiple_of_credit", 2.0)
         if pnl_pct <= -abs(loss_multiple):
             return f"loss reached {loss_multiple:.1f}x the credit received ({pnl_pct:.0%})"
+
+        # Optional hard time stop. OFF by default (0), because it fights the
+        # profit target: extrinsic value decays with roughly the SQUARE ROOT of
+        # time while the round-trip cost is fixed, so a 2-day hold collects
+        # ~11% of the credit against a cost that does not shrink - spread and
+        # fees then take ~70% of gross. If you set this, lower
+        # `profit_target_pct` to match, or the target becomes unreachable and
+        # this becomes the only exit the book ever uses.
+        max_hold = float(self.p("exits.max_hold_days", 0) or 0)
+        opened_at = idea.meta.get("opened_at")
+        if max_hold > 0 and opened_at:
+            try:
+                opened = dt.datetime.fromisoformat(str(opened_at))
+            except ValueError:
+                opened = None
+            if opened is not None:
+                held = (clock.utcnow() - opened).total_seconds() / 86400.0
+                if held >= max_hold:
+                    return (
+                        f"held {held:.1f}d, at or past the {max_hold:.0f}d "
+                        "maximum hold"
+                    )
 
         floor = int(self.p("exits.dte_floor", 3))
         expiry = idea.meta.get("expiry")
@@ -456,9 +513,24 @@ class VolCarry(Strategy):
         )
 
     @staticmethod
-    def _confidence(market: MarketContext, premium: GateResult, trend: GateResult) -> float:
+    def _confidence(
+        market: MarketContext,
+        premium: GateResult,
+        trend: GateResult,
+        anchor: float = 0.70,
+    ) -> float:
+        """Confidence relative to the CONFIGURED premium floor, not a constant.
+
+        This was hard-coded to 0.70. When `premium_gate.iv_rank_min` moved to
+        0.35 the formula kept scoring against the old threshold, so a trade that
+        comfortably passed the gate still scored as though it had failed one at
+        0.70 - and the critic, which reads this as its starting point, declined
+        every single carry candidate. A scoring function that references a
+        threshold has to read that threshold from the same place the gate does.
+        """
         score = 0.5
-        score += (premium.metrics.get("iv_rank", 0.5) - 0.70) * 0.6
+        iv_rank_anchor = anchor
+        score += (premium.metrics.get("iv_rank", 0.5) - iv_rank_anchor) * 0.6
         score += min(0.2, premium.metrics.get("iv_rv_spread", 0.0) * 2.0)
         score -= trend.metrics.get("trend", 0.0) * 0.25
         return round(max(0.0, min(1.0, score)), 3)

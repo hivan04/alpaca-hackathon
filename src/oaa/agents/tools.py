@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from oaa.core.logging import get_logger
+from oaa.core.mcp_compat import tool_description, tool_input_schema
 from oaa.core.types import Decision, DecisionAction, TradeIdea
 from oaa.firewall.lock import Book
 
@@ -552,8 +553,8 @@ def mcp_read_tools(
             continue
         schemas.append({
             "name": name,
-            "description": (tool.description or "")[:600],
-            "input_schema": tool.inputSchema or {"type": "object", "properties": {}},
+            "description": tool_description(tool, 600),
+            "input_schema": tool_input_schema(tool),
         })
 
     mutating = sorted(

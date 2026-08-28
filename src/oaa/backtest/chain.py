@@ -39,12 +39,68 @@ import datetime as dt
 import math
 from dataclasses import dataclass, field
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from oaa.backtest.pricing import bs_delta, bs_price
 from oaa.core.types import Greeks, OptionQuote, Right
 from oaa.options.occ import build_occ
 
 _DAYS = 365.0
+_ET = ZoneInfo("America/New_York")
+
+
+
+# --------------------------------------------------------------------------- #
+# time to expiry
+# --------------------------------------------------------------------------- #
+#: the regular session, used to measure how much of an expiry day is left
+_SESSION_OPEN = dt.time(9, 30)
+_SESSION_CLOSE = dt.time(16, 0)
+_SESSION_MINUTES = 6.5 * 60
+
+
+def _as_date(moment: dt.date | dt.datetime) -> dt.date:
+    return moment.date() if isinstance(moment, dt.datetime) else moment
+
+
+def session_fraction_remaining(moment: dt.date | dt.datetime) -> float:
+    """How much of THIS trading day is still ahead, in [0, 1]."""
+    if not isinstance(moment, dt.datetime):
+        return 1.0                       # a bare date means "the whole session"
+    local = moment.astimezone(_ET) if moment.tzinfo else moment.replace(tzinfo=_ET)
+    minutes = (local.hour * 60 + local.minute) - (
+        _SESSION_OPEN.hour * 60 + _SESSION_OPEN.minute
+    )
+    return min(1.0, max(0.0, (_SESSION_MINUTES - minutes) / _SESSION_MINUTES))
+
+
+def years_to_expiry(
+    expiry: dt.date, moment: dt.date | dt.datetime, floor_minutes: float = 15.0
+) -> float:
+    """Time to expiry in YEARS, counting the part of the expiry day still left.
+
+    Whole days are not good enough for a book that trades the front expiry. The
+    two paths through this model used to disagree about it: `build` priced a
+    0 DTE contract with `max(dte, 0.5)` - half a day of life - while `reprice`
+    used `max(dte, 0)`, hit zero, and returned pure INTRINSIC. So a 0 DTE long
+    was bought with time value and marked without it fifteen minutes later. For
+    an at-the-money option that is the entire premium: every 0 DTE trade in the
+    17-21 Aug replay lost 88-100%, and the "stop 15% of premium" fired on the
+    way past. Nothing was wrong with the signals or the risk limits; the mark
+    was deleting the asset.
+
+    A contract expiring today at 11:00 ET has five of six and a half hours
+    left, not zero.
+    """
+    days = (expiry - _as_date(moment)).days
+    if days < 0:
+        return 0.0
+    remaining = days + session_fraction_remaining(moment)
+    if days == 0:
+        remaining = session_fraction_remaining(moment)
+        if remaining <= 0.0:
+            return 0.0                   # past the close on expiry day: settled
+    return max(remaining, floor_minutes / _SESSION_MINUTES) / _DAYS
 
 
 # --------------------------------------------------------------------------- #
@@ -69,12 +125,29 @@ class LiquidityTier:
     weeklies: bool = False
     #: listed strike increment; None falls back to the price-based ladder
     strike_step: float | None = None
+    #: weekdays on which this underlying lists an expiry (0=Mon .. 4=Fri).
+    #:
+    #: Fridays-only was wrong for the index ETFs and it silently disabled the
+    #: entire intraday book: that book asks for 0-2 DTE, and on a Monday or a
+    #: Tuesday a Fridays-only calendar has NOTHING inside that window. SPY, QQQ
+    #: and IWM list every weekday in reality - 0DTE SPY is the most heavily
+    #: traded option contract in existence - and the other index ETFs list
+    #: Monday/Wednesday/Friday.
+    expiry_weekdays: tuple[int, ...] = (4,)
 
 
 DEFAULT_TIERS: dict[str, LiquidityTier] = {
+    # SPY / QQQ / IWM: an expiry every weekday.
+    "index_etf_daily": LiquidityTier(
+        name="index_etf_daily", half_spread_min=0.01, spread_frac=0.010, otm_widen=0.30,
+        base_oi=40_000, turnover=0.55, weeklies=True, strike_step=1.0,
+        expiry_weekdays=(0, 1, 2, 3, 4),
+    ),
+    # The rest of the ETF complex: Monday / Wednesday / Friday.
     "index_etf": LiquidityTier(
         name="index_etf", half_spread_min=0.01, spread_frac=0.010, otm_widen=0.30,
         base_oi=40_000, turnover=0.55, weeklies=True, strike_step=1.0,
+        expiry_weekdays=(0, 2, 4),
     ),
     "mega_cap": LiquidityTier(
         name="mega_cap", half_spread_min=0.02, spread_frac=0.018, otm_widen=0.38,
@@ -91,12 +164,27 @@ DEFAULT_TIERS: dict[str, LiquidityTier] = {
 }
 
 DEFAULT_TIER_MAP: dict[str, str] = {
-    **dict.fromkeys(("SPY", "QQQ", "IWM", "DIA", "XSP", "EEM", "XLF", "XLE", "XLK"), "index_etf"),
+    **dict.fromkeys(("SPY", "QQQ", "IWM", "XSP"), "index_etf_daily"),
+    **dict.fromkeys((
+        "DIA", "EEM", "XLF", "XLE", "XLK", "SMH", "TLT", "GLD",
+    ), "index_etf"),
     **dict.fromkeys((
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AMD",
         "NFLX", "AVGO", "JPM", "V", "MA", "UNH", "XOM", "COST", "WMT",
     ), "mega_cap"),
 }
+
+
+#: Tiers that quote like an index ETF. Two of them exist only because the
+#: expiry CALENDARS differ (SPY/QQQ/IWM list daily, the rest M/W/F); everything
+#: about the quote width is the same, so anything asking "is this an index ETF"
+#: must ask against this set rather than a single tier name.
+INDEX_ETF_TIERS: frozenset[str] = frozenset({"index_etf", "index_etf_daily"})
+
+
+def is_index_etf(symbol: str, tier_map: dict[str, str] | None = None) -> bool:
+    table = DEFAULT_TIER_MAP if tier_map is None else tier_map
+    return table.get(symbol.upper(), "") in INDEX_ETF_TIERS
 
 
 def tier_for(symbol: str, tier_map: dict[str, str], tiers: dict[str, LiquidityTier],
@@ -148,9 +236,21 @@ def strike_ladder(
 
 
 def listed_expiries(
-    asof: dt.date, min_dte: int, max_dte: int, weeklies: bool
+    asof: dt.date,
+    min_dte: int,
+    max_dte: int,
+    weeklies: bool,
+    weekdays: tuple[int, ...] = (4,),
+    daily_horizon: int = 7,
 ) -> list[dt.date]:
-    """Fridays inside the DTE window. Without weeklies, monthlies only.
+    """The listed expiry calendar inside the DTE window.
+
+    Fridays always. Other weekdays in `weekdays` are listed only inside
+    `daily_horizon` days, which is both closer to the real ladder - the
+    Monday/Wednesday and daily series are near-dated, the far months are
+    monthlies - and a hard bound on how much chain the replay has to build.
+    Without that bound, daily expiries over a 45-day window multiply every
+    context by five for contracts no strategy here would ever look at.
 
     A holiday-shortened week moves expiry to Thursday; the harness ignores that
     - it shifts a hold by one day and changes nothing about a thesis.
@@ -158,11 +258,15 @@ def listed_expiries(
     out: list[dt.date] = []
     for offset in range(max(0, min_dte), max_dte + 1):
         day = asof + dt.timedelta(days=offset)
-        if day.weekday() != 4:
+        weekday = day.weekday()
+        if weekday == 4:
+            is_monthly = 15 <= day.day <= 21
+            if weeklies or is_monthly:
+                out.append(day)
             continue
-        is_monthly = 15 <= day.day <= 21
-        if weeklies or is_monthly:
-            out.append(day)
+        if not weeklies or weekday not in weekdays or offset > daily_horizon:
+            continue
+        out.append(day)
     return out
 
 
@@ -189,6 +293,8 @@ class ChainModel:
     default_tier: str = "single_name"
     #: contracts under this mid are unquotable in practice
     min_quotable_mid: float = 0.03
+    #: how far out the non-Friday (daily / M-W-F) series are listed
+    daily_expiry_horizon: int = 7
 
     # -- surface -------------------------------------------------------- #
     def iv_at(self, atm_iv: float, spot: float, strike: float, years: float) -> float:
@@ -246,6 +352,8 @@ class ChainModel:
             self.min_dte if min_dte is None else min_dte,
             self.max_dte if max_dte is None else max_dte,
             tier.weeklies,
+            tier.expiry_weekdays,
+            self.daily_expiry_horizon,
         )
         strikes = strike_ladder(
             spot, self.strike_window_pct, tier.strike_step, self.max_strikes_per_side
@@ -254,7 +362,7 @@ class ChainModel:
 
         for expiry in expiries:
             dte = (expiry - day).days
-            years = max(dte, 0.5) / _DAYS
+            years = years_to_expiry(expiry, asof)
             atm = self._atm_for_term(atm_iv, years)
             denom = max(1e-6, atm * math.sqrt(years))
             for strike in strikes:
@@ -311,12 +419,14 @@ class ChainModel:
 
     # -- repricing an existing contract ---------------------------------- #
     def reprice(
-        self, quote_symbol: str, spot: float, asof: dt.date, atm_iv: float,
+        self, quote_symbol: str, spot: float, asof: dt.date | dt.datetime, atm_iv: float,
         strike: float, expiry: dt.date, is_call: bool, tier_symbol: str,
+        force_model: bool = False,  # noqa: ARG002 - always modelled; kept for
+                                    # signature parity with RealChainBuilder
     ) -> dict[str, float]:
         """Mark one already-open contract at a later date. Used every bar."""
-        dte = (expiry - asof).days
-        years = max(dte, 0) / _DAYS
+        dte = (expiry - _as_date(asof)).days
+        years = years_to_expiry(expiry, asof)
         if years <= 0:
             intrinsic = max(0.0, spot - strike) if is_call else max(0.0, strike - spot)
             return {"mid": round(intrinsic, 4), "bid": round(intrinsic, 4),

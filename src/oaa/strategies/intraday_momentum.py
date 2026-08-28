@@ -42,6 +42,7 @@ Signal stack
 from __future__ import annotations
 
 import datetime as dt
+import statistics
 from typing import Any
 
 from oaa.core import clock as wallclock
@@ -54,11 +55,11 @@ from oaa.data.indicators import (
     closes,
     crossed,
     persistence,
+    resample,
     rsi,
     volume_zscore_by_bucket,
     vwap_series,
     width_is_rising,
-    width_percentile,
 )
 from oaa.options.selection import Selection, select
 from oaa.signals.gates import GateResult, gates_summary, spread_gate, time_gate
@@ -75,6 +76,11 @@ class IntradayMomentum(Strategy):
     book = "intraday"
 
     # ------------------------------------------------------------------ #
+    def chain_dte_window(self) -> tuple[int, int]:
+        """0-2 DTE. This book buys the front expiry and is flat by 15:15, so
+        the global 3-45 window contains nothing it can trade."""
+        return 0, max(int(self.p("selection.dte_max", 2)), 0)
+
     def generate(self, ctx: StrategyContext) -> list[TradeIdea]:
         market = ctx.market
         if market is None:
@@ -109,11 +115,46 @@ class IntradayMomentum(Strategy):
             return self._reject(ctx, market, checks)
         bullish = momentum.metrics.get("direction", 0) > 0
 
-        # 3.2 catalyst confirmation ------------------------------------------ #
+        # 3.2 catalyst - a CONFIRMATION unless explicitly made mandatory ------ #
         catalyst = self._catalyst_gate(ctx, market, bullish, now_et)
         checks.append(catalyst)
-        if not catalyst:
+        catalyst_required = bool(self.p("catalyst_gate.required", True))
+        if catalyst_required and not catalyst:
             return self._reject(ctx, market, checks)
+
+        # 3.2b the confirmation tally ----------------------------------------
+        #
+        # The trigger (VWAP) decides DIRECTION and stays hard. Everything else
+        # is evidence, and evidence is counted rather than required. Requiring
+        # all of it was a conjunction of five to eight conditions - which fires
+        # at a rate no five-session window can use, and which meant loosening
+        # any one gate simply promoted the next one to being the wall.
+        confirmations = int(momentum.metrics.get("confirmations", 0))
+        possible = int(momentum.metrics.get("confirmations_possible", 0))
+        if not catalyst_required:
+            # `catalyst.passed` is not the vote: when the gate is not mandatory
+            # it passes by construction and reports what it MEASURED in
+            # metrics["confirmed"]. Reading the pass bit here handed the book a
+            # free fifth vote on every candidate.
+            possible += 1
+            if float(catalyst.metrics.get("confirmed", 0.0)) >= 1.0:
+                confirmations += 1
+        needed = int(self.p("momentum.confirmations_required", 3))
+        needed = min(needed, possible)
+        if confirmations < needed:
+            failed = momentum.metrics.get("confirmations_failed") or ""
+            checks.append(GateResult.veto(
+                "confirmation",
+                f"{confirmations}/{possible} confirmations, needs {needed}"
+                + (f" - {failed}" if failed else ""),
+                confirmations=float(confirmations),
+                required=float(needed),
+            ))
+            return self._reject(ctx, market, checks)
+        checks.append(GateResult.ok(
+            "confirmation",
+            confirmations=float(confirmations), required=float(needed),
+        ))
 
         # macro overlay: reduce, or stand down entirely ----------------------- #
         if not ctx.macro_allows(self.name):
@@ -175,6 +216,10 @@ class IntradayMomentum(Strategy):
     # ================================================================== #
     # 3.1 momentum
     # ================================================================== #
+    @staticmethod
+    def _latest_session_bars(bars: list[dict]) -> list[dict]:
+        return _session_slice(bars)
+
     def _momentum_gate(self, market: MarketContext, bars: list[dict]) -> GateResult:
         """VWAP decides direction. Band width decides whether the move is real.
         RSI can only veto. Because the three are non-overlapping, this fires at
@@ -186,11 +231,36 @@ class IntradayMomentum(Strategy):
             return GateResult.veto("momentum", "could not compute session VWAP")
 
         cross = crossed(px, anchor, int(self.p("momentum.cross_lookback_bars", 3)))
-        band_mult = self.p("momentum.vwap_band_atr_mult", 0.25)
         atr_value = atr(bars, self.p("momentum.atr_period", 14)) or 0.0
         distance = px[-1] - anchor[-1]
+
+        # The band is a multiple of how far price NORMALLY sits from VWAP this
+        # session, not a multiple of one bar's range.
+        #
+        # Measuring it in 1-minute ATR made it meaningless: on SPY that is a
+        # band of +/-$0.08, or 0.013% of spot - it asks price to be within eight
+        # cents of the session average. Session dispersion is typically 0.1-0.3%
+        # of spot, so the test was 10-20x too tight and "price is not on the
+        # band" became 75% of every rejection this book produced. Dispersion is
+        # also scale-free, which matters now the universe runs from a $50 ETF to
+        # a $600 one; ATR in dollars never was.
+        band = 0.0
+        dispersion_mult = float(self.p("momentum.band_dispersion_mult", 0) or 0)
+        if dispersion_mult > 0:
+            session = _session_slice(bars)
+            if len(session) >= 20:
+                offset = len(px) - len(session)
+                gaps = [
+                    p - a for p, a in
+                    zip(px[offset:], anchor[offset:], strict=False)
+                ]
+                if len(gaps) >= 20:
+                    band = dispersion_mult * statistics.pstdev(gaps)
+        if band <= 0:                       # fallback: the old ATR measure
+            band = float(self.p("momentum.vwap_band_atr_mult", 0.25)) * atr_value
+
         bounce = 0
-        if atr_value > 0 and abs(distance) <= band_mult * atr_value:
+        if band > 0 and abs(distance) <= band:
             # Sitting on the VWAP band: a bounce, direction taken from the last
             # persistent side rather than from a single bar.
             bounce = 1 if persistence(px, anchor, 3) > 0 else -1
@@ -207,43 +277,48 @@ class IntradayMomentum(Strategy):
                 "momentum", "no VWAP cross and price is not on the band", **metrics
             )
 
-        # volume confirmation, bucketed by time of day
+        # ------------------------------------------------------------------
+        # CONFIRMATIONS - scored, not vetoes.
+        #
+        # Volume, persistence, band width and RSI used to be four consecutive
+        # hard vetoes stacked behind the VWAP trigger and the catalyst gate.
+        # Eight vetoes in a row, each passing perhaps 70% of candidates, is
+        # 0.7^8 = 6% - the book was ARITHMETICALLY designed almost never to
+        # fire, and every time one gate was loosened the next became the wall.
+        # Measured over 864 candidates: 424 died on volume alone and none
+        # survived the chain.
+        #
+        # They ask genuinely different questions, so requiring all of them to
+        # agree is a tickbox exercise, not a confluence. Each now votes;
+        # `momentum.confirmations_required` decides how many must agree. The
+        # DIRECTION signal (VWAP) stays hard, because without it there is no
+        # trade to make.
+        # ------------------------------------------------------------------
+        votes: dict[str, bool] = {}
+        notes: list[str] = []
+
         volume_z = volume_zscore_by_bucket(
             bars, bucket_minutes=int(self.p("momentum.volume_bucket_minutes", 30))
         )
         metrics["volume_z"] = volume_z if volume_z is not None else -99.0
         floor = self.p("momentum.volume_zscore_min", 1.0)
         if volume_z is None:
-            if self.p("momentum.require_volume", True):
-                return GateResult.veto(
-                    "momentum",
-                    "no time-of-day volume baseline yet - the volume gate cannot be "
-                    "evaluated (it accumulates from live data)",
-                    **metrics,
-                )
-        elif volume_z < floor:
-            return GateResult.veto(
-                "momentum",
-                f"volume z-score {volume_z:.2f} for this time-of-day bucket is below "
-                f"{floor:.2f} - the move is not being participated in",
-                **metrics,
-            )
+            # Unmeasurable is not the same as failed. It used to veto.
+            notes.append("volume: no time-of-day baseline yet")
+        else:
+            votes["volume"] = volume_z >= floor
+            if not votes["volume"]:
+                notes.append(f"volume z {volume_z:.2f} < {floor:.2f}")
 
-        # persistence: reject the single-bar spike that immediately reverts
         need = int(self.p("momentum.persistence_bars", 2))
         held = persistence(px, anchor, need)
         metrics["persistence"] = float(held)
-        if (direction > 0 and held < need) or (direction < 0 and held > -need):
-            return GateResult.veto(
-                "momentum",
-                f"only {abs(held)} of the last {need} bars held the direction - "
-                "single-bar spikes revert",
-                **metrics,
-            )
+        votes["persistence"] = not (
+            (direction > 0 and held < need) or (direction < 0 and held > -need)
+        )
+        if not votes["persistence"]:
+            notes.append(f"only {abs(held)}/{need} bars held the direction")
 
-        # Bollinger WIDTH as the regime filter. Width, not position: position is
-        # a mean-reversion signal and would fight the VWAP trigger on every
-        # single candidate.
         widths = bollinger_width_series(
             px,
             period=int(self.p("momentum.bb_period", 20)),
@@ -251,45 +326,55 @@ class IntradayMomentum(Strategy):
         )
         lookback = int(self.p("momentum.width_lookback_bars", 6))
         metrics["band_width"] = widths[-1] if widths else -1.0
-        if self.p("momentum.require_width_rising", True) and not width_is_rising(widths, lookback):
-            return GateResult.veto(
-                "momentum",
-                "Bollinger band width is not expanding - contracting bands during a "
-                "VWAP cross is chop, and chop pays the spread for nothing",
-                **metrics,
-            )
-        if self.p("momentum.require_prior_squeeze", False):
-            pct = width_percentile(widths)
-            metrics["width_percentile"] = pct if pct is not None else -1.0
-            floor_pct = float(self.p("momentum.squeeze_percentile", 25)) / 100
-            if pct is not None and pct < floor_pct:
-                return GateResult.veto(
-                    "momentum",
-                    f"no prior squeeze: width percentile {pct:.0%} never compressed "
-                    f"below {floor_pct:.0%}",
-                    **metrics,
-                )
+        votes["band_width"] = width_is_rising(widths, lookback)
+        if not votes["band_width"]:
+            notes.append("Bollinger width not expanding")
 
-        # RSI: one-sided veto at extremes only. RSI at 65 blocks nothing.
+        # HIGHER TIMEFRAME. A 1-minute VWAP cross says nothing about whether it
+        # is running with the hour or into it. Resampling the same bars costs
+        # no extra data and answers a question none of the other confirmations
+        # ask: is this move with the larger trend, or a retrace inside a move
+        # going the other way? A vote, not a veto - the hour can be flat while
+        # a perfectly good 30-minute move sets up underneath it.
+        htf_minutes = int(self.p("momentum.higher_timeframe_minutes", 0) or 0)
+        if htf_minutes > 0:
+            hourly = resample(bars, htf_minutes)
+            need_bars = int(self.p("momentum.higher_timeframe_bars", 3))
+            hourly_px = closes(hourly)
+            if len(hourly_px) > need_bars:
+                reference = hourly_px[-(need_bars + 1)]
+                drift = hourly_px[-1] - reference
+                metrics["htf_drift_pct"] = round(
+                    drift / reference * 100 if reference else 0.0, 4
+                )
+                votes["higher_timeframe"] = (drift > 0) if direction > 0 else (drift < 0)
+                if not votes["higher_timeframe"]:
+                    notes.append(
+                        f"the last {need_bars} x {htf_minutes}m bars are moving "
+                        "against the signal"
+                    )
+            else:
+                notes.append(f"htf: fewer than {need_bars + 1} x {htf_minutes}m bars yet")
+
         rsi_value = rsi(px, int(self.p("momentum.rsi_period", 14)))
         metrics["rsi"] = rsi_value if rsi_value is not None else -1.0
-        if rsi_value is not None:
-            upper = float(self.p("momentum.rsi_veto_upper", 80))
-            lower = float(self.p("momentum.rsi_veto_lower", 20))
-            if direction > 0 and rsi_value > upper:
-                return GateResult.veto(
-                    "momentum",
-                    f"RSI {rsi_value:.0f} above the {upper:.0f} exhaustion veto - the "
-                    "move has already run",
-                    **metrics,
-                )
-            if direction < 0 and rsi_value < lower:
-                return GateResult.veto(
-                    "momentum",
-                    f"RSI {rsi_value:.0f} below the {lower:.0f} exhaustion veto",
-                    **metrics,
-                )
+        upper = float(self.p("momentum.rsi_veto_upper", 80))
+        lower = float(self.p("momentum.rsi_veto_lower", 20))
+        if rsi_value is None:
+            notes.append("rsi: unavailable")
+        else:
+            votes["rsi"] = not (
+                (direction > 0 and rsi_value > upper)
+                or (direction < 0 and rsi_value < lower)
+            )
+            if not votes["rsi"]:
+                notes.append(f"RSI {rsi_value:.0f} at the exhaustion veto")
+
+        metrics["confirmations"] = float(sum(1 for v in votes.values() if v))
+        metrics["confirmations_possible"] = float(len(votes))
+        metrics["confirmations_failed"] = "; ".join(notes)
         return GateResult.ok("momentum", **metrics)
+
 
     # ================================================================== #
     # 3.2 catalyst
@@ -324,6 +409,7 @@ class IntradayMomentum(Strategy):
             required=bool(self.p("catalyst_gate.required", True)),
         )
         result.metrics["score"] = view.score
+        result.metrics["required"] = 1.0 if self.p("catalyst_gate.required", True) else 0.0
         return result
 
     # ================================================================== #
@@ -427,6 +513,27 @@ class IntradayMomentum(Strategy):
                 if held >= limit:
                     return f"time stop: {held:.0f} minutes in trade, the signal has decayed"
 
+        # The firewall cutoff, enforced by the BOOK and not merely assumed.
+        # `time_gate.no_entry_after` stops new entries at 14:45, but nothing
+        # closed what was already on: a position opened at 14:45 had no later
+        # scan, so a 0 DTE long ran to settlement and paid out at intrinsic.
+        # An intraday book that can hold into expiry is not an intraday book.
+        flat_by = str(self.p("exits.flat_by", "") or "")
+        if flat_by:
+            now_et = self._now_et(ctx)
+            hour, _, minute = flat_by.partition(":")
+            try:
+                cutoff = now_et.replace(
+                    hour=int(hour), minute=int(minute or 0), second=0, microsecond=0
+                )
+            except ValueError:
+                cutoff = None
+            if cutoff is not None and now_et >= cutoff:
+                return (
+                    f"cutoff: {flat_by} ET - this book does not hold a position "
+                    "into the close or into expiry"
+                )
+
         if self.p("exits.exit_on_vwap_recross", True):
             market = ctx.contexts.get(idea.symbol)
             bars = market.intraday_bars if market else []
@@ -478,18 +585,39 @@ class IntradayMomentum(Strategy):
         momentum: GateResult,
         catalyst: GateResult,
     ) -> str:
+        """The rationale a judge reads. It must describe THIS trade.
+
+        The previous version was written for the veto design, where reaching
+        this line meant every gate had passed - so it could safely assert
+        "Bollinger width expanding", "RSI clear of the exhaustion veto",
+        "breadth confirming". Under a confirmation SCORE none of that follows:
+        a trade opens on three votes of six, and the other three may have
+        failed. Measured over 624 candidates, the catalyst confirmed in three
+        of them - so "breadth confirming" would have been false on essentially
+        every trade written into the journal the judges read.
+
+        A rationale that reports what was measured, including what did NOT
+        confirm, is both honest and a better argument.
+        """
         direction = "above" if bullish else "below"
+        confirmed = int(momentum.metrics.get("confirmations", 0))
+        possible = int(momentum.metrics.get("confirmations_possible", 0))
+        if not bool(catalyst.metrics.get("required", 0.0)):
+            possible += 1
+            confirmed += int(float(catalyst.metrics.get("confirmed", 0.0)) >= 1.0)
+        missed = str(momentum.metrics.get("confirmations_failed") or "").strip()
+        caveat = f" Not confirming: {missed}." if missed else ""
         return (
             f"{market.symbol} crossed {direction} session VWAP "
             f"({momentum.metrics.get('close', 0):.2f} vs "
-            f"{momentum.metrics.get('vwap', 0):.2f}) on "
-            f"{momentum.metrics.get('volume_z', 0):.1f}-sigma volume for this "
-            f"time-of-day bucket, with Bollinger width expanding and RSI "
-            f"{momentum.metrics.get('rsi', 0):.0f} clear of the exhaustion veto. "
-            f"Catalyst score {catalyst.metrics.get('score', 0):.2f}: "
-            f"{int(catalyst.metrics.get('news_count', 0))} headline(s) in the window "
-            f"and breadth confirming. {selection.reason}. Loss is capped at the "
-            "premium paid; the position is flat by 15:15 whatever happens."
+            f"{momentum.metrics.get('vwap', 0):.2f}), the directional trigger. "
+            f"{confirmed} of {possible} confirmations agree - volume "
+            f"{momentum.metrics.get('volume_z', 0):.1f} sigma for this "
+            f"time-of-day bucket, RSI {momentum.metrics.get('rsi', 0):.0f}, "
+            f"catalyst score {catalyst.metrics.get('score', 0):.2f} on "
+            f"{int(catalyst.metrics.get('news_count', 0))} headline(s)."
+            f"{caveat} {selection.reason}. Loss is capped at the premium paid; "
+            "the position is flat by 15:10, ahead of the 15:15 cutoff."
         )
 
     def universe(self) -> list[str]:
@@ -497,3 +625,23 @@ class IntradayMomentum(Strategy):
         # Index only. See the module docstring - this is arithmetic on the
         # spread, not a preference.
         return [s.upper() for s in (symbols or ["SPY", "QQQ"])]
+
+
+def _session_slice(bars: list[dict]) -> list[dict]:
+    """Only the most recent trading day's bars.
+
+    Contexts carry several sessions - live always did, and replay now matches -
+    so anything reasoning about "this session" has to slice or it measures a
+    week. VWAP itself restarts on the day boundary, so the two must agree.
+    """
+    if not bars:
+        return []
+
+    def _day(bar: dict) -> Any:
+        stamp = bar.get("timestamp")
+        if isinstance(stamp, str):
+            stamp = dt.datetime.fromisoformat(stamp)
+        return stamp.date() if hasattr(stamp, "date") else stamp
+
+    last = _day(bars[-1])
+    return [b for b in bars if _day(b) == last]

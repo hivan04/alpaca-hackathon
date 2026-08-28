@@ -53,6 +53,14 @@ tools: ## Install the Alpaca CLI, MCP server and agent skills
 doctor: ## Check every dependency and credential
 	$(BIN)/oaa doctor
 
+.PHONY: selftest
+selftest: ## Prove the LIVE chain: Featherless -> MCP -> Alpaca, one account
+	$(BIN)/oaa selftest
+
+.PHONY: selftest-judged
+selftest-judged: ## Same, against the JUDGED account. Run this before Monday's open.
+	$(BIN)/oaa selftest --profile judged
+
 .PHONY: test
 test: ## Run the test suite
 	$(BIN)/pytest
@@ -106,13 +114,21 @@ backtest: ## Replay the strategies over Alpaca history (modelled option chain)
 	$(BIN)/oaa backtest --why 12
 
 .PHONY: bt
-bt: ## Terminal backtest: no critic, reasons + trades. Fetches and caches bars.
+bt: ## Terminal backtest WITH the critic - what the live agent actually does.
+	$(BIN)/oaa backtest --profile dev --no-save --why 15 --trades
+
+.PHONY: bt-nocritic
+bt-nocritic: ## Same, critic disabled. Diff against `bt` to see what it costs you.
 	$(BIN)/oaa backtest --profile dev --critic off --no-save --why 15 --trades
+
+.PHONY: bt-index
+bt-index: ## Backtest the INDEX ETFs only - where the edge survives execution cost
+	$(BIN)/oaa backtest --profile dev --symbols SPY,QQQ,IWM \
+		--no-save --why 15 --trades
 
 .PHONY: bt-offline
 bt-offline: ## Same, but refuses the network. Needs a warm cache - run `make bt` first.
-	$(BIN)/oaa backtest --profile dev --offline --critic off --no-save \
-		--why 15 --trades
+	$(BIN)/oaa backtest --profile dev --offline --no-save --why 15 --trades
 
 .PHONY: bt-wiring
 bt-wiring: ## Synthetic smoke test - proves the plumbing, NOT a result

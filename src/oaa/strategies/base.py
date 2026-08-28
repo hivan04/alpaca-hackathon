@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from oaa.config.schema import Config, StrategyRef
-from oaa.core.errors import StrategyError
+from oaa.core.errors import ConfigError, StrategyError
 from oaa.core.logging import get_logger
 from oaa.core.registry import Registry
 from oaa.core.types import AccountSnapshot, MarketContext, TradeIdea
@@ -138,6 +138,23 @@ class Strategy(abc.ABC):
         """Config wins over the class default, so a strategy can be re-homed."""
         return getattr(self.ref, "book", None) or self.book
 
+    def chain_dte_window(self) -> tuple[int, int] | None:
+        """The expiry window this strategy needs to SEE, not the one it trades.
+
+        The replay builds one chain per context and every strategy filters it.
+        That chain used to be built from `options.min_days_to_expiry` alone, so
+        a strategy whose window sat outside the global one was handed a chain
+        that could not contain a single qualifying contract - it then reported
+        "no contracts survived the liquidity filter" forever, which reads as a
+        liquidity problem and is actually an empty shelf. Strategies that trade
+        outside the global window override this; the runner unions what they
+        declare with the window it infers from the YAML.
+
+        None means "the window inferred from the YAML already covers me",
+        which is true of every strategy trading inside the global envelope.
+        """
+        return None
+
     # -- the one method that matters ---------------------------------------- #
     @abc.abstractmethod
     def generate(self, ctx: StrategyContext) -> list[TradeIdea]:
@@ -198,6 +215,17 @@ def load_strategies(config: Config, book: str | None = None) -> list[Strategy]:
     strategy_registry.autoload("oaa.strategies")
     loaded: list[Strategy] = []
     for ref in config.enabled_strategies(book):
+        # A broken module is tolerated only while nothing asks for it. If the
+        # config enables a strategy whose module failed to import, silently
+        # running without it would mean trading a book the operator believes
+        # is on - so that becomes a hard error naming the real cause, rather
+        # than the "unknown strategy" the registry would otherwise report.
+        failure = strategy_registry.import_errors.get(ref.name)
+        if failure and ref.name not in strategy_registry:
+            raise ConfigError(
+                f"strategy '{ref.name}' is enabled but its module failed to "
+                f"import: {failure}"
+            )
         cls = strategy_registry.get(ref.name)
         loaded.append(cls(ref, config))
         log.debug("loaded strategy %s (weight %.2f)", ref.name, ref.weight)

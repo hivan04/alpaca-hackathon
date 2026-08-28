@@ -170,6 +170,11 @@ class AlpacaRestBroker(Broker):
                 request = MarketOrderRequest(**kwargs)
         else:
             leg = ticket.legs[0]
+            if leg.is_crypto and ticket.time_in_force == "day":
+                # Alpaca rejects `day` on a 24/7 asset outright. The weekend
+                # book sets gtc in its own config; this is the backstop for a
+                # ticket built from the shared execution defaults.
+                tif = TimeInForce.GTC
             kwargs = {
                 "symbol": leg.symbol,
                 "qty": leg.qty if leg.is_equity and leg.qty else ticket.quantity * leg.ratio,
@@ -177,9 +182,9 @@ class AlpacaRestBroker(Broker):
                 "time_in_force": tif,
                 "client_order_id": ticket.client_order_id,
             }
-            if not leg.is_equity:
+            if leg.is_option:
                 # position_intent is an options concept; sending it on an equity
-                # order is rejected by Alpaca.
+                # or crypto order is rejected by Alpaca.
                 kwargs["position_intent"] = PositionIntent(leg.resolved_intent().value)
             elif ticket.time_in_force == "day":
                 # Equity legs of an overnight pair must be marketable at the
@@ -217,7 +222,10 @@ class AlpacaRestBroker(Broker):
         from alpaca.trading.requests import ClosePositionRequest
 
         try:
-            req = ClosePositionRequest(qty=str(int(abs(qty)))) if qty else None
+            # Crypto positions are fractional, so the quantity cannot be
+            # truncated to an int - `int(0.0431)` closes nothing and leaves the
+            # book exposed through Monday's open.
+            req = ClosePositionRequest(qty=_qty_str(abs(qty))) if qty else None
             order = self.client.close_position(symbol, req)
             return self._to_fill(order, None)
         except Exception as exc:  # noqa: BLE001
@@ -284,6 +292,10 @@ class AlpacaRestBroker(Broker):
                 for leg in (getattr(order, "legs", None) or [])
             ],
         )
+
+
+def _qty_str(qty: float) -> str:
+    return f"{qty:.9f}".rstrip("0").rstrip(".") if qty % 1 else str(int(qty))
 
 
 def _dry_fill(ticket: OrderTicket) -> Fill:

@@ -41,8 +41,8 @@ DIRECT: dict[str, tuple[str, list[str]]] = {
     ),
     "agents": (
         "[agents] - the reasoning layer. anthropic drives LIVE trading;\n"
-        "# google-genai drives the BACKTEST critic (see backtest.critic.llm).",
-        ["anthropic", "google-genai", "mcp"],
+        "# The Featherless critic needs no SDK - it is httpx, already a core dep.",
+        ["anthropic", "mcp"],
     ),
     "app": (
         "[app] - the read-only FastAPI page behind `oaa serve`",

@@ -139,13 +139,38 @@ class ChainView:
         return self.by_moneyness(expiry, right, 1.0)
 
     def strike_offset(
-        self, expiry: dt.date, right: Right, from_strike: float, points: float
+        self,
+        expiry: dt.date,
+        right: Right,
+        from_strike: float,
+        points: float,
+        must_clear: bool = False,
     ) -> OptionQuote:
         """The listed strike nearest `from_strike + points`.
 
         Used for wings: never assume the grid is evenly spaced.
+
+        `must_clear` restricts the answer to strikes strictly on the far side of
+        `from_strike`. Without it, a ladder that is coarse relative to the wing -
+        or one thinned by the chain filter until few strikes survive - snaps the
+        wing back ONTO the short strike, and the caller can only report that the
+        width "does not fit the strike grid". A wing one strike out is a
+        narrower condor; a wing on top of the short is not a condor at all, so
+        picking the nearest valid strike is strictly better than refusing.
         """
-        return self.by_strike(expiry, right, from_strike + points)
+        target = from_strike + points
+        candidates = self.for_expiry(expiry, right)
+        if not candidates:
+            raise DataError(f"{self.symbol}: no {right.value}s for {expiry}")
+        if must_clear:
+            beyond = (
+                (lambda strike: strike > from_strike) if points > 0
+                else (lambda strike: strike < from_strike)
+            )
+            side = [q for q in candidates if beyond(q.strike)]
+            if side:
+                candidates = side
+        return min(candidates, key=lambda q: abs(q.strike - target))
 
     def atm_iv(self, expiry: dt.date | None = None) -> float | None:
         exp = expiry or (self.expiries()[0] if self.expiries() else None)

@@ -308,16 +308,48 @@ class StructureBuilder:
         quantity: int = 1,
         thesis: str = "",
         expiry: dt.date | None = None,
+        wing_pct: float | None = None,
     ) -> TradeIdea:
+        """`wing_pct` sizes the wings as a FRACTION OF SPOT, which is what you
+        want across a universe that spans an order of magnitude in price.
+
+        A flat 5-point wing is a few percent of a $85 underlying and under one
+        percent of a $600 one, so the same config line produced structures with
+        wildly different max loss, credit and effective delta depending only on
+        the ticker's share price. That was survivable when the universe was
+        SPY/QQQ/IWM plus mega-caps; adding TLT, XLF and GLD made it a real
+        distortion, and GLD failed outright 24 times on "wing width does not fit
+        the strike grid". `wing_points` remains the fallback when `wing_pct` is
+        unset, so existing configs behave exactly as before.
+        """
         exp = expiry or self.view.expiry_in_range(dte_range)
+        width = (
+            max(abs(self.view.spot) * wing_pct, 0.01)
+            if wing_pct else abs(wing_points)
+        )
+        # Floor the wing at one rung of the ACTUAL listed ladder. 1.5% of a $50
+        # ETF is $0.75, below a $1 strike increment - the wing then has nowhere
+        # to sit and the structure is declined ("no listed strike sits outside
+        # the short strikes"), which is safe but means the name contributes
+        # nothing. TLT and GLD were both failing this way. Measuring the rung
+        # from the chain rather than a price table also means an unusual ladder
+        # is handled by observation instead of assumption.
+        rung = _ladder_step(self.view, exp)
+        if rung > 0:
+            width = max(width, rung)
         short_put = self.view.by_delta(exp, Right.PUT, short_put_delta)
         short_call = self.view.by_delta(exp, Right.CALL, short_call_delta)
-        long_put = self.view.strike_offset(exp, Right.PUT, short_put.strike, -abs(wing_points))
-        long_call = self.view.strike_offset(exp, Right.CALL, short_call.strike, abs(wing_points))
+        long_put = self.view.strike_offset(
+            exp, Right.PUT, short_put.strike, -width, must_clear=True
+        )
+        long_call = self.view.strike_offset(
+            exp, Right.CALL, short_call.strike, width, must_clear=True
+        )
 
         if long_put.strike >= short_put.strike or long_call.strike <= short_call.strike:
             raise StrategyError(
-                f"{self.view.symbol}: wing width {wing_points} does not fit the strike grid"
+                f"{self.view.symbol}: no listed strike sits outside the short "
+                f"strikes for a {width:.2f}-wide wing (spot {self.view.spot:.2f})"
             )
         return build_iron_condor(
             symbol=self.view.symbol,
@@ -375,3 +407,18 @@ def closing_idea(idea: TradeIdea, exit_price: float) -> TradeIdea:
         tags=["close", *idea.tags],
         meta={"closes": idea.id},
     )
+
+
+def _ladder_step(view: ChainView, expiry: dt.date) -> float:
+    """The smallest gap between adjacent listed strikes for this expiry.
+
+    Read off the chain rather than inferred from spot: a filtered or unusual
+    ladder is then handled by what is actually listed.
+    """
+    strikes = sorted({q.strike for q in view.for_expiry(expiry, Right.CALL)})
+    if len(strikes) < 2:
+        strikes = sorted({q.strike for q in view.for_expiry(expiry, Right.PUT)})
+    if len(strikes) < 2:
+        return 0.0
+    gaps = [b - a for a, b in zip(strikes, strikes[1:], strict=False) if b > a]
+    return min(gaps) if gaps else 0.0

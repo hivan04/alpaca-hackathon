@@ -268,14 +268,26 @@ class CatalystEngine:
             "max_relevance": view.max_relevance,
             "breadth_up_pct": view.breadth_up_pct if view.breadth_up_pct is not None else -1.0,
         }
-        if not required:
-            return GateResult.ok("catalyst", **metrics)
-
         catalyst_present = (
             view.news_count >= min_headlines and view.max_relevance >= relevance_floor
         ) or view.scheduled_event is not None
 
         if not catalyst_present:
+            metrics["confirmed"] = 0.0
+            if not required:
+                # Demoted to a confirmation, NOT deleted. Returning ok() before
+                # measuring anything (the previous shape) handed the intraday
+                # book a free fifth vote and quietly removed the catalyst from
+                # the tally altogether.
+                return GateResult(
+                    passed=True,
+                    gate="catalyst",
+                    reason=(
+                        f"no catalyst behind the move: {view.news_count} headline(s), "
+                        f"best relevance {view.max_relevance:.2f} - confirmation lost"
+                    ),
+                    metrics=metrics,
+                )
             return GateResult.veto(
                 "catalyst",
                 f"no catalyst behind the move: {view.news_count} headline(s) in the "
@@ -285,18 +297,24 @@ class CatalystEngine:
             )
 
         if not view.breadth_agrees(bullish, breadth_min):
+            metrics["confirmed"] = 0.0
             aligned = (
                 view.breadth_up_pct if bullish
                 else (1.0 - view.breadth_up_pct if view.breadth_up_pct is not None else None)
             )
-            return GateResult.veto(
-                "catalyst",
+            message = (
                 "breadth does not confirm: only "
                 + (f"{aligned:.0%}" if aligned is not None else "an unknown share")
                 + f" of the movers list is moving with the signal, floor is {breadth_min:.0%}. "
-                "An index rising on mixed breadth is one mega-cap dragging the tape",
-                **metrics,
+                "An index rising on mixed breadth is one mega-cap dragging the tape"
             )
+            if not required:
+                return GateResult(
+                    passed=True, gate="catalyst",
+                    reason=message + " - confirmation lost", metrics=metrics,
+                )
+            return GateResult.veto("catalyst", message, **metrics)
+        metrics["confirmed"] = 1.0
         return GateResult.ok("catalyst", **metrics)
 
 

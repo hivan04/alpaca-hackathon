@@ -22,12 +22,12 @@ Three modes, and the default is deliberate.
     does. Deterministic, free, and identical code.
 
 ``llm``
-    The real model - by default a DIFFERENT one from the live agent's.
-    `backtest.critic.llm` overrides `agents.llm` for replay only, because the
-    two have opposite cost shapes: live is a handful of calls a day, a replay
-    scores every candidate in every session and gets re-run whenever a
-    parameter moves. The default points the replay at Gemini and leaves the
-    live loop on Anthropic. Set `backtest.critic.llm: null` to share one.
+    The real model. `backtest.critic.llm` overrides `agents.llm` for replay
+    only - same provider (Featherless) since 28 Aug, deliberately different
+    settings: temperature 0, a fixed seed and a smaller token budget, because
+    live is a handful of calls a day while a replay scores every candidate in
+    every session and gets re-run whenever a parameter moves. Set
+    `backtest.critic.llm: null` to share the live block wholesale.
 
     Two things make this usable in a backtest rather than a novelty:
 
