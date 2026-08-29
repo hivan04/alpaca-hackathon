@@ -113,6 +113,10 @@ oaa weekend backtest --days 400     the replay, costs included
 oaa weekend run --once              one live cycle (dry run unless --live)
 oaa weekend run --live              the loop; needs enabled: true in the YAML too
 oaa weekend flatten --live          close every crypto position now
+oaa weekend diagnose                the distributions behind the gates
+oaa weekend edge --days 400         model-free forward returns
+oaa dashboard                       the Weekend Book tab: clock, position,
+                                    forward-return curve, gate funnel, evidence
 ```
 
 History for the replay comes from `scripts/fetch_weekend_bars.py`, which caches

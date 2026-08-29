@@ -1,4 +1,4 @@
-"""The operator dashboard: backtesting and live trading, two tabs.
+"""The operator dashboard: backtesting, live trading and the weekend book.
 
 Run it with `oaa dashboard` (or `streamlit run src/oaa/app/dashboard.py`).
 
@@ -69,10 +69,12 @@ import streamlit as st  # noqa: E402
 from oaa.app import identity as ident  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
 from oaa.app.theme import palette, style  # noqa: E402
+from oaa.app.weekend_page import render_weekend  # noqa: E402
 from oaa.core.errors import DataError  # noqa: E402
 
 PAGE_BACKTEST = "Backtesting"
 PAGE_LIVE = "Live Trading"
+PAGE_WEEKEND = "Weekend Book"
 PAGE_CONTROL = "Control"
 
 
@@ -1275,13 +1277,18 @@ def main() -> None:
             settings_for[candidate] = None
             st.session_state[f"_load_error_{candidate}"] = str(exc)
 
-    backtest_tab, live_tab, control_tab = st.tabs(
-        [PAGE_BACKTEST, PAGE_LIVE, PAGE_CONTROL]
+    backtest_tab, live_tab, weekend_tab, control_tab = st.tabs(
+        [PAGE_BACKTEST, PAGE_LIVE, PAGE_WEEKEND, PAGE_CONTROL]
     )
     with backtest_tab:
         render_backtest(settings)
     with live_tab:
         render_live(settings)
+    with weekend_tab:
+        # Its own module: the weekend book has a different clock, instrument and
+        # cost structure, and threading "is this crypto?" through the panels
+        # above is exactly the coupling the separate package exists to avoid.
+        render_weekend(settings)
     with control_tab:
         render_control(settings_for)
 

@@ -193,6 +193,8 @@ oaa weekend scan        one BTC/USD evaluation, gate by gate, no orders
 oaa weekend backtest    replay the weekend book over crypto history, costs in
 oaa weekend run         the weekend loop (dry run unless --live)
 oaa weekend flatten     close every crypto position now
+oaa weekend diagnose    why it did not trade: the distributions behind the gates
+oaa weekend edge        model-free forward returns - does a dislocation revert?
 ```
 
 ---
