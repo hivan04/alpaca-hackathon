@@ -1422,3 +1422,55 @@ def test_a_strategy_that_throws_is_recorded_not_swallowed():
     handler = src[marker:marker + 1600]
     assert "strategy_error" in handler, "a raising strategy must leave a record"
     assert "log.warning" in handler, "and must not be logged at DEBUG"
+
+
+# --------------------------------------------------------------------------- #
+# the mark path
+#
+# Entry and exit marks alone cannot separate "the move never developed" from
+# "we exited before it developed" - the two produce identical records and
+# opposite conclusions about the strategy. The excursion is what tells them
+# apart, so every closed trade has to carry it.
+# --------------------------------------------------------------------------- #
+def test_every_closed_trade_carries_its_excursion():
+    result = _run()
+    assert result.trades
+    for trade in result.trades:
+        assert trade.marks_observed > 0, "a trade marked zero times cannot be diagnosed"
+        assert trade.mae_usd <= 0 <= trade.mfe_usd
+        assert trade.mfe_usd >= trade.mae_usd
+        if trade.mfe_pct_of_premium is not None:
+            assert trade.mae_pct_of_premium is not None
+
+
+def test_the_excursion_is_not_uniformly_zero():
+    """A recorder that never records is worse than none - it looks like data."""
+    result = _run()
+    moved = [t for t in result.trades if t.mfe_usd > 0 or t.mae_usd < 0]
+    assert moved, "no position ever moved away from its entry mark"
+
+
+def test_the_excursion_brackets_the_realised_result():
+    """Fills are adverse to mid on both sides, so the realised gross can never
+    be better than the best mid the position was ever marked at."""
+    result = _run()
+    for trade in result.trades:
+        if trade.marks_observed > 1:
+            assert trade.gross_pnl <= trade.mfe_usd + 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# provenance
+# --------------------------------------------------------------------------- #
+def test_a_run_records_whether_the_tree_it_ran_from_was_dirty():
+    """A commit hash alone is not a fingerprint: runs days apart with different
+    gates all stamped the same hash and were not comparable."""
+    from oaa.backtest.runner import _git_worktree
+
+    settings = load_settings()
+    worktree = _git_worktree(settings.root)
+    assert set(worktree) == {"commit", "dirty", "diff_sha"}
+    if worktree["dirty"]:
+        assert worktree["diff_sha"], "a dirty tree must be fingerprinted"
+    else:
+        assert worktree["diff_sha"] is None

@@ -24,6 +24,7 @@ from oaa.data.indicators import (
     vol_estimator,
     volume_ratio,
 )
+from oaa.data.iv_history import IVHistoryStore
 from oaa.options.occ import parse_occ
 
 log = get_logger("data.alpaca")
@@ -57,7 +58,7 @@ class AlpacaDataProvider(MarketDataProvider):
         self._option: Any = None
         self._limiter = RateLimiter(cfg.data.rate_limit.requests_per_minute)
         self._cache: dict[str, tuple[float, Any]] = {}
-        self._iv_history: dict[str, list[float]] = {}
+        self._iv_history = IVHistoryStore.open(getattr(cfg.telemetry, "run_dir", None))
 
     # -- clients ----------------------------------------------------------- #
     def _connect(self) -> None:
@@ -206,10 +207,14 @@ class AlpacaDataProvider(MarketDataProvider):
         chain = self.option_chain(symbol)
 
         atm_iv = _atm_iv(chain, spot)
+        # One observation per DAY, seeded from the replay's own IV model so the
+        # rank means something on the first session rather than after a month
+        # of accumulation, and persisted so a restart resumes.
         if atm_iv is not None:
-            hist = self._iv_history.setdefault(symbol, [])
-            hist.append(atm_iv)
-            del hist[:-120]
+            if self._iv_history.needs_seed(symbol):
+                self._iv_history.seed_from_bars(symbol, history)
+            self._iv_history.observe(symbol, atm_iv)
+            self._iv_history.save()
 
         intraday: list[dict[str, Any]] = []
         if self.cfg.data.fetch_intraday:
@@ -232,7 +237,7 @@ class AlpacaDataProvider(MarketDataProvider):
             chain=chain,
             realised_vol=vol_estimator(self.cfg.data.volatility_estimator)(history, 20),
             implied_vol=atm_iv,
-            iv_rank=iv_rank(atm_iv, self._iv_history.get(symbol, [])),
+            iv_rank=iv_rank(atm_iv, self._iv_history.series(symbol)),
             trend_strength=trend_strength(history),
             adx=adx(history),
             volume_ratio=volume_ratio(history),

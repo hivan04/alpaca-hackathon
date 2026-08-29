@@ -111,6 +111,23 @@ class TradeRecord:
     #: fraction of this trade's marks that came from a real option bar rather
     #: than the model, across entry and exit
     real_mark_fraction: float | None = None
+    # -- excursion ------------------------------------------------------- #
+    # The mark path while the trade was open, recorded by `_mark`. Without it
+    # a losing book is unreadable: "the move never developed" and "we exited
+    # before it developed" produce identical entry/exit marks and opposite
+    # conclusions. Measured at the MID on every scan cycle, so it is bounded
+    # below by the scan grid - a 15-minute grid cannot see a 3-minute spike.
+    #: best unrealised gross P&L seen while open, dollars for the whole position
+    mfe_usd: float | None = None
+    #: worst unrealised gross P&L seen while open
+    mae_usd: float | None = None
+    #: the same two as a fraction of the premium paid (debit) or received
+    #: (credit) for the position - the units the exit dials are written in
+    mfe_pct_of_premium: float | None = None
+    mae_pct_of_premium: float | None = None
+    #: how many marks the excursion was measured over. 0 or 1 means the
+    #: numbers above are not evidence of anything.
+    marks_observed: int = 0
     legs: list[dict[str, Any]] = field(default_factory=list)
     # -- justification -------------------------------------------------- #
     thesis: str = ""
@@ -265,6 +282,10 @@ class OpenStructure:
     entry_net: float
     opened_at: dt.datetime
     legs: list[dict[str, Any]]        # symbol, side, ratio, strike, expiry, is_call
+    # -- running excursion, updated on every mark ------------------------ #
+    mfe_usd: float = 0.0
+    mae_usd: float = 0.0
+    marks_observed: int = 0
 
 
 class _RejectionSink:
@@ -502,6 +523,33 @@ class BacktestEngine:
                 mark = marks.get(leg["symbol"])
                 if mark is not None:
                     self.broker.mark(leg["symbol"], mark["mid"])
+            self._record_excursion(position, marks)
+
+    def _record_excursion(
+        self, position: OpenStructure, marks: dict[str, dict[str, float]]
+    ) -> None:
+        """Track the best and worst unrealised P&L this position has seen.
+
+        Priced at the MID, deliberately: this measures where the trade GOT TO,
+        not what could have been realised there. Crossing the spread is already
+        charged in the fills at entry and exit, and charging it again here would
+        confuse "the move never came" with "the move came and cost too much to
+        take" - which is the distinction the number exists to make.
+
+        Not clamped to defined risk. `_leg_marks` already re-prices a structure
+        onto one surface, so a mark outside the structure's own bound is a
+        pricing fault to chase, and hiding it here would hide it.
+        """
+        net_mid = 0.0
+        for leg in position.legs:
+            mark = marks.get(leg["symbol"])
+            if mark is None:
+                return                      # a partial structure prices nothing
+            net_mid += (1 if leg["side"] == "buy" else -1) * leg["ratio"] * mark["mid"]
+        unrealised = (net_mid - position.entry_net) * MULTIPLIER * position.quantity
+        position.marks_observed += 1
+        position.mfe_usd = max(position.mfe_usd, unrealised)
+        position.mae_usd = min(position.mae_usd, unrealised)
 
     # ------------------------------------------------------------------ #
     # execution prices
@@ -866,6 +914,14 @@ class BacktestEngine:
         record.return_on_risk = round(record.net_pnl / risk_taken, 4) if risk_taken else 0.0
         record.exit_reason = reason
         record.status = "closed"
+        # The excursion, in dollars and in the units the exit dials use.
+        premium = abs(position.entry_net) * MULTIPLIER * quantity
+        record.mfe_usd = round(position.mfe_usd, 2)
+        record.mae_usd = round(position.mae_usd, 2)
+        record.marks_observed = position.marks_observed
+        if premium > 0:
+            record.mfe_pct_of_premium = round(position.mfe_usd / premium, 4)
+            record.mae_pct_of_premium = round(position.mae_usd / premium, 4)
         real = [marks[leg["symbol"]].get("real") for leg in position.legs
                 if leg["symbol"] in marks and "real" in marks[leg["symbol"]]]
         if real:

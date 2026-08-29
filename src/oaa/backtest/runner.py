@@ -10,6 +10,7 @@ which also means a judge can be handed the artefact rather than a screenshot.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import platform
 import subprocess
@@ -305,6 +306,8 @@ def run_backtest(
             "synthetic": request.source == SOURCE_SYNTHETIC,
             "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "git_commit": _git_commit(settings.root),
+            # The commit alone does not identify what ran - see _git_worktree.
+            "git_worktree": _git_worktree(settings.root),
             "python": platform.python_version(),
         }
     )
@@ -736,3 +739,27 @@ def _git_commit(root: Path) -> str | None:
         ).strip()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _git_worktree(root: Path) -> dict[str, Any]:
+    """Fingerprint the code that ACTUALLY ran, not just the last commit.
+
+    A commit hash alone is a lie whenever the tree is dirty: runs days apart,
+    with different gates and a different engine, all stamped the same hash and
+    were therefore not comparable to each other. `dirty` says whether anything
+    was uncommitted; `diff_sha` is a hash OF the uncommitted diff, so two runs
+    made from the same edits match and two runs made from different edits do
+    not - without writing the diff itself into every result file.
+    """
+    out: dict[str, Any] = {"commit": _git_commit(root), "dirty": None, "diff_sha": None}
+    try:
+        diff = subprocess.check_output(
+            ["git", "-C", str(root), "diff", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=15,
+        )
+    except Exception:  # noqa: BLE001
+        return out
+    out["dirty"] = bool(diff.strip())
+    if diff.strip():
+        out["diff_sha"] = hashlib.sha256(diff).hexdigest()[:12]
+    return out

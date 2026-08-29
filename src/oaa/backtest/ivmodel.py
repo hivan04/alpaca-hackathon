@@ -50,7 +50,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from oaa.data.indicators import vol_estimator
+from oaa.data.indicators import iv_rank as iv_rank_of, vol_estimator
 
 
 @dataclass
@@ -141,11 +141,9 @@ class IVModel:
                 rank.append(None)
                 continue
             history = [v for v in iv[max(0, i - self.rank_lookback) : i + 1] if v is not None]
-            if len(history) < 20:
-                rank.append(None)      # not enough history is a veto, not a 0.5
-                continue
-            below = sum(1 for v in history if v <= value)
-            rank.append(round(below / len(history), 4))
+            # Shared with the live providers - see oaa.data.indicators.iv_rank.
+            # Replay and live must not compute different numbers under one name.
+            rank.append(iv_rank_of(value, history))
 
         return {"rv": rv, "iv": iv, "iv_rank": rank, "anchor": anchor}
 

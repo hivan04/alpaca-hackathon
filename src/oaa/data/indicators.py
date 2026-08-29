@@ -162,14 +162,37 @@ def trend_strength(bars: Sequence[Bar], fast: int = 8, slow: int = 21) -> float 
     return round(max(-1.0, min(1.0, raw)), 4)
 
 
-def iv_rank(current_iv: float | None, history: Sequence[float]) -> float | None:
-    """Where today's IV sits in its own recent range, 0..1."""
-    if current_iv is None or len(history) < 5:
+#: Observations required before an IV rank means anything. Below this the
+#: answer is None - an unmeasurable rank is a missing input, not 0.5, and the
+#: strategy decides for itself what a missing input costs.
+IV_RANK_MIN_OBSERVATIONS = 20
+
+
+def iv_rank(
+    current_iv: float | None,
+    history: Sequence[float],
+    min_observations: int = IV_RANK_MIN_OBSERVATIONS,
+) -> float | None:
+    """Percentile of today's IV within its own trailing history, 0..1.
+
+    ONE definition, shared by the live providers and by the replay's `IVModel`.
+    They used to differ: replay ranked one observation per SESSION against a
+    trailing year as a percentile, while live min-max scaled an in-memory list
+    of intraday polls. Same name on the gate, two different numbers, and
+    `premium_gate.iv_rank_min` sat on top of it deciding whether the carry book
+    traded at all.
+
+    Percentile rather than min-max on purpose: under min-max a single vol spike
+    anywhere in the window pins every later reading near zero, so the book
+    stands down for a year because of one bad afternoon.
+    """
+    if current_iv is None:
         return None
-    lo, hi = min(history), max(history)
-    if hi - lo < 1e-9:
-        return 0.5
-    return round(max(0.0, min(1.0, (current_iv - lo) / (hi - lo))), 4)
+    values = [float(v) for v in history if v is not None]
+    if len(values) < min_observations:
+        return None
+    below = sum(1 for v in values if v <= float(current_iv))
+    return round(max(0.0, min(1.0, below / len(values))), 4)
 
 
 def volume_ratio(bars: Sequence[Bar], lookback: int = 20) -> float | None:
