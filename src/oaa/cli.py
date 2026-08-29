@@ -1,5 +1,6 @@
 """`oaa` - the command line surface.
 
+    oaa status            is the agent live, and what has it decided today?
     oaa doctor            check every dependency and credential before you need them
     oaa account           account, options level, positions
     oaa chain SPY         inspect a filtered option chain
@@ -18,8 +19,10 @@
     oaa mcp-tools         list the tools the Alpaca MCP server exposes
     oaa serve             the public read-only dashboard (FastAPI)
     oaa backtest          replay the strategies over Alpaca history
-    oaa weekend           the BTC/USD weekend book: status | scan | backtest | run
     oaa dashboard         the Streamlit operator dashboard (backtest + live)
+    oaa events screen     which confirmed prints land this week
+    oaa events arm        open tonight's earnings spreads
+    oaa events flatten    close everything that has now reported
 """
 
 from __future__ import annotations
@@ -81,6 +84,194 @@ def _journal(settings):
 def version() -> None:
     """Print the version."""
     console.print(f"oaa {__version__}")
+
+
+@app.command()
+def status(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable, for scripts."),
+    watch: int = typer.Option(0, "--watch", "-w", metavar="SECONDS",
+                              help="Re-render every N seconds until interrupted."),
+) -> None:
+    """Is the agent live, and what has it decided and screened today?
+
+    The one command to run in a fresh terminal. Read-only: it reads the journal
+    and the process table, and cannot place, size or cancel anything.
+    """
+    import time
+
+    from oaa.app import status as status_mod
+
+    settings = _settings_only(profile, config)
+    resolved = settings.config.profile or "dev"
+    journal_obj = _journal(settings)
+
+    def once() -> None:
+        snap = status_mod.collect(settings, journal_obj, resolved)
+        if as_json:
+            payload = dict(snap)
+            age = payload.pop("journal_age", None)
+            payload["journal_age_seconds"] = age.total_seconds() if age else None
+            console.print_json(json.dumps(payload, default=str))
+        else:
+            _render_status(snap)
+
+    if not watch:
+        once()
+        return
+    try:
+        while True:
+            console.clear()
+            once()
+            console.print(f"[dim]refreshing every {watch}s - ctrl-c to stop[/]")
+            time.sleep(watch)
+    except KeyboardInterrupt:
+        console.print("[dim]stopped[/]")
+
+
+def _render_status(snap: dict) -> None:
+    from oaa.app.status import human_age
+
+    state = snap["state"]
+    colour, headline = {
+        "live": ("green", "LIVE"),
+        "idle": ("green", "UP - MARKET CLOSED"),
+        "stale": ("yellow", "UP BUT STALE"),
+        "unknown": ("yellow", "NO PROCESS VISIBLE"),
+        "offline": ("red", "NOT RUNNING"),
+    }[state]
+    age = human_age(snap["journal_age"])
+    market = snap.get("session") or {}
+    # Silence outside a session is the schedule working, so an idle process is
+    # described by what it is waiting for rather than by how long it has been
+    # quiet - "last entry 12h ago" reads as a fault on a Saturday.
+    detail = f"last journal entry {age}"
+    if state == "idle" and market.get("next_open"):
+        detail = f"waiting for the {market['next_open']} ET open | quiet since {age}"
+    clock_line = (
+        f"\n[dim]{market['now_et']} - phase {market['phase']}[/]" if market else ""
+    )
+    ident = snap.get("identity") or {}
+    account_line = ""
+    if ident:
+        account_line = (
+            f"\n[dim]account {ident['key']} from {ident['key_source']}"
+            + (f" | {ident['account_id']}" if ident.get("account_id") else "")
+            + (" | paper" if ident.get("paper") else " | [red]LIVE MONEY[/]")
+            + "[/]"
+        )
+    console.print(Panel(
+        f"[{colour}][bold]{headline}[/bold][/]  profile [bold]{snap['profile']}[/bold]"
+        f"  |  {detail}{clock_line}{account_line}",
+        title="oaa status", border_style=colour,
+    ))
+
+    # Everything below belongs to the profile named above. If a process is
+    # trading a DIFFERENT account, say so before the numbers, not after.
+    for other in snap.get("other_profiles") or []:
+        console.print(
+            f"[yellow]Note:[/] an [bold]oaa-{other}[/bold] process is also running. "
+            f"These numbers are the [bold]{snap['profile']}[/bold] account's - "
+            f"run [bold]oaa status --profile {other}[/bold] for that one."
+        )
+
+    if snap["processes"]:
+        table = Table("Process", "Account", "PID", "Status", "Uptime", "Restarts",
+                      title="processes")
+        for proc in snap["processes"]:
+            account = proc.get("profile") or "-"
+            if account == snap["profile"]:
+                account = f"[bold]{account}[/]"
+            table.add_row(
+                str(proc["name"])[:40], account, str(proc.get("pid") or "-"),
+                str(proc.get("status") or "-"), str(proc.get("uptime") or "-"),
+                str(proc.get("restarts") if proc.get("restarts") is not None else "-"),
+            )
+        console.print(table)
+    else:
+        console.print(
+            "[red]No agent process found.[/] Start it with "
+            "[bold]pm2 start ecosystem.config.js --only oaa-judged[/] "
+            "(or `oaa run --profile judged`)."
+        )
+
+    # -- the reasoning layer, and whether it actually ran -------------------- #
+    agent = snap["agent"]
+    if agent:
+        if agent["degraded"]:
+            console.print(Panel(
+                f"[red]The reasoning layer did not run.[/] Last cycle "
+                f"'{agent['cycle']}' fell back to deterministic rules.\n"
+                f"[dim]{agent['error']}[/]",
+                title="AI layer", border_style="red",
+            ))
+        else:
+            console.print(
+                f"[green]AI layer OK[/] - last cycle '{agent['cycle']}': "
+                f"{agent['turns']} turn(s), {agent['tool_calls']} tool call(s) "
+                f"({agent['mutating']} mutating)"
+            )
+
+    # -- what it saw in the market ------------------------------------------ #
+    disc = snap["discovery"]
+    if disc:
+        console.print(
+            f"\n[bold]screening[/] [dim]({disc['ts'][11:19] if disc.get('ts') else '?'} UTC)[/]  "
+            f"scanned [bold]{disc['scanned']}[/] | tradable [bold]{len(disc['tradable'])}[/] | "
+            f"new {len(disc['new_symbols'])} | pool {disc['pool'].get('symbols', 0)}"
+        )
+        if disc["top"]:
+            console.print("[dim]highest attention: " + ", ".join(
+                f"{sym} {score:.2f}" for sym, score in disc["top"] if sym
+            ) + "[/]")
+        if disc["reasons"]:
+            table = Table("Rejected because", "Count", title="why candidates were dropped")
+            for reason, count in disc["reasons"]:
+                table.add_row(str(reason), str(count))
+            console.print(table)
+        for source, error in (disc["source_errors"] or {}).items():
+            console.print(f"[yellow]source '{source}' failed:[/] {str(error).splitlines()[0][:120]}")
+
+    macro = snap["macro"]
+    if macro:
+        stood = ", ".join(macro["stood_down"]) or "none"
+        console.print(
+            f"[bold]regime[/] {macro['regime']} / vol {macro['vol_expectation']} / "
+            f"overnight risk {macro['overnight_risk']} | stood down: {stood}"
+        )
+
+    # -- money -------------------------------------------------------------- #
+    report = snap["report"]
+    if report:
+        console.print(
+            f"[bold]account[/] equity ${report.get('equity', 0):,.2f} | "
+            f"day P&L {report.get('day_pl', 0):+,.2f} | "
+            f"{report.get('positions', 0)} position(s)"
+        )
+
+    decisions = snap["decisions"]
+    if decisions:
+        table = Table("When", "Cycle", "Action", "Symbol", "OK", "Reason",
+                      title="recent decisions")
+        for row in decisions:
+            approved = row.get("approved")
+            table.add_row(
+                str(row["ts"])[11:19], str(row.get("cycle") or ""),
+                str(row.get("action") or ""), str(row.get("symbol") or ""),
+                "-" if approved is None else ("[green]y[/]" if approved else "[red]n[/]"),
+                str(row.get("reason") or "")[:60],
+            )
+        console.print(table)
+    else:
+        console.print("[dim]no trade decisions recorded yet[/]")
+
+    today = snap["events_today"]
+    if today:
+        console.print("[dim]today: " + ", ".join(
+            f"{k} x{v}" for k, v in sorted(today.items(), key=lambda kv: -kv[1])
+        ) + "[/]")
+    console.print(f"[dim]journal: {snap['journal_path']}[/]")
 
 
 @app.command()
@@ -1272,425 +1463,146 @@ def gates(
         + "[/]"
     )
 
+
 # --------------------------------------------------------------------------- #
-# THE WEEKEND BOOK
+# events book - one overnight hold across a scheduled earnings print.
+#
+# Its own sub-app because it is its own process on its own schedule. It never
+# leases capital from the temporal firewall, so it must never be reachable
+# from `oaa run`; keeping the verbs separate is what makes that visible.
 # --------------------------------------------------------------------------- #
-weekend_app = typer.Typer(
+events_app = typer.Typer(
     no_args_is_help=True,
-    help=(
-        "The weekend book: BTC/USD z-score mean reversion, ADX-gated, live only "
-        "between the Friday equity close and the Sunday flatten."
-    ),
+    help="The events book: earnings prints, armed on a date rather than a signal.",
 )
-app.add_typer(weekend_app, name="weekend")
+app.add_typer(events_app, name="events")
 
-_WEEKEND_PARAMS = typer.Option(
-    "config/strategies/weekend_crypto.yaml", "--params", help="Weekend params YAML"
+_EVENTS_PARAMS = typer.Option(
+    "config/strategies/earnings_event.yaml", "--params", help="Events params YAML"
 )
 
 
-def _weekend_params(path: str):
-    from oaa.strategies.weekend.params import load_params
+def _events(profile: str | None, config: str | None, params_path: str, with_broker: bool = True):
+    """Build the events engine and everything it is injected with."""
+    from oaa.agents.llm import get_llm
+    from oaa.execution.router import ExecutionRouter
+    from oaa.risk.engine import RiskEngine
+    from oaa.strategies.events import EventsEngine, load_params
+    from oaa.strategies.events.strategy import EarningsEventDirectional
 
-    return load_params(path)
+    settings, broker, data = _boot(profile, config)
+    events_params = load_params(settings.path(params_path))
+    ref = type("Ref", (), {"name": "earnings_event_directional", "params":
+                           {"params_path": str(settings.path(params_path))},
+                           "weight": 1.0, "book": "events", "enabled": True})()
+    strategy = EarningsEventDirectional(ref, settings.config)
+    llm = get_llm(settings.config.agents.llm)
+    engine = EventsEngine(
+        settings=settings,
+        broker=broker,
+        data=data,
+        llm=llm,
+        params=events_params,
+        strategy=strategy,
+        # firewall=None on purpose: this book runs in its own process and never
+        # holds the intraday/carry capital lease.
+        risk=RiskEngine(settings.config, firewall=None),
+        router=ExecutionRouter(settings.config, broker),
+        journal=_journal(settings),
+    )
+    return settings, engine, llm
 
 
-@weekend_app.command("status")
-def weekend_status(params_path: str = _WEEKEND_PARAMS) -> None:
-    """Where the clock is, what is open, and what the book would do now."""
-    import datetime as dt
-
-    from oaa.strategies.weekend.engine import WeekendState
-
-    params = _weekend_params(params_path)
-    now = dt.datetime.now(dt.timezone.utc)
-    state = WeekendState.load()
-    console.print(Panel(params.describe(), title="weekend book"))
-    console.print(params.window.describe(now))
-    if state.position:
-        p = state.position
-        console.print(
-            f"open: {p.symbol} {p.qty} @ {p.entry:,.0f} "
-            f"(stop {p.stop:,.0f} / target {p.target:,.0f}, entered {p.entered_at})"
-        )
-    else:
-        console.print("[dim]flat[/]")
-    if state.cooldown_until:
-        console.print(f"[yellow]cooling down until {state.cooldown_until}[/]")
-
-
-@weekend_app.command("scan")
-def weekend_scan(
-    params_path: str = _WEEKEND_PARAMS,
-    symbol: str | None = typer.Option(None, "--symbol"),
+@events_app.command("screen")
+def events_screen(
+    params: str = _EVENTS_PARAMS,
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
 ) -> None:
-    """One evaluation, no orders. Prints the gate stack in the order it ran."""
-    from oaa.strategies.weekend.data import fetch_bars, latest_quote
-    from oaa.strategies.weekend.signals import evaluate
+    """Which confirmed prints land this week, and what the model proposed."""
+    import datetime as dtm
 
-    params = _weekend_params(params_path)
-    target = symbol or params.symbols[0]
-    import datetime as dt
+    _, engine, llm = _events(profile, config, params)
+    today = dtm.date.today()
+    start, end = engine.week_window(today)
+    result = engine.screen(today)
 
-    end = dt.datetime.now(dt.timezone.utc)
-    bars = fetch_bars(target, params.signal.timeframe, end - dt.timedelta(days=5), end)
-    signal = evaluate(target, bars, params)
-
-    table = Table(title=f"{target} - weekend gate stack", show_lines=False)
-    for column in ("gate", "result", "detail"):
-        table.add_column(column)
-    for check in signal.checks:
-        table.add_row(
-            check.gate,
-            "[green]pass[/]" if check.passed else "[red]VETO[/]",
-            check.reason or ", ".join(f"{k}={v:.4g}" for k, v in check.metrics.items()),
-        )
-    console.print(table)
-    console.print(signal.summary())
-
-    # The cost model's half-spread assumption is the softest number in the
-    # stack. Print the measured one beside it so it can be corrected rather
-    # than trusted.
-    quote = latest_quote(target)
-    if quote:
-        assumed = params.costs.half_spread_bp
-        measured = quote["spread_bp"] / 2
-        verdict = "[green]inside[/]" if measured <= assumed else "[red]WIDER than[/]"
-        console.print(
-            f"quote {quote['bid']:,.0f} / {quote['ask']:,.0f} - half spread "
-            f"{measured:.1f}bp, {verdict} the {assumed:.1f}bp the cost model assumes"
-        )
-
-
-@weekend_app.command("backtest")
-def weekend_backtest(
-    params_path: str = _WEEKEND_PARAMS,
-    days: int = typer.Option(365, "--days", help="History to replay"),
-    weekend: str | None = typer.Option(
-        None, "--weekend",
-        help="Replay ONE weekend: the date of its Friday, e.g. 2026-08-21. "
-             "'last' resolves to the most recently completed weekend.",
-    ),
-    equity: float = typer.Option(100_000.0, "--equity"),
-    refresh: bool = typer.Option(False, "--refresh", help="Ignore the bar cache"),
-    json_out: str | None = typer.Option(None, "--json", help="Write the summary here"),
-) -> None:
-    """Replay the book over Alpaca crypto history, costs included."""
-    import json as _json
-
-    from oaa.strategies.weekend.backtest import run_backtest, sharpe_of_weekends
-
-    params = _weekend_params(params_path)
-
-    start = end = None
-    if weekend:
-        import datetime as _dt
-
-        if weekend.lower() == "last":
-            today = _dt.datetime.now(_dt.timezone.utc)
-            friday = today - _dt.timedelta(days=(today.weekday() - 4) % 7 or 7)
-        else:
-            friday = _dt.datetime.fromisoformat(weekend).replace(tzinfo=_dt.timezone.utc)
-        if friday.weekday() != 4:
-            console.print(f"[red]{friday:%Y-%m-%d} is a {friday:%A}, not a Friday[/]")
-            raise typer.Exit(1)
-        start = friday.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + _dt.timedelta(days=3)
-        console.print(
-            f"[dim]single weekend: {start:%a %d %b} -> {end:%a %d %b} - one sample, "
-            f"not a distribution[/]"
-        )
-
-    try:
-        result = run_backtest(
-            params, days=days, equity=equity, refresh=refresh, start=start, end=end
-        )
-    except (RuntimeError, ValueError) as exc:
-        # A blocked egress or an empty cache is an operator problem, not a
-        # stack trace - say what to do about it.
-        console.print(f"[red]{exc}[/]")
-        raise typer.Exit(1) from None
-    summary = result.summary()
-    summary["weekend_sharpe"] = sharpe_of_weekends(result, equity)
-
-    console.print(Panel(params.describe(), title="parameters"))
-    table = Table(title=f"{result.symbol} weekend backtest")
-    table.add_column("metric")
-    table.add_column("value", justify="right")
-    for key, value in summary.items():
-        table.add_row(key, str(value))
-    console.print(table)
-
-    if result.trades:
-        trades = Table(title="trades")
-        for column in ("entered", "z", "adx", "entry", "exit", "reason", "pnl", "bp"):
-            trades.add_column(column, justify="right")
-        for t in result.trades[-25:]:
-            trades.add_row(
-                f"{t.entered_at:%d %b %H:%M}",
-                f"{t.z:.2f}",
-                f"{t.adx:.0f}",
-                f"{t.entry:,.0f}",
-                f"{t.exit_price:,.0f}" if t.exit_price else "-",
-                t.exit_reason,
-                f"[{'green' if t.pnl >= 0 else 'red'}]{t.pnl:,.2f}[/]",
-                f"{t.pnl_bp:+.0f}",
+    console.print(Panel.fit(
+        f"[bold]{start:%d %b} - {end:%d %b %Y}[/]\n"
+        f"provider    {getattr(llm, 'provider', 'null')}\n"
+        f"confirmed   {len(result.events)}\n"
+        f"unverified  {len(result.unverified)}",
+        title="earnings screen",
+    ))
+    if result.events:
+        table = Table("Symbol", "Report", "Session", "Arms", "Exits", "Avg past move")
+        for event in result.events:
+            history = event.mean_abs_history
+            table.add_row(
+                event.symbol, f"{event.report_date:%a %d %b}",
+                "after close" if event.timing == "amc" else "before open",
+                str(event.entry_date), str(event.exit_date),
+                f"{history:.2f}%" if history else "-",
             )
-        console.print(trades)
-    if json_out:
-        from pathlib import Path as _Path
-
-        _Path(json_out).write_text(
-            _json.dumps({"summary": summary, "trades": [t.to_row() for t in result.trades]}, indent=2),
-            encoding="utf-8",
-        )
-        console.print(f"[dim]wrote {json_out}[/]")
-
-
-@weekend_app.command("run")
-def weekend_run(
-    profile: str | None = _PROFILE,
-    config: str | None = _CONFIG,
-    params_path: str = _WEEKEND_PARAMS,
-    live: bool = typer.Option(False, "--live", help="Actually send orders"),
-    once: bool = typer.Option(False, "--once", help="One cycle, then exit"),
-) -> None:
-    """The autonomous weekend loop. Dry run unless --live AND enabled: true."""
-    import time
-
-    from oaa.strategies.weekend.engine import WeekendEngine
-
-    params = _weekend_params(params_path)
-    if live:
-        if not params.enabled:
-            console.print("[red]refusing --live: enabled is false in the params YAML[/]")
-            raise typer.Exit(1)
-        params.execution.dry_run = False
-    settings, broker, _data = _boot(profile, config)
-    run_dir = getattr(settings.config.telemetry, "run_dir", None)
-    engine = WeekendEngine(
-        params, broker, journal=_journal(settings), run_dir=run_dir
-    )
-
-    console.print(
-        Panel(
-            f"{params.describe()}\nprofile={settings.config.profile} "
-            f"dry_run={params.execution.dry_run} "
-            f"switch={'ON' if engine.switched_on() else 'OFF'}",
-            title="weekend runner",
-        )
-    )
-    while True:
-        report = engine.cycle()
-        console.print(report.line())
-        if once:
-            break
-        time.sleep(params.execution.poll_seconds)
-
-
-@weekend_app.command("diagnose")
-def weekend_diagnose(
-    params_path: str = _WEEKEND_PARAMS,
-    weekend: str | None = typer.Option(
-        None, "--weekend", help="One weekend, by its Friday date, or 'last'"
-    ),
-    days: int = typer.Option(365, "--days"),
-    refresh: bool = typer.Option(False, "--refresh"),
-) -> None:
-    """Why the book did not trade - the distributions behind the gates.
-
-    Zero trades is not a finding until you know whether the gates were right.
-    This prints the sigma the band gate is drawn against, the gross basis
-    points a 2-sigma reversion is actually worth, and the same number across
-    other bar sizes - so the timeframe is chosen against the fee rather than
-    against intuition.
-    """
-    import datetime as _dt
-
-    from oaa.strategies.weekend.data import cached_bars
-    from oaa.strategies.weekend.diagnostics import diagnose, horizon_study
-
-    params = _weekend_params(params_path)
-    end = _dt.datetime.now(_dt.timezone.utc)
-    start = end - _dt.timedelta(days=days)
-    if weekend:
-        if weekend.lower() == "last":
-            friday = end - _dt.timedelta(days=(end.weekday() - 4) % 7 or 7)
-        else:
-            friday = _dt.datetime.fromisoformat(weekend).replace(tzinfo=_dt.timezone.utc)
-        start = friday.replace(hour=0, minute=0, second=0, microsecond=0) - _dt.timedelta(days=3)
-        end = start + _dt.timedelta(days=6)
-
-    symbol = params.symbols[0]
-    try:
-        bars = cached_bars(symbol, params.signal.timeframe, start, end, refresh=refresh)
-    except (RuntimeError, ValueError) as exc:
-        console.print(f"[red]{exc}[/]")
-        raise typer.Exit(1) from None
-
-    result = diagnose(bars, params, symbol=symbol)
-    if not result.n:
-        console.print("[yellow]no in-window bars in this range[/]")
-        raise typer.Exit(1)
-
-    sigma = result.sigma_summary()
-    dist = Table(title=f"{symbol} - what the weekend tape actually looks like")
-    dist.add_column("measure")
-    dist.add_column("value", justify="right")
-    dist.add_row("in-window bars", str(result.n))
-    for key, value in sigma.items():
-        dist.add_row(f"sigma {key}", f"{value * 100:.3f}%")
-    dist.add_row("modelled round trip", f"{result.cost_bp:.0f}bp")
-    for z in (2.0, 2.5, 3.0):
-        gross = result.gross_move_at(-z, params.signal.exit_z)
-        dist.add_row(
-            f"gross move, {z:g} sigma -> mean",
-            f"{gross:.0f}bp  ({gross / result.cost_bp:.1f}x costs)",
-        )
-    console.print(dist)
-
-    funnel = Table(title="the funnel, in the order the gates run")
-    funnel.add_column("stage")
-    funnel.add_column("bars", justify="right")
-    for stage, count in result.counts(params).items():
-        funnel.add_row(stage, str(count))
-    funnel.add_section()
-    for gate, count in result.funnel.most_common():
-        funnel.add_row(f"[dim]vetoed by {gate}[/]", f"[dim]{count}[/]")
-    console.print(funnel)
-
-    console.print(Panel(result.verdict(params), title="verdict"))
-
-    study = Table(title="the same question at other horizons")
-    for column in ("timeframe", "lookback", "span h", "bars", "sigma", "gross@entry",
-                   "x costs", "signals", "that pay", "+ranging"):
-        study.add_column(column, justify="right")
-    for row in horizon_study(bars, params):
-        multiple = row["edge_multiple"]
-        study.add_row(
-            row["timeframe"], str(row["lookback"]), str(row["span_hours"]), str(row["bars"]),
-            f"{row['sigma_median_pct']:.2f}%", f"{row['gross_at_entry_bp']:.0f}bp",
-            f"[{'green' if multiple >= 2.5 else 'yellow' if multiple >= 1 else 'red'}]{multiple:.1f}x[/]",
-            str(row["signals"]), str(row["signals_that_pay"]), str(row["and_ranging"]),
-        )
-    console.print(study)
-    console.print(
-        "[yellow]Read the long-lookback rows with suspicion.[/] Sigma is the "
-        "dispersion of log PRICE over the window, so a lookback spanning a trend "
-        "reports a large sigma that is drift, not oscillation - and the implied "
-        "'gross move' is then an amplitude the tape never reverts across. Only a "
-        "conditional forward-return study over many weekends settles whether a "
-        "-2 sigma reading is followed by a reversion at all."
-    )
-
-
-@weekend_app.command("edge")
-def weekend_edge(
-    params_path: str = _WEEKEND_PARAMS,
-    days: int = typer.Option(400, "--days", help="History to study"),
-    adx_split: bool = typer.Option(
-        True, "--adx-split/--no-adx-split", help="Split the table by regime"
-    ),
-    refresh: bool = typer.Option(False, "--refresh"),
-    json_out: str | None = typer.Option(None, "--json"),
-) -> None:
-    """Does a displaced weekend actually revert? Model-free forward returns.
-
-    No entry rule, no stop, no sizing: for every in-window bar it records the
-    z-score and what the tape did next at 1h / 2h / 4h / 8h, then groups. This
-    is the study that decides whether the strategy should exist, and it is
-    allowed to say no.
-    """
-    import datetime as _dt
-    import json as _json
-
-    from oaa.strategies.weekend.data import cached_bars
-    from oaa.strategies.weekend.edgestudy import baseline, collect, tabulate, verdict
-
-    params = _weekend_params(params_path)
-    end = _dt.datetime.now(_dt.timezone.utc)
-    start = end - _dt.timedelta(days=days)
-    try:
-        bars = cached_bars(
-            params.symbols[0], params.signal.timeframe, start, end, refresh=refresh
-        )
-    except (RuntimeError, ValueError) as exc:
-        console.print(f"[red]{exc}[/]")
-        raise typer.Exit(1) from None
-
-    samples = collect(bars, params)
-    if len(samples) < 50:
+        console.print(table)
+    if result.unverified:
         console.print(
-            f"[yellow]only {len(samples)} in-window observations - fetch more "
-            f"history before drawing any conclusion[/]"
+            "[yellow]proposed by the model with no confirmed calendar row "
+            "(not armed):[/] " + ", ".join(result.unverified)
         )
-    rows = tabulate(samples, params, adx_split=adx_split)
-    base = baseline(samples)
-
-    console.print(
-        Panel(
-            "unconditional forward return (the number a signal must beat): "
-            + ", ".join(f"{h:g}h {v:+.0f}bp" for h, v in base.items())
-            + f"\nmodelled round trip: {params.costs.round_trip_bp:.0f}bp"
-            + f"   observations: {len(samples)}",
-            title="baseline",
-        )
-    )
-
-    table = Table(title="forward return after a weekend z-score reading")
-    for column in ("z bucket", "regime", "horizon", "bars", "w/e", "indep",
-                   "mean", "hit", "net of costs", "t"):
-        table.add_column(column, justify="right")
-    for row in rows:
-        net = row["net_of_costs_bp"]
-        thin = row["weekends"] < 8 or row["episodes"] < 20
-        table.add_row(
-            row["bucket"], row["regime"], f"{row['horizon_h']:g}h", str(row["n"]),
-            f"[{'red' if row['weekends'] < 8 else 'green'}]{row['weekends']}[/]",
-            f"[{'red' if row['episodes'] < 20 else 'green'}]{row['episodes']}[/]",
-            f"{row['mean_bp']:+.0f}bp", f"{row['hit_rate']:.0%}",
-            f"[{'green' if net > 0 and not thin else 'red' if net <= 0 else 'yellow'}]"
-            f"{net:+.0f}bp[/]",
-            "-" if row["t"] is None else f"{row['t']:+.1f}",
-        )
-    console.print(table)
-    console.print(
-        "[dim]bars = overlapping 15-minute observations; w/e = distinct weekends; "
-        "indep = non-overlapping episodes. The t-statistic uses `indep` only - "
-        "pooling overlapping bars inside one dislocation counts a single event "
-        "many times and manufactures significance.[/]"
-    )
-    console.print(Panel(verdict(rows, params), title="verdict"))
-
-    if json_out:
-        from pathlib import Path as _Path
-
-        _Path(json_out).write_text(
-            _json.dumps({"baseline": base, "rows": rows, "n": len(samples)}, indent=2),
-            encoding="utf-8",
-        )
-        console.print(f"[dim]wrote {json_out}[/]")
 
 
-@weekend_app.command("flatten")
-def weekend_flatten(
+@events_app.command("arm")
+def events_arm(
+    dry_run: bool = typer.Option(True, "--dry-run/--live", help="Route orders?"),
+    date: str | None = typer.Option(None, "--date", help="Override today, YYYY-MM-DD"),
+    params: str = _EVENTS_PARAMS,
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
-    params_path: str = _WEEKEND_PARAMS,
-    live: bool = typer.Option(False, "--live"),
 ) -> None:
-    """Close every crypto position now. The manual version of the Sunday cutoff."""
-    from oaa.strategies.weekend.engine import WeekendEngine
+    """Open a spread into each of tonight's prints. Dry run unless --live."""
+    import datetime as dtm
 
-    params = _weekend_params(params_path)
-    if live:
-        params.execution.dry_run = False
-    settings, broker, _data = _boot(profile, config)
-    engine = WeekendEngine(
-        params, broker, journal=_journal(settings),
-        run_dir=getattr(settings.config.telemetry, "run_dir", None),
-    )
-    console.print(f"closed {engine.flatten('manual')} crypto position(s)")
+    _, engine, _ = _events(profile, config, params)
+    asof = dtm.date.fromisoformat(date) if date else dtm.date.today()
+    report = engine.arm(asof=asof, dry_run=dry_run)
+
+    console.print(Panel.fit(report.summary(), title="events arm"
+                            + ("" if not dry_run else " (dry run)")))
+    if report.opened:
+        table = Table("Symbol", "Side", "Qty", "Debit", "Max loss", "Conf", "Implied", "Ratio")
+        for idea in report.opened:
+            meta = idea.meta
+            table.add_row(
+                idea.symbol,
+                "call" if "bullish" in idea.tags else "put",
+                str(idea.quantity), f"{idea.net_price:.2f}",
+                f"${(idea.max_loss or 0) * idea.quantity:,.0f}",
+                f"{idea.confidence:.2f}",
+                f"{meta.get('implied_move_pct', 0):.2f}%",
+                f"{meta.get('implied_realised_ratio') or 0:.2f}x",
+            )
+        console.print(table)
+    for symbol, reason in sorted(report.declined.items()):
+        console.print(f"[dim]{symbol}: {reason}[/]")
+    for error in report.errors:
+        console.print(f"[red]{error}[/]")
+
+
+@events_app.command("flatten")
+def events_flatten(
+    date: str | None = typer.Option(None, "--date", help="Override today, YYYY-MM-DD"),
+    params: str = _EVENTS_PARAMS,
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+) -> None:
+    """Close every events position whose print has now happened."""
+    import datetime as dtm
+
+    _, engine, _ = _events(profile, config, params)
+    asof = dtm.date.fromisoformat(date) if date else dtm.date.today()
+    closed = engine.flatten(asof=asof)
+    console.print(f"closed {len(closed)} position(s): {', '.join(closed) or '-'}")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -27,6 +27,41 @@
    If the level is below 3, raise it in the Alpaca dashboard, or programmatically via
    `AlpacaRestBroker.ensure_options_level(3)`.
 
+## Is it running? (start here)
+
+One command, any fresh terminal, no other windows needed:
+
+```bash
+make status            # or: oaa status --profile judged
+oaa status --watch 30  # leave it up on a second monitor
+oaa status --json      # for a script or a cron check
+```
+
+It answers, in this order:
+
+| line | what it tells you | how it can lie to you |
+|---|---|---|
+| LIVE / UP - MARKET CLOSED / UP BUT STALE / NOT RUNNING | pm2 (or `ps`) plus journal freshness, read against the session clock | a loop on another host shows as NO PROCESS VISIBLE |
+| AI layer | whether the model ran or fell back to rules | — this is the line that was silent on 28 Aug |
+| screening | scanned / tradable / pool, and **why** candidates were dropped | — |
+| source failures | a data feed that died, e.g. the news 400 | — |
+| regime | the macro read and which books stood down | — |
+| account | equity, day P&L, open positions | — |
+
+**UP BUT STALE** means a process is alive but nothing has been written to the
+journal for 45 minutes *during a session* — a wedged loop, which looks identical
+to a healthy one in `pm2 ls`. That distinction is the reason this command exists.
+
+**UP - MARKET CLOSED** is the same silence outside a session, which is the
+schedule working: the runner writes nothing between the 16:10 report and the
+next morning's discover, and nothing at all over a weekend. It shows what it is
+waiting for instead of how long it has been quiet. Note there is no holiday
+calendar behind that next-open time — on a market holiday it will name a day the
+exchange is shut.
+
+It is read-only: it opens files and asks the process table. It cannot place,
+size or cancel anything.
+
 ## Daily operation
 
 ```bash

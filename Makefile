@@ -203,6 +203,18 @@ live: ## Start both accounts live + the dashboard (pm2)
 	@echo "Public FastAPI page: pm2 process oaa-dashboard - `oaa serve`"
 	@echo "Toggle books per account in the Control tab; no restart needed."
 
+.PHONY: status
+status: ## Is the agent live, and what has it decided today? (judged)
+	@$(BIN)/oaa status --profile judged
+
+.PHONY: status-dev
+status-dev: ## The same, for the backtesting account
+	@$(BIN)/oaa status --profile dev
+
+.PHONY: watch
+watch: ## `make status` on a 30s refresh
+	@$(BIN)/oaa status --profile judged --watch 30
+
 .PHONY: live-status
 live-status: ## What is running, and which account each process holds
 	@pm2 ls
