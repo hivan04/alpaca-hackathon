@@ -538,9 +538,10 @@ management:
     dte_trigger: 7
   # Close everything before the submission deadline so final P&L is realised.
   flatten_before: null
-  # Stop opening carry structures once the remaining window is shorter than one
-  # can meaningfully decay.
-  entry_cutoff_utc: "2026-09-02T20:00:00Z"
+  # Scoped to the carry book itself (vol_carry's exits.entry_cutoff_utc). A
+  # global cutoff applied carry reasoning to every book, including the event
+  # book that arms on dated prints.
+  entry_cutoff_utc: null
   # Flatten the ENTIRE book on the morning of submission day, well before the
   # 15:00 UTC deadline. Realised P&L on a flat account is unambiguous evidence;
   # an open book asks a judge to trust a mid-price mark on a wide quote.

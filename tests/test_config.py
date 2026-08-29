@@ -43,13 +43,31 @@ def test_the_books_are_the_three_the_firewall_knows_about():
 
 
 def test_the_submission_controls_are_set_not_left_to_memory():
-    """`entry_cutoff_utc` and `submission_flatten_utc` are set in config on
-    purpose: relying on remembering to trigger a flatten manually on the day is
-    how a book ends up marked-to-mid at judging."""
+    """`submission_flatten_utc` is set in config on purpose: relying on
+    remembering to trigger a flatten manually on the day is how a book ends up
+    marked-to-mid at judging.
+
+    The GLOBAL `entry_cutoff_utc` was removed on 29 Aug - it gated every book
+    when its reasoning only ever applied to the multi-session carry book, and
+    it silently deleted every event after 2 Sep 20:00 UTC. It is now null, and
+    must stay null: a value here re-gates the event book. The carry book's own
+    cutoff is asserted below."""
     cfg = load_config()
     assert cfg.management.submission_flatten_utc
-    assert cfg.management.entry_cutoff_utc
-    assert cfg.management.entry_cutoff_utc < cfg.management.submission_flatten_utc
+    assert cfg.management.entry_cutoff_utc is None
+
+
+def test_the_carry_book_keeps_its_own_entry_cutoff():
+    """Carry structures hold 3-10 sessions, so one opened late cannot decay
+    before `submission_flatten_utc` liquidates it. That constraint is real and
+    belongs to the carry book alone - it must not migrate back to a global
+    gate."""
+    cfg = load_config()
+    carry = [s for s in cfg.strategies if s.name == "vol_carry"]
+    assert carry, "vol_carry strategy missing from config"
+    cutoff = carry[0].params.get("exits", {}).get("entry_cutoff_utc")
+    assert cutoff, "the carry book must keep its own entry cutoff"
+    assert cutoff < cfg.management.submission_flatten_utc
 
 
 def test_unknown_keys_are_rejected():

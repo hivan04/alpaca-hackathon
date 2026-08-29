@@ -177,7 +177,9 @@ does. This is the top open item.
 
 ## Dated controls, fired from the clock
 
-- `management.entry_cutoff_utc: 2026-09-02T20:00:00Z`
+- `management.entry_cutoff_utc: null` — removed 29 Aug. It gated every book
+  when its reasoning applied only to carry; the carry book now carries its own
+  cutoff in `config/strategies/vol_carry.yaml`
 - `management.submission_flatten_utc: 2026-09-04T13:45:00Z` — checked on **every**
   runner poll, not once a day
 

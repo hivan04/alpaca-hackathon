@@ -92,8 +92,10 @@ trigger it on the day" is exactly the plan that fails. It closes the entire
 book, resident included, with the same confirmed-flat discipline, then refuses
 all further entries.
 
-`management.entry_cutoff_utc` stops new carry structures once the remaining
-window is shorter than one can meaningfully decay.
+The carry book's own `exits.entry_cutoff_utc` stops new carry structures once
+the remaining window is shorter than one can meaningfully decay. The global
+`management.entry_cutoff_utc` is null as of 29 Aug — it applied that carry
+reasoning to every book, including the event book that arms on dated prints.
 
 ## The property under test
 

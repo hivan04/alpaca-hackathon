@@ -201,7 +201,9 @@ and accounts for the `scheduled_event` entries dominating the rejection log.
 
 ## Submission controls (set in config, not left to memory)
 
-- `management.entry_cutoff_utc: 2026-09-02T20:00:00Z` — no new carry structures
+- `exits.entry_cutoff_utc: 2026-09-02T20:00:00Z` in `config/strategies/vol_carry.yaml`
+  — no new carry structures. This moved out of `management` on 29 Aug: as a global
+  key it also blocked the event book, whose prints run to 3 Sep
 - `management.submission_flatten_utc: 2026-09-04T13:45:00Z` — close everything,
   confirmed-flat poll, checked on **every runner poll**
 

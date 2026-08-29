@@ -216,9 +216,10 @@ def test_manage_cycle_closes_a_position_at_its_profit_target(settings, chain, ba
 def test_the_submission_flatten_fires_from_the_clock_not_from_memory(
     settings, chain, bars, frozen_clock
 ):
-    """`entry_cutoff_utc` and `submission_flatten_utc` are set in config on
-    purpose. Relying on someone remembering to trigger a flatten manually on
-    deadline day is how a book ends up marked-to-mid at judging."""
+    """`submission_flatten_utc` is set in config on purpose. Relying on someone
+    remembering to trigger a flatten manually on deadline day is how a book ends
+    up marked-to-mid at judging. (The global `entry_cutoff_utc` was removed on
+    29 Aug; the flatten is now the only global dated control.)"""
     import datetime as dtm
 
     from oaa.agents.runner import Runner

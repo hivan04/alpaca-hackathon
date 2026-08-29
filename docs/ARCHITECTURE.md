@@ -83,7 +83,9 @@ schedule:
 
 ```
  2026-09-04 13:45 UTC   submission_flatten   close EVERYTHING, confirmed flat
- 2026-09-02 20:00 UTC   entry_cutoff         stop opening carry structures
+ 2026-09-02 20:00 UTC   vol_carry cutoff     stop opening CARRY structures only
+                                             (strategy-level; the global
+                                              entry_cutoff was removed 29 Aug)
 ```
 
 ---
