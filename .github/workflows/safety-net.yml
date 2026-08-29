@@ -1,0 +1,96 @@
+# The one cycle that cannot be missed, running somewhere that is not a laptop.
+#
+# The judged book must be flat at the submission deadline. If it is not, judges
+# read open positions marked to mid rather than a realised result - and the
+# machine that was supposed to close them was asleep.
+#
+# GitHub's cron is best effort and routinely runs late, so this is deliberately
+# NOT the trading loop: it is a backstop for one idempotent action. `flatten`
+# closes what is open and does nothing when there is nothing to close, so
+# firing it three times costs nothing and covers ~45 minutes of drift.
+#
+# It also gives you a button. Actions -> Safety net -> Run workflow closes the
+# book from a phone, from anywhere, with no laptop involved.
+#
+# SETUP - once, in the repo: Settings -> Secrets and variables -> Actions, add
+#   ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_JUDGED_ACCOUNT_ID
+#   ALPACA_DEV_API_KEY, ALPACA_DEV_SECRET_KEY, ALPACA_DEV_ACCOUNT_ID
+#   FEATHERLESS_API_KEY
+# Nothing here echoes them; GitHub masks them in logs regardless.
+
+name: Safety net
+
+on:
+  schedule:
+    # config/judged.yaml sets submission_flatten_utc 2026-09-04T13:45:00Z.
+    # Three attempts, because one late cron is a missed deadline.
+    - cron: "45 13 4 9 *"
+    - cron: "5 14 4 9 *"
+    - cron: "25 14 4 9 *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to run"
+        required: true
+        default: flatten
+        type: choice
+        options: [flatten, manage, report]
+      profile:
+        description: "Which account"
+        required: true
+        default: judged
+        type: choice
+        options: [judged, dev]
+
+concurrency:
+  # Never two of these at once: both would see the same open positions and both
+  # would try to close them.
+  group: safety-net
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[all]'
+
+      - name: Write credentials
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_JUDGED_ACCOUNT_ID: ${{ secrets.ALPACA_JUDGED_ACCOUNT_ID }}
+          ALPACA_DEV_API_KEY: ${{ secrets.ALPACA_DEV_API_KEY }}
+          ALPACA_DEV_SECRET_KEY: ${{ secrets.ALPACA_DEV_SECRET_KEY }}
+          ALPACA_DEV_ACCOUNT_ID: ${{ secrets.ALPACA_DEV_ACCOUNT_ID }}
+          FEATHERLESS_API_KEY: ${{ secrets.FEATHERLESS_API_KEY }}
+        run: |
+          umask 077
+          env | grep -E '^(ALPACA_|FEATHERLESS_)' > .env
+
+      - name: Confirm which account these keys open
+        run: |
+          oaa doctor --profile ${{ inputs.profile || 'judged' }} | tail -25
+
+      - name: ${{ inputs.action || 'flatten' }}
+        env:
+          TZ: America/New_York
+        run: |
+          set -o pipefail
+          case "${{ inputs.action || 'flatten' }}" in
+            flatten) oaa flatten --profile ${{ inputs.profile || 'judged' }} --yes ;;
+            manage)  oaa manage  --profile ${{ inputs.profile || 'judged' }} ;;
+            report)  oaa report  --profile ${{ inputs.profile || 'judged' }} ;;
+          esac
+
+      - name: What the account holds now
+        if: always()
+        run: oaa doctor --profile ${{ inputs.profile || 'judged' }} | grep -E "alpaca connection|account identity" || true
