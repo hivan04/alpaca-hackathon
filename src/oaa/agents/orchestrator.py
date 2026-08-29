@@ -329,6 +329,11 @@ class Orchestrator:
             result.notes.append(self.risk.state.halt_reason or "halted")
             return result
 
+        # The global cutoff is null as of 29 Aug - it gated every book, and the
+        # event strategy arms on dated prints that fall after it. Kept as a
+        # null-safe backstop for any future dated deadline. The carry book's own
+        # cutoff lives in its strategy params and now vetoes per candidate
+        # (visible in the rejection log) rather than short-circuiting the cycle.
         cutoff = parse_utc(self.cfg.management.entry_cutoff_utc)
         if cutoff and dt.datetime.now(dt.timezone.utc) >= cutoff:
             result.notes.append(

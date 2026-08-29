@@ -135,6 +135,13 @@ class MoversSource(AttentionSource):
         return result
 
 
+#: Alpaca's news endpoint refuses anything above this and returns a 400, which
+#: kills the whole source - and with it the only component of the attention
+#: score that surfaces large-caps. Found live on 28 Aug: a configured limit of
+#: 200 meant discovery ran on most-actives and movers alone all night.
+NEWS_MAX_LIMIT = 50
+
+
 class NewsSource(AttentionSource):
     """`alpaca data news` — attention measured in coverage.
 
@@ -150,7 +157,15 @@ class NewsSource(AttentionSource):
     def fetch(self, asof: dt.date | None = None) -> SourceResult:
         lookback = int(self.cfg.get("lookback_days", 3))
         baseline = int(self.cfg.get("baseline_days", 20))
-        limit = int(self.cfg.get("limit", 200))
+        # Clamped rather than validated: a config asking for more news than the
+        # API allows should cost fewer articles, never the entire source.
+        configured = int(self.cfg.get("limit", NEWS_MAX_LIMIT))
+        limit = min(configured, NEWS_MAX_LIMIT)
+        if configured > NEWS_MAX_LIMIT:
+            log.warning(
+                "news limit %d exceeds Alpaca's maximum of %d - clamped",
+                configured, NEWS_MAX_LIMIT,
+            )
         end = asof or dt.date.today()
         start = end - dt.timedelta(days=lookback)
         base_start = end - dt.timedelta(days=baseline)

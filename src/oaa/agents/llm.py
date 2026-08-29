@@ -45,11 +45,42 @@ class _Transient(RuntimeError):
 class LLMClient(abc.ABC):
     provider = "base"
 
+    #: Whether this provider can drive an agentic tool loop. The trading agent
+    #: checks this rather than sniffing for a provider-specific attribute -
+    #: see the note on `run_tools` below.
+    supports_tools = False
+
     def __init__(self, cfg: LLMConfig) -> None:
         self.cfg = cfg
 
     @abc.abstractmethod
     def complete(self, system: str, user: str, tools: list[dict[str, Any]] | None = None) -> str: ...
+
+    def run_tools(
+        self,
+        system: str,
+        user: str,
+        tools: list[dict[str, Any]],
+        call_tool: Any,
+        max_turns: int = 6,
+        on_turn: Any = None,
+    ) -> str:
+        """Agentic loop over the given tools. Providers implement the dialect.
+
+        This is THE contract the trading agent runs on. It used to reach past
+        this class for `client._client.messages.create`, which is the Anthropic
+        wire shape - so the moment the live provider became Featherless every
+        agent cycle died with `'Client' object has no attribute 'messages'` and
+        fell back to deterministic rules with only a log line to say so
+        (28 Aug, judged account). Anything provider-shaped belongs behind this
+        method; callers get a string back and never learn which vendor served
+        it.
+
+        `call_tool(name, arguments)` runs one tool and returns its result -
+        a string is passed through verbatim, anything else is JSON-encoded.
+        `on_turn(n)` is called at the top of each turn, for telemetry.
+        """
+        raise LLMUnavailable(f"provider '{self.provider}' has no agentic tool loop")
 
     def json_complete(
         self, system: str, user: str, default: dict[str, Any] | None = None
@@ -67,6 +98,7 @@ class LLMClient(abc.ABC):
 
 class AnthropicClient(LLMClient):
     provider = "anthropic"
+    supports_tools = True
 
     def __init__(self, cfg: LLMConfig) -> None:
         super().__init__(cfg)
@@ -124,6 +156,7 @@ class AnthropicClient(LLMClient):
         tools: list[dict[str, Any]],
         call_tool: Any,
         max_turns: int = 6,
+        on_turn: Any = None,
     ) -> str:
         """Agentic loop: let the model call Alpaca MCP tools until it answers.
 
@@ -132,6 +165,8 @@ class AnthropicClient(LLMClient):
         """
         messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
         for turn in range(max_turns):
+            if on_turn is not None:
+                on_turn(turn + 1)
             response = self._client.messages.create(
                 **self._kwargs(
                     model=self.cfg.model,
@@ -154,7 +189,7 @@ class AnthropicClient(LLMClient):
             for block in tool_uses:
                 try:
                     output = call_tool(block.name, dict(block.input or {}))
-                    payload = json.dumps(output, default=str)[:8000]
+                    payload = _tool_payload(output)
                     is_error = False
                 except Exception as exc:  # noqa: BLE001
                     payload, is_error = f"tool error: {exc}", True
@@ -223,6 +258,7 @@ class FeatherlessClient(LLMClient):
     """
 
     provider = "featherless"
+    supports_tools = True
     default_base_url = "https://api.featherless.ai/v1"
     #: Worth trying again: cold starts, rate limits, gateway blips.
     RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
@@ -351,6 +387,7 @@ class FeatherlessClient(LLMClient):
         tools: list[dict[str, Any]],
         call_tool: Any,
         max_turns: int = 6,
+        on_turn: Any = None,
     ) -> str:
         """Agentic loop over Alpaca's MCP tools, in the OpenAI tool-call dialect.
 
@@ -360,6 +397,8 @@ class FeatherlessClient(LLMClient):
         messages: list[dict[str, Any]] = self._messages(system, user)
         specs = _openai_tools(tools)
         for turn in range(max_turns):
+            if on_turn is not None:
+                on_turn(turn + 1)
             data = self._post(self._body(messages, tools=specs))
             choices = data.get("choices") or []
             message = (choices[0].get("message") if choices else None) or {}
@@ -380,7 +419,7 @@ class FeatherlessClient(LLMClient):
                 except json.JSONDecodeError:
                     arguments = {}
                 try:
-                    payload = json.dumps(call_tool(name, arguments), default=str)[:8000]
+                    payload = _tool_payload(call_tool(name, arguments))
                 except Exception as exc:  # noqa: BLE001
                     payload = f"tool error: {exc}"
                     log.warning("tool %s failed: %s", name, exc)
@@ -424,6 +463,12 @@ def get_llm(cfg: LLMConfig) -> LLMClient:
             raise
         log.warning("LLM unavailable (%s) - running rules-only", exc)
     return NullClient(cfg)
+
+
+def _tool_payload(output: Any, limit: int = 8000) -> str:
+    """One tool result, as text. A string caller-side is already formatted."""
+    text = output if isinstance(output, str) else json.dumps(output, default=str)
+    return text[:limit]
 
 
 def _openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

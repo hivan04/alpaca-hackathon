@@ -107,8 +107,15 @@ class TradingAgent:
 
     @property
     def available(self) -> bool:
-        return self.orch.llm.provider not in ("null", None) and hasattr(
-            self.orch.llm, "_client"
+        """Can this provider actually drive a tool loop?
+
+        Asks the LLMClient contract, not the object's internals. The old check
+        was `hasattr(llm, "_client")`, which every provider satisfies - the
+        Featherless client holds an httpx session under that name - so the
+        agent declared itself available and then died on the first turn.
+        """
+        return self.orch.llm.provider not in ("null", None) and bool(
+            getattr(self.orch.llm, "supports_tools", False)
         )
 
     def schemas(self, include_mutating: bool = True) -> list[dict[str, Any]]:
@@ -167,61 +174,47 @@ class TradingAgent:
         schemas: list[dict[str, Any]],
         run: AgentRun,
     ) -> str:
-        client = self.orch.llm._client  # noqa: SLF001 - deliberate, see LLMClient
-        llm_cfg = self.cfg.agents.llm
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
+        """One agent cycle, through the provider-agnostic `run_tools` contract.
 
-        # The system prompt and the tool schemas are byte-identical on every
-        # turn, and a cycle runs six of them. Marking the last tool definition
-        # cacheable marks everything above it too, so turns 2..n pay the cached
-        # rate on the bulk of their input.
-        system_blocks, cached_schemas = self._with_caching(system, schemas)
+        Everything vendor-shaped - message format, tool-call dialect, retries -
+        lives in the LLMClient. What stays here is what is ours: dispatching a
+        call through the ToolBelt, and recording every call on the AgentRun so
+        the journal shows what the model actually did.
+        """
+        llm = self.orch.llm
 
-        for turn in range(self.max_turns):
-            run.turns = turn + 1
-            response = client.messages.create(
-                model=llm_cfg.model,
-                max_tokens=llm_cfg.max_tokens,
-                temperature=llm_cfg.temperature,
-                system=system_blocks,
-                messages=messages,
-                tools=cached_schemas,
-            )
-            messages.append({"role": "assistant", "content": response.content})
+        # Prompt caching is an Anthropic feature and its wire shape (system as
+        # a block list, `cache_control` on a tool spec) is meaningless to an
+        # OpenAI-dialect provider. Guarded, not assumed.
+        system_arg: Any = system
+        tool_specs = schemas
+        if llm.provider == "anthropic":
+            system_arg, tool_specs = self._with_caching(system, schemas)
 
-            tool_uses = [b for b in response.content if getattr(b, "type", "") == "tool_use"]
-            if not tool_uses:
-                return "".join(
-                    b.text for b in response.content if getattr(b, "type", "") == "text"
-                )
+        def call_tool(name: str, arguments: dict[str, Any]) -> str:
+            spec = self.tools._specs.get(name)  # noqa: SLF001
+            record = {
+                "tool": name,
+                "arguments": arguments,
+                "mutating": bool(spec and spec.mutating),
+                "error": False,
+            }
+            try:
+                output = self.dispatch(name, arguments)
+            except Exception:
+                record["error"] = True
+                run.tool_calls.append(record)
+                raise
+            run.tool_calls.append(record)
+            return summarise_tool_result(output, self._result_limit)
 
-            results = []
-            for block in tool_uses:
-                arguments = dict(block.input or {})
-                spec = self.tools._specs.get(block.name)  # noqa: SLF001
-                mutating = bool(spec and spec.mutating)
-                try:
-                    output = self.dispatch(block.name, arguments)
-                    payload = summarise_tool_result(output, self._result_limit)
-                    is_error = False
-                except Exception as exc:  # noqa: BLE001
-                    payload, is_error = f"tool error: {exc}", True
-                run.tool_calls.append({
-                    "tool": block.name,
-                    "arguments": arguments,
-                    "mutating": mutating,
-                    "error": is_error,
-                })
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": payload,
-                    "is_error": is_error,
-                })
-            messages.append({"role": "user", "content": results})
-            log.debug("agent turn %d: %d tool call(s)", turn + 1, len(tool_uses))
+        def on_turn(turn: int) -> None:
+            run.turns = turn
 
-        return "reached the tool-turn limit without a final answer"
+        return llm.run_tools(
+            system_arg, user, tool_specs, call_tool,
+            max_turns=self.max_turns, on_turn=on_turn,
+        )
 
     # ------------------------------------------------------------------ #
     def _with_caching(

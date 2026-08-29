@@ -150,7 +150,10 @@ discovery:
       enabled: true            # the ONLY replayable source - backtest-safe
       lookback_days: 3
       baseline_days: 20        # velocity vs baseline, not raw article count
-      limit: 200
+      # Alpaca's hard maximum. Anything higher is a 400 that takes the whole
+      # news source down - and news is the only component that surfaces
+      # large-caps, so losing it biases discovery entirely toward penny movers.
+      limit: 50
     # Escape hatch for any JSON endpoint you have rights to call: a sentiment
     # vendor, a sponsor feed, an official social API. Contributes to the same
     # score. See docs/DISCOVERY.md.

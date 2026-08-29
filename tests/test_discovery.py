@@ -278,3 +278,57 @@ def test_a_disabled_lens_is_permissive():
     view = MacroLens(cfg=Cfg()).view(snapshot_with({"A": 9.0}), ["s"])
     assert view.may_trade("s")
     assert not view.flagged_symbols
+
+
+# --------------------------------------------------------------------------- #
+# the 28 Aug regressions: a source that kills itself, and checks spent on
+# names that were never eligible
+# --------------------------------------------------------------------------- #
+def test_news_limit_is_clamped_to_alpacas_maximum():
+    """A limit above 50 is a 400 that takes the entire news source down.
+
+    News is the only component that surfaces large-caps, so losing it biases
+    the whole snapshot toward penny movers - which is exactly what happened on
+    the judged account overnight on 28 Aug.
+    """
+    from oaa.discovery.sources import NEWS_MAX_LIMIT, NewsSource
+
+    seen: list[list[str]] = []
+
+    def runner(args: list[str]) -> dict:
+        seen.append(args)
+        return {"news": []}
+
+    NewsSource({"limit": 200, "lookback_days": 3, "baseline_days": 20}, runner).fetch()
+
+    assert seen, "the news source made no call at all"
+    for args in seen:
+        limit = args[args.index("--limit") + 1]
+        assert int(limit) <= NEWS_MAX_LIMIT
+
+
+def test_the_price_screen_runs_before_the_expensive_checks():
+    """Cheap filter over everything, expensive filter over the survivors.
+
+    The old order ranked by attention first, so on a squeeze day all 25 checks
+    were spent on sub-$1 names and the eligible ones were never looked at.
+    """
+    from oaa.discovery.engine import _price_screen
+
+    rules = TradabilityFilter(min_price=10.0, max_price=1500.0)
+    prices = {"PENNY": 0.40, "ALSO": 1.02, "SPY": 540.0, "HUGE": 2000.0}
+    eligible, priced_out = _price_screen(
+        ["PENNY", "ALSO", "SPY", "HUGE", "NOPRICE"], rules, prices
+    )
+
+    assert eligible == ["SPY", "NOPRICE"], "unknown price must not be a rejection"
+    assert {v.symbol for v in priced_out} == {"PENNY", "ALSO", "HUGE"}
+    assert all(v.reasons for v in priced_out), "a rejection must say why"
+
+
+def test_priced_out_names_still_reach_the_rejection_log():
+    """The record of why the pool stayed empty is the point of the log."""
+    from oaa.discovery.engine import _price_screen
+
+    _, priced_out = _price_screen(["PENNY"], TradabilityFilter(min_price=10.0), {"PENNY": 0.4})
+    assert "below 10.00" in priced_out[0].reasons[0]

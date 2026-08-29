@@ -52,6 +52,37 @@ class DiscoveryResult:
         }
 
 
+def _price_screen(
+    symbols: list[str],
+    rules: TradabilityFilter,
+    prices: dict[str, float],
+) -> tuple[list[str], list[FilterVerdict]]:
+    """Split ranked symbols into (eligible, priced-out) using the free hint.
+
+    A symbol with no price hint is eligible: unknown is not a rejection, and
+    `filter_symbols` will look it up properly.
+    """
+    eligible: list[str] = []
+    rejected: list[FilterVerdict] = []
+    for symbol in symbols:
+        price = prices.get(symbol)
+        if price is None:
+            eligible.append(symbol)
+        elif price < rules.min_price:
+            rejected.append(FilterVerdict(
+                symbol=symbol, passed=False,
+                reasons=[f"price {price:.2f} below {rules.min_price:.2f}"],
+            ))
+        elif price > rules.max_price:
+            rejected.append(FilterVerdict(
+                symbol=symbol, passed=False,
+                reasons=[f"price {price:.2f} above {rules.max_price:.2f}"],
+            ))
+        else:
+            eligible.append(symbol)
+    return eligible, rejected
+
+
 class DiscoveryEngine:
     def __init__(
         self,
@@ -108,15 +139,37 @@ class DiscoveryEngine:
         tradable: list[str] = []
         rejected: list[FilterVerdict] = []
         if apply_filters and snapshot.symbols:
-            ranked = snapshot.ranked_symbols(self.discovery.max_filter_checks)
             rules = TradabilityFilter.from_config(self.discovery.filters)
+            checks = self.discovery.max_filter_checks
+
+            # Price first, across EVERYTHING, and only then take the top N.
+            #
+            # The old order took the top N by attention and priced them
+            # afterwards. On 28 Aug that meant all 25 checks were spent on
+            # sub-$1 squeeze names (FNGR +129% at $0.40, CHAI, CYAB), every one
+            # rejected on price, while 39 further symbols were never looked at
+            # - so the pool could discover nothing on precisely the days it is
+            # most likely to matter. The price hint is free (it rides along in
+            # the movers payload); `asset get` and `option contracts` are a
+            # request each. Spend the cheap check on all of them, the expensive
+            # checks on the survivors.
             prices = {
                 entry.symbol: price
-                for entry in snapshot.top(self.discovery.max_filter_checks)
+                for entry in snapshot.symbols.values()
                 if (price := (entry.raw.get("movers") or {}).get("price")) is not None
             }
+            eligible, priced_out = _price_screen(snapshot.ranked_symbols(len(snapshot.symbols)),
+                                                 rules, prices)
+            ranked = eligible[:checks]
             tradable, verdicts = filter_symbols(ranked, self.runner, rules, prices)
-            rejected = [v for v in verdicts if not v.passed]
+            # A name priced out is still a rejection worth journalling - it is
+            # the record of why the pool stayed empty.
+            rejected = priced_out + [v for v in verdicts if not v.passed]
+            if priced_out:
+                log.info(
+                    "price screen: %d/%d symbols eligible, %d checked",
+                    len(eligible), len(snapshot.symbols), len(ranked),
+                )
         else:
             tradable = snapshot.ranked_symbols(self.discovery.max_filter_checks)
 
