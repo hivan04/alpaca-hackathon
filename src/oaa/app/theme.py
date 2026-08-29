@@ -94,27 +94,58 @@ def is_dark() -> bool:
         return False
 
 
-def set_mode(dark: bool) -> bool:
-    """Record the chosen mode and push it into Streamlit's own theme.
+#: Streamlit's own chrome, per mode. Set on the *base* [theme] section rather
+#: than [theme.light]/[theme.dark], because a viewer who has picked Light or
+#: Dark in Streamlit's Appearance menu has that choice saved in their browser
+#: and it beats `theme.base`. Values written to the base section apply whatever
+#: that saved preference says, so the sidebar toggle always wins.
+CHROME: dict[str, dict[str, str]] = {
+    "light": {
+        "theme.backgroundColor": LIGHT["surface"],
+        "theme.secondaryBackgroundColor": LIGHT["plane"],
+        "theme.textColor": LIGHT["text"],
+        "theme.borderColor": LIGHT["grid"],
+        "theme.primaryColor": ACCENT_LIGHT,
+        "theme.linkColor": ACCENT_LIGHT,
+    },
+    "dark": {
+        "theme.backgroundColor": DARK["surface"],
+        "theme.secondaryBackgroundColor": DARK["plane"],
+        "theme.textColor": DARK["text"],
+        "theme.borderColor": DARK["grid"],
+        "theme.primaryColor": ACCENT_DARK,
+        "theme.linkColor": ACCENT_DARK,
+    },
+}
+
+
+def apply_mode(dark: bool) -> bool:
+    """Push the chosen mode into Streamlit's own theme config.
 
     Streamlit rebuilds the frontend theme from config on every script run, so
-    setting `theme.base` here and rerunning repaints the chrome as well as the
-    charts. Returns True when the base actually changed, i.e. when the caller
+    writing the options here and rerunning repaints the chrome as well as the
+    charts. Returns True when something actually changed - i.e. when the caller
     needs to `st.rerun()`.
     """
     import streamlit as st
 
     want = "dark" if dark else "light"
     st.session_state[MODE_KEY] = want
+    changed = False
     try:
         from streamlit import config as _config
 
-        if str(st.get_option("theme.base") or "light").lower() == want:
-            return False
-        _config.set_option("theme.base", want, "<user defined>")
+        for key, value in ({"theme.base": want} | CHROME[want]).items():
+            if str(st.get_option(key) or "").lower() != value.lower():
+                _config.set_option(key, value, "<user defined>")
+                changed = True
     except Exception:  # noqa: BLE001
         return False
-    return True
+    return changed
+
+
+#: Kept for callers that predate the rename.
+set_mode = apply_mode
 
 
 def mode_toggle(container: Any = None, key: str = "_theme_dark_toggle") -> bool:
@@ -129,7 +160,7 @@ def mode_toggle(container: Any = None, key: str = "_theme_dark_toggle") -> bool:
         help="Repaints the page and every chart. The highlight colour stays "
              f"the same hue - {ACCENT_LIGHT} on light, {ACCENT_DARK} on dark.",
     ))
-    if set_mode(dark):
+    if apply_mode(dark):
         st.rerun()
     return dark
 
