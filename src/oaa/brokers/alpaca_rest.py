@@ -247,6 +247,55 @@ class AlpacaRestBroker(Broker):
         except Exception:  # noqa: BLE001
             return None
 
+    def orders(self, limit: int = 200, after: dt.datetime | None = None) -> list[dict[str, Any]]:
+        """Every order this account has placed, newest first.
+
+        Read from Alpaca rather than from the journal on purpose. The journal
+        records what the AGENT did; this account is also reachable by hand, by
+        an earlier build, and by anything else holding the keys - and at
+        submission the judges read the account, not our log of it. Where the
+        two disagree, the broker is right.
+        """
+        try:
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+
+            request = GetOrdersRequest(
+                status=QueryOrderStatus.ALL, limit=min(int(limit), 500),
+                after=after, nested=True,
+            )
+            raw = self.client.get_orders(request)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read order history: %s", exc)
+            return []
+
+        out: list[dict[str, Any]] = []
+        for order in raw or []:
+            # `nested=True` returns a multi-leg order with its legs attached.
+            # Flattening them keeps one row per CONTRACT, which is what a
+            # reader counting positions expects to see.
+            for item in [order, *(getattr(order, "legs", None) or [])]:
+                symbol = str(getattr(item, "symbol", "") or "")
+                filled_qty = _maybe_float(getattr(item, "filled_qty", None)) or 0.0
+                price = _maybe_float(getattr(item, "filled_avg_price", None))
+                out.append({
+                    "submitted_at": getattr(item, "submitted_at", None),
+                    "filled_at": getattr(item, "filled_at", None),
+                    "symbol": symbol,
+                    "underlying": parse_occ(symbol).underlying if is_occ(symbol) else symbol,
+                    "side": str(getattr(getattr(item, "side", None), "value", "") or ""),
+                    "qty": _maybe_float(getattr(item, "qty", None)) or 0.0,
+                    "filled_qty": filled_qty,
+                    "filled_avg_price": price,
+                    "notional": round(price * filled_qty * 100, 2) if price else None,
+                    "status": str(getattr(getattr(item, "status", None), "value", "") or ""),
+                    "order_type": str(getattr(getattr(item, "order_type", None), "value", "") or ""),
+                    "order_id": str(getattr(item, "id", "") or ""),
+                    "client_order_id": str(getattr(item, "client_order_id", "") or ""),
+                    "leg": item is not order,
+                })
+        return out
+
     # -- mapping ---------------------------------------------------------- #
     @staticmethod
     def _to_position(p: Any) -> PositionSnapshot:

@@ -68,6 +68,7 @@ import streamlit as st  # noqa: E402
 
 from oaa.app import identity as ident  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
+from oaa.app.positions import render_positions  # noqa: E402
 from oaa.app.theme import palette, style  # noqa: E402
 from oaa.app.weekend_page import render_weekend  # noqa: E402
 from oaa.core.errors import DataError  # noqa: E402
@@ -75,6 +76,7 @@ from oaa.core.errors import DataError  # noqa: E402
 PAGE_BACKTEST = "Backtesting"
 PAGE_LIVE = "Live Trading"
 PAGE_WEEKEND = "Weekend Book"
+PAGE_POSITIONS = "Positions"
 PAGE_CONTROL = "Control"
 
 
@@ -1305,8 +1307,8 @@ def main() -> None:
             settings_for[candidate] = None
             st.session_state[f"_load_error_{candidate}"] = str(exc)
 
-    backtest_tab, live_tab, weekend_tab, control_tab = st.tabs(
-        [PAGE_BACKTEST, PAGE_LIVE, PAGE_WEEKEND, PAGE_CONTROL]
+    backtest_tab, live_tab, weekend_tab, positions_tab, control_tab = st.tabs(
+        [PAGE_BACKTEST, PAGE_LIVE, PAGE_WEEKEND, PAGE_POSITIONS, PAGE_CONTROL]
     )
     with backtest_tab:
         render_backtest(settings)
@@ -1317,6 +1319,8 @@ def main() -> None:
         # cost structure, and threading "is this crypto?" through the panels
         # above is exactly the coupling the separate package exists to avoid.
         render_weekend(settings)
+    with positions_tab:
+        render_positions(settings_for)
     with control_tab:
         render_control(settings_for)
 

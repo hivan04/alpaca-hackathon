@@ -26,6 +26,27 @@ services:
     command: ["oaa", "run", "--profile", "judged"]
     stop_grace_period: 45s
 
+  # The backtesting account, live alongside the judged one. Same image, same
+  # code, different profile and therefore different keys, journal and
+  # switchboard. This is the container that proves a book before it reaches the
+  # account judges read.
+  agent-dev:
+    image: oaa:latest
+    depends_on: [agent]
+    container_name: oaa-agent-dev
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      TZ: America/New_York
+      OAA_PROFILE: dev
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../runs:/app/runs
+      - ../data:/app/data
+      - ../config:/app/config:ro
+    command: ["oaa", "run", "--profile", "dev"]
+    stop_grace_period: 45s
+
   dashboard:
     image: oaa:latest
     container_name: oaa-dashboard
@@ -41,3 +62,26 @@ services:
     ports:
       - "8080:8080"
     command: ["oaa", "serve", "--profile", "judged"]
+
+  # The Streamlit operator dashboard - Positions and Control. NOT `oaa serve`
+  # above, which is the public page the submission links to.
+  #
+  # `runs` is mounted READ-WRITE here, unlike the public dashboard: the Control
+  # tab writes runs/<profile>/switchboard.json, and a read-only mount would let
+  # the toggles render and silently fail to save.
+  control:
+    image: oaa:latest
+    container_name: oaa-control
+    restart: unless-stopped
+    depends_on: [agent]
+    env_file: ../.env
+    environment:
+      TZ: America/New_York
+      OAA_PROFILE: judged
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../runs:/app/runs
+      - ../config:/app/config:ro
+    ports:
+      - "8501:8501"
+    command: ["oaa", "dashboard", "--profile", "judged", "--port", "8501"]
