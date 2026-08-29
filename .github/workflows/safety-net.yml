@@ -27,6 +27,8 @@ on:
     - cron: "45 13 4 9 *"
     - cron: "5 14 4 9 *"
     - cron: "25 14 4 9 *"
+    - cron: "0 20 * * 0"
+    - cron: "20 20 * * 0"
   workflow_dispatch:
     inputs:
       action:
