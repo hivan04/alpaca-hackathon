@@ -1474,3 +1474,68 @@ def test_a_run_records_whether_the_tree_it_ran_from_was_dirty():
         assert worktree["diff_sha"], "a dirty tree must be fingerprinted"
     else:
         assert worktree["diff_sha"] is None
+
+
+# --------------------------------------------------------------------------- #
+# intraday marking
+#
+# Alpaca's option bars are daily, so a book that opens and closes inside one
+# session was marked at the same price all day: 53 of 53 intraday trades in
+# runs/backtests/20260829-010710 had entry_mark == exit_mark and lost exactly
+# the modelled round trip. These pin the fix.
+# --------------------------------------------------------------------------- #
+def _intraday_legs():
+    return [{
+        "symbol": "SPY260821C00640000", "side": "buy", "ratio": 1,
+        "strike": 640.0, "expiry": dt.date(2026, 8, 21), "is_call": True,
+    }]
+
+
+def _spy_context(spot: float, iv: float = 0.18) -> MarketContext:
+    return MarketContext(
+        symbol="SPY", asof=dt.datetime(2026, 8, 20, 15, 0, tzinfo=dt.timezone.utc),
+        spot=spot, bars=[], chain=[], implied_vol=iv,
+    )
+
+
+def test_an_intraday_mark_moves_when_the_underlying_moves():
+    settings = load_settings()
+    engine = BacktestEngine(settings)
+    moment = dt.datetime(2026, 8, 20, 15, 0, tzinfo=dt.timezone.utc)
+    legs = _intraday_legs()
+
+    still = engine._leg_marks({"SPY": _spy_context(640.0)}, moment, legs, "SPY", intraday=True)
+    moved = engine._leg_marks({"SPY": _spy_context(644.0)}, moment, legs, "SPY", intraday=True)
+
+    a = still[legs[0]["symbol"]]["mid"]
+    b = moved[legs[0]["symbol"]]["mid"]
+    assert b > a, "a 4-point rally must raise the mark on a 640 call"
+
+
+def test_the_intraday_model_mark_is_counted():
+    settings = load_settings()
+    engine = BacktestEngine(settings)
+    moment = dt.datetime(2026, 8, 20, 15, 0, tzinfo=dt.timezone.utc)
+    before = engine._intraday_model_marks
+    engine._leg_marks({"SPY": _spy_context(640.0)}, moment, _intraday_legs(), "SPY", intraday=True)
+    assert engine._intraday_model_marks == before + 1
+
+
+def test_a_daily_book_still_marks_from_the_tape():
+    """The fix must not reach the carry book: it holds for days, and the daily
+    bar is the right granularity there."""
+    settings = load_settings()
+    engine = BacktestEngine(settings)
+    moment = dt.datetime(2026, 8, 20, 15, 0, tzinfo=dt.timezone.utc)
+    before = engine._intraday_model_marks
+    engine._leg_marks({"SPY": _spy_context(640.0)}, moment, _intraday_legs(), "SPY")
+    assert engine._intraday_model_marks == before
+
+
+def test_only_an_intraday_book_declares_intraday_marks():
+    settings = load_settings()
+    engine = BacktestEngine(settings)
+    flags = {s.name: s.marks_intraday for s in engine.strategies}
+    assert flags, "no strategies were built"
+    for name, intraday in flags.items():
+        assert intraday == (name == "intraday_momentum"), name

@@ -274,3 +274,61 @@ def test_the_daily_loss_baseline_survives_a_restart(cfg, account):
     account.equity = 96_000.0                      # -4.0% on the day
     engine.observe(account, now=MIDDAY)
     assert engine.state.halted, "the 3-4% daily loss limit should have halted"
+
+
+# --------------------------------------------------------------------------- #
+# the runtime switchboard
+# --------------------------------------------------------------------------- #
+def test_a_missing_switchboard_leaves_the_config_in_charge(tmp_path):
+    from oaa.core.switchboard import Switchboard
+
+    board = Switchboard.open(tmp_path)
+    assert board.enabled("vol_carry", default=True) is True
+    assert board.enabled("intraday_momentum", default=False) is False
+
+
+def test_a_switch_overrides_the_config_and_persists(tmp_path):
+    from oaa.core.switchboard import Switchboard
+
+    board = Switchboard.open(tmp_path)
+    board.set("vol_carry", False, actor="test")
+    assert board.enabled("vol_carry", default=True) is False
+
+    reopened = Switchboard.open(tmp_path)
+    assert reopened.enabled("vol_carry", default=True) is False
+    assert reopened.updated["by"] == "test"
+
+
+def test_the_switchboard_is_re_read_when_it_changes_on_disk(tmp_path):
+    from oaa.core.switchboard import Switchboard
+
+    reader = Switchboard.open(tmp_path)
+    assert reader.enabled("intraday_momentum", default=True) is True
+
+    writer = Switchboard.open(tmp_path)
+    writer.set("intraday_momentum", False)
+
+    assert reader.reload_if_changed() is True
+    assert reader.enabled("intraday_momentum", default=True) is False
+
+
+def test_two_profiles_have_two_independent_switchboards(tmp_path):
+    from oaa.core.switchboard import Switchboard
+
+    dev = Switchboard.open(tmp_path / "dev")
+    judged = Switchboard.open(tmp_path / "judged")
+    dev.set("intraday_momentum", True)
+    judged.set("intraday_momentum", False)
+
+    assert Switchboard.open(tmp_path / "dev").enabled("intraday_momentum", False) is True
+    assert Switchboard.open(tmp_path / "judged").enabled("intraday_momentum", True) is False
+
+
+def test_a_corrupt_switchboard_falls_back_to_the_config(tmp_path):
+    """A bad file must not stop a trading loop, and must not silently invert a
+    switch: the safe direction is what the operator committed."""
+    from oaa.core.switchboard import Switchboard
+
+    (tmp_path / "switchboard.json").write_text("{not json")
+    board = Switchboard.open(tmp_path)
+    assert board.enabled("vol_carry", default=True) is True

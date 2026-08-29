@@ -181,3 +181,42 @@ docker-run: ## Run the loop in the container
 clean: ## Remove caches and build artefacts
 	rm -rf .pytest_cache .ruff_cache .mypy_cache build dist src/*.egg-info
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
+
+# --- both accounts, live, side by side ---------------------------------------
+# The backtesting account and the competition account run as two independent
+# processes: separate profiles, separate credentials, separate journals and
+# separate switchboards. Neither can write to the other's account.
+#
+# Which BOOKS each one trades is not set here - it is the Control tab in the
+# dashboard, which writes runs/<profile>/switchboard.json and is picked up at
+# the next cycle without a restart.
+
+.PHONY: live
+live: ## Start both accounts live + the dashboard (pm2)
+	@command -v pm2 >/dev/null || { echo "pm2 not installed: npm i -g pm2"; exit 1; }
+	@mkdir -p logs runs/dev runs/judged
+	pm2 start ecosystem.config.js
+	@pm2 ls
+	@echo ""
+	@echo "Control tab: http://localhost:8501 -> Control"
+	@echo "Toggle books per account there; no restart needed."
+
+.PHONY: live-status
+live-status: ## What is running, and which account each process holds
+	@pm2 ls
+	@echo ""
+	@$(BIN)/oaa doctor --profile dev | head -20
+	@$(BIN)/oaa doctor --profile judged | head -20
+
+.PHONY: live-logs
+live-logs: ## Tail both live loops
+	pm2 logs oaa-dev oaa-judged
+
+.PHONY: live-stop
+live-stop: ## Stop both loops and the dashboard
+	pm2 stop ecosystem.config.js
+
+.PHONY: switchboard
+switchboard: ## Print the switch state of both accounts
+	@$(BIN)/oaa switchboard --profile dev
+	@$(BIN)/oaa switchboard --profile judged

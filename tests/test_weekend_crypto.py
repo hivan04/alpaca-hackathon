@@ -263,3 +263,127 @@ def test_params_yaml_loads_and_rejects_typos(tmp_path) -> None:
     bad.write_text("signal:\n  entry_zscore: 2.0\n", encoding="utf-8")
     with pytest.raises(ValueError, match="unknown keys"):
         load_params(bad)
+
+
+# --------------------------------------------------------------------------- #
+# the edge study - the thing that decides whether the book should exist
+# --------------------------------------------------------------------------- #
+def test_forward_returns_are_truncated_at_the_cutoff(params: WeekendParams) -> None:
+    """A horizon running past the Sunday flatten must be cut short. Live, the
+    cutoff closes the position; measuring the untruncated move would credit the
+    strategy with a return it could never have held for."""
+    from oaa.strategies.weekend.clock import WindowPhase
+    from oaa.strategies.weekend.data import bar_time
+    from oaa.strategies.weekend.edgestudy import collect
+
+    bars = make_bars(n=1200, start=dt.datetime(2026, 8, 17, tzinfo=UTC), kind="range")
+    samples = collect(bars, params)
+    assert samples, "the study found no in-window observations"
+
+    # Every observation must sit inside the window it was measured in.
+    in_window = [
+        b for b in bars
+        if params.window.phase(bar_time(b)) in {WindowPhase.OPEN, WindowPhase.MANAGE_ONLY}
+    ]
+    assert len(in_window) > 0
+    assert all(s.forward_bp for s in samples)
+
+
+def test_the_study_reports_a_baseline_to_beat(params: WeekendParams) -> None:
+    """A conditional mean is meaningless without the unconditional one: being
+    long BTC over a weekend is a beta, not an edge."""
+    from oaa.strategies.weekend.edgestudy import baseline, collect
+
+    samples = collect(
+        make_bars(n=1200, start=dt.datetime(2026, 8, 17, tzinfo=UTC), kind="range"), params
+    )
+    base = baseline(samples)
+    assert set(base) <= {1.0, 2.0, 4.0, 8.0}
+
+
+def test_a_thin_sample_is_never_reported_as_evidence(params: WeekendParams) -> None:
+    """The verdict must refuse to endorse a handful of observations, however
+    good they look - that refusal is the point of the tool."""
+    from oaa.strategies.weekend.edgestudy import verdict
+
+    rows = [
+        {"bucket": "z <= -2.5", "regime": "ranging", "horizon_h": 8.0, "n": 6,
+         "weekends": 2, "episodes": 6, "mean_bp": 400.0, "median_bp": 380.0,
+         "hit_rate": 1.0, "net_of_costs_bp": 346.0, "t": 9.0},
+    ]
+    assert "NOT ENOUGH DATA" in verdict(rows, params)
+
+
+def test_a_wide_sample_with_a_weak_t_is_reported_as_such(params: WeekendParams) -> None:
+    """Enough weekends, positive after costs, but no significance: the verdict
+    says encouraging and refuses to let it be sized."""
+    from oaa.strategies.weekend.edgestudy import verdict
+
+    rows = [
+        {"bucket": "z <= -2.5", "regime": "ranging", "horizon_h": 4.0, "n": 300,
+         "weekends": 31, "episodes": 44, "mean_bp": 70.0, "median_bp": 40.0,
+         "hit_rate": 0.55, "net_of_costs_bp": 16.0, "t": 1.1},
+    ]
+    assert "statistically not there" in verdict(rows, params)
+
+
+def test_overlapping_bars_are_not_counted_as_independent_evidence() -> None:
+    """The failure that nearly shipped: 11 overlapping bars from ONE weekend's
+    rally reported as a 100% hit rate with t=+14.6. One event, counted eleven
+    times. The cell must collapse them and the t-statistic must refuse."""
+    from oaa.strategies.weekend.edgestudy import Cell
+
+    cell = Cell(
+        label="z <= -2.5",
+        horizon_bars=32,
+        values_bp=[150.0 + i for i in range(11)],
+        keys=[(100 + i, "2026-08-21") for i in range(11)],
+    )
+    assert cell.n == 11
+    assert cell.weekends == 1
+    assert cell.episodes == 1, "overlapping 8h windows are one episode, not eleven"
+    assert cell.t_stat() is None, "a single episode cannot carry a t-statistic"
+
+
+def test_independent_episodes_are_spaced_by_the_forward_window() -> None:
+    from oaa.strategies.weekend.edgestudy import Cell
+
+    cell = Cell(
+        label="z <= -2",
+        horizon_bars=4,
+        values_bp=[10.0] * 9,
+        keys=[(i, "2026-08-21") for i in (0, 1, 2, 4, 5, 8, 9, 12, 13)],
+    )
+    assert cell.episodes == 4  # indices 0, 4, 8, 12
+
+
+def test_a_single_weekend_is_never_a_verdict(params: WeekendParams) -> None:
+    from oaa.strategies.weekend.edgestudy import verdict
+
+    rows = [
+        {"bucket": "z <= -2.5", "regime": "trending", "horizon_h": 8.0, "n": 11,
+         "weekends": 1, "episodes": 1, "mean_bp": 155.0, "median_bp": 159.0,
+         "hit_rate": 1.0, "net_of_costs_bp": 101.0, "t": None},
+    ]
+    assert "NOT ENOUGH DATA" in verdict(rows, params)
+
+
+def test_a_short_cache_is_refused_rather_than_substituted(tmp_path) -> None:
+    """Silently serving 10 days to a caller asking for 400 is how one weekend
+    becomes a distribution. It must raise."""
+    import json as _json
+
+    from oaa.strategies.weekend.data import InsufficientHistory, cached_bars
+
+    bars = make_bars(n=960, start=dt.datetime(2026, 8, 18, tzinfo=UTC))
+    directory = tmp_path / "cache"
+    directory.mkdir()
+    (directory / "BTCUSD_15Min_20260818_20260828.json").write_text(
+        _json.dumps(bars), encoding="utf-8"
+    )
+    with pytest.raises(InsufficientHistory, match="Refusing to substitute"):
+        cached_bars(
+            "BTC/USD", "15Min",
+            dt.datetime(2025, 7, 25, tzinfo=UTC), dt.datetime(2026, 8, 28, tzinfo=UTC),
+            cache_dir=directory,
+        )

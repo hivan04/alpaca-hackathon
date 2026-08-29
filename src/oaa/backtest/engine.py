@@ -162,6 +162,10 @@ class BacktestResult:
     #: Structures re-priced onto a single surface because their legs
     #: disagreed about provenance. High = a thin real option tape.
     mixed_surface_marks: int = 0
+    #: Structures re-priced from the model because the book is intraday and the
+    #: option tape is daily. Expected to be high on any run containing an
+    #: intraday book; zero on such a run means the marks are frozen again.
+    intraday_model_marks: int = 0
     #: Marks that broke the structure's own arithmetic bound and were
     #: clamped. Should be zero; non-zero is a bug to chase.
     risk_bound_clamps: int = 0
@@ -250,6 +254,7 @@ class BacktestResult:
             ),
             "rejections": len(self.rejections),
             "mixed_surface_marks": self.mixed_surface_marks,
+            "intraday_model_marks": self.intraday_model_marks,
             "risk_bound_clamps": self.risk_bound_clamps,
         }
 
@@ -355,6 +360,10 @@ class BacktestEngine:
         #: its legs disagreed about provenance. Reported per run: a high
         #: count means the real option tape is thin for this universe.
         self._mixed_surface_marks = 0
+        #: Marks re-priced from the model because the position is intraday and
+        #: the option tape is daily. High is expected for an intraday book; a
+        #: ZERO here on a run containing one means the fix is not being reached.
+        self._intraday_model_marks = 0
         #: Times the mark-to-market loss exceeded the structure's own
         #: arithmetic bound and had to be clamped. Should be ZERO.
         self._risk_bound_clamps = 0
@@ -422,6 +431,7 @@ class BacktestEngine:
         if hasattr(source, "describe"):
             result.provenance["source"] = source.describe()
         result.mixed_surface_marks = self._mixed_surface_marks
+        result.intraday_model_marks = self._intraday_model_marks
         result.risk_bound_clamps = self._risk_bound_clamps
         return result
 
@@ -430,9 +440,31 @@ class BacktestEngine:
     # ------------------------------------------------------------------ #
     def _leg_marks(
         self, contexts: dict[str, MarketContext], moment: dt.datetime,
-        legs: list[dict[str, Any]], symbol: str,
+        legs: list[dict[str, Any]], symbol: str, intraday: bool = False,
     ) -> dict[str, dict[str, float]]:
-        """Reprice every leg of a structure from the model, at this session."""
+        """Reprice every leg of a structure from the model, at this session.
+
+        `intraday=True` for a book that opens and closes inside one session.
+        Alpaca's option bars are DAILY, so every intraday mark of a contract
+        returns the same close: measured, 53 of 53 intraday trades had
+        `entry_mark == exit_mark` to the cent, every MFE was exactly +0.0%, and
+        the book's net loss equalled the modelled spread precisely. A position
+        held for thirty minutes could not gain or lose anything but the round
+        trip, whatever the underlying did.
+
+        So for those books the real bar sets the VOL and the model sets the
+        PRICE: the vol implied by the day's traded print is recovered, and every
+        leg is re-priced from it against the current intraday spot. The real
+        information is kept - it is the only honest source for the vol level -
+        and the mark moves with delta between scans, which is the whole
+        mechanism a momentum book trades on.
+
+        The limitation, stated because the deck has to state it: vol is frozen
+        within the session, so an intraday mark responds to spot and to time,
+        never to a vol repricing. For a delta-driven book that is the right
+        approximation. For a book whose thesis is intraday vol, it is not, and
+        this is not the harness for it.
+        """
         market = contexts.get(symbol)
         marks: dict[str, dict[str, float]] = {}
         if market is None:
@@ -461,7 +493,8 @@ class BacktestEngine:
         # on the vol the real prints actually imply - so the real information is
         # kept, but one surface prices the whole structure.
         provenance = [marks[leg["symbol"]].get("real", 0.0) for leg in legs]
-        if len(legs) > 1 and 0.0 < sum(provenance) < len(provenance):
+        mixed = len(legs) > 1 and 0.0 < sum(provenance) < len(provenance)
+        if intraday or mixed:
             observed = [
                 float(marks[leg["symbol"]].get("iv") or 0.0)
                 for leg in legs
@@ -469,7 +502,10 @@ class BacktestEngine:
                 and marks[leg["symbol"]].get("iv")
             ]
             anchor = sum(observed) / len(observed) if observed else atm_iv
-            self._mixed_surface_marks += 1
+            if mixed:
+                self._mixed_surface_marks += 1
+            if intraday:
+                self._intraday_model_marks += 1
             for leg in legs:
                 marks[leg["symbol"]] = pricer.reprice(
                     leg["symbol"], market.spot, moment, anchor,
@@ -518,7 +554,10 @@ class BacktestEngine:
 
     def _mark(self, contexts: dict[str, MarketContext], moment: dt.datetime) -> None:
         for position in self._open:
-            marks = self._leg_marks(contexts, moment, position.legs, position.record.symbol)
+            marks = self._leg_marks(
+                contexts, moment, position.legs, position.record.symbol,
+                intraday=_marks_intraday(position.strategy),
+            )
             for leg in position.legs:
                 mark = marks.get(leg["symbol"])
                 if mark is not None:
@@ -746,6 +785,17 @@ class BacktestEngine:
             meta["symbol"]: _mark_from_quote(leg)
             for meta, leg in zip(legs, idea.legs, strict=True)
         }
+        # An intraday position is marked from the model for its whole life, so
+        # its ENTRY has to be on that surface too. Entering on the daily bar and
+        # exiting on the model would book the gap between the two as P&L on
+        # every trade - a bias of unknown sign, charged at entry.
+        if _marks_intraday(strategy):
+            modelled = self._leg_marks(
+                {idea.symbol: market}, moment, legs, idea.symbol, intraday=True,
+            )
+            for meta in legs:
+                if meta["symbol"] in modelled:
+                    marks[meta["symbol"]] = modelled[meta["symbol"]]
         net, spread = self._net_price(legs, marks, closing=False)
 
         # Time-based exits read this. Stamped here and in the live
@@ -809,7 +859,10 @@ class BacktestEngine:
     ) -> None:
         account = self.broker.account()
         for position in list(self._open):
-            marks = self._leg_marks(contexts, moment, position.legs, position.record.symbol)
+            marks = self._leg_marks(
+                contexts, moment, position.legs, position.record.symbol,
+                intraday=_marks_intraday(position.strategy),
+            )
             if not marks:
                 continue
             # `<` not `<=`. A 0 DTE option is NOT expired at 11:15 on its
@@ -869,7 +922,10 @@ class BacktestEngine:
         reason: str,
         result: BacktestResult,
     ) -> None:
-        marks = self._leg_marks(contexts, moment, position.legs, position.record.symbol)
+        marks = self._leg_marks(
+                contexts, moment, position.legs, position.record.symbol,
+                intraday=_marks_intraday(position.strategy),
+            )
         for leg in position.legs:
             marks.setdefault(leg["symbol"], _intrinsic_mark(leg, contexts, position.record.symbol))
 
@@ -991,6 +1047,15 @@ class BacktestEngine:
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+def _marks_intraday(strategy: Any) -> bool:
+    """True when this strategy's positions have to be marked from the model.
+
+    Read off the strategy rather than the trade record so a book re-homed in
+    config still marks correctly.
+    """
+    return bool(getattr(strategy, "marks_intraday", False))
+
+
 def _leg_meta(leg: Leg) -> dict[str, Any]:
     occ = parse_occ(leg.symbol)
     return {

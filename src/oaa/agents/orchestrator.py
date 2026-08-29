@@ -60,6 +60,7 @@ from oaa.partners.base import PartnerHub
 from oaa.risk.engine import RiskEngine
 from oaa.signals.catalyst import CatalystEngine, MacroCalendar
 from oaa.signals.gates import parse_utc
+from oaa.core.switchboard import Switchboard
 from oaa.strategies.base import Strategy, StrategyContext, load_strategies
 from oaa.telemetry.costs import CostModel
 from oaa.telemetry.journal import Journal
@@ -128,12 +129,16 @@ class Orchestrator:
         self.combo = ComboExecutor(self.cfg, broker, journal=self.journal)
         self.costs = CostModel.from_config(self.cfg)
 
-        self.strategies: list[Strategy] = load_strategies(self.cfg)
-        self.carry = [s for s in self.strategies if s.capital_book == "carry"]
-        self.intraday = [s for s in self.strategies if s.capital_book == "intraday"]
-        self.opportunistic = [
-            s for s in self.strategies if s.capital_book == "opportunistic"
-        ]
+        # Which books are switched on for THIS account, right now. Per profile,
+        # re-read at the top of every cycle, and falling back to the config's
+        # own `enabled` flag wherever the file says nothing.
+        self.switchboard = Switchboard.open(getattr(self.cfg.telemetry, "run_dir", None))
+        self._configured = {ref.name: ref.enabled for ref in self.cfg.strategies}
+        self.strategies: list[Strategy] = []
+        self.carry: list[Strategy] = []
+        self.intraday: list[Strategy] = []
+        self.opportunistic: list[Strategy] = []
+        self._load_strategies()
 
         # The catalyst engine and its committed macro calendar. Deterministic,
         # so the intraday loop never waits on a model call.
@@ -199,7 +204,52 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     # dispatch
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # the runtime switchboard
+    # ------------------------------------------------------------------ #
+    def _switched_on(self, name: str) -> bool:
+        return self.switchboard.enabled(name, self._configured.get(name, False))
+
+    def _load_strategies(self) -> None:
+        """Build every book this account may trade, then keep the ones that are
+        switched on. Books the config disables are still BUILT when the
+        switchboard turns them on, which is what lets a toggle take effect
+        without restarting the agent."""
+        switched_on = {n for n, on in self.switchboard.state().items() if on}
+        built = load_strategies(self.cfg, include=switched_on)
+        #: Every book that COULD trade here, switched on or not. Exit rules are
+        #: looked up from this list so a position whose book was switched off
+        #: mid-hold is still managed by its own strategy rather than falling
+        #: through to the global rules.
+        self._built = built
+        self.strategies = [s for s in built if self._switched_on(s.name)]
+        self.carry = [s for s in self.strategies if s.capital_book == "carry"]
+        self.intraday = [s for s in self.strategies if s.capital_book == "intraday"]
+        self.opportunistic = [
+            s for s in self.strategies if s.capital_book == "opportunistic"
+        ]
+
+    def _refresh_strategies(self) -> None:
+        """Cheap: a stat() per cycle, a rebuild only when the file changed."""
+        if self.switchboard.reload_if_changed():
+            before = {s.name for s in self.strategies}
+            self._load_strategies()
+            after = {s.name for s in self.strategies}
+            if before != after:
+                log.info(
+                    "switchboard changed: on=%s off=%s",
+                    sorted(after - before) or "-", sorted(before - after) or "-",
+                )
+                self.journal.event(
+                    "switchboard", enabled=sorted(after), turned_on=sorted(after - before),
+                    turned_off=sorted(before - after), source=str(self.switchboard.path),
+                )
+
     def run_cycle(self, action: str, name: str = "manual") -> CycleResult:
+        # A book switched off stops OPENING at the next scan. Positions it
+        # already holds are still managed and closed below - an off switch that
+        # abandoned open risk would be a worse bug than the one it prevents.
+        self._refresh_strategies()
         handlers = {
             "scan_and_trade": self.scan_and_trade,
             "manage_positions": self.manage_positions,
@@ -502,7 +552,7 @@ class Orchestrator:
         entry = self.firewall.ledger.entries.get(position.symbol.upper())
         idea = self._open_ideas.get(entry.idea_id) if entry else None
         owner = next(
-            (s for s in self.strategies if entry and s.name == entry.strategy), None
+            (s for s in self._built if entry and s.name == entry.strategy), None
         )
         if owner is None or idea is None:
             return None

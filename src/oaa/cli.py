@@ -487,6 +487,49 @@ def strategies(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> 
 
 
 @app.command()
+def switchboard(
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+    on: str | None = typer.Option(None, "--on", help="Comma separated: switch these books ON"),
+    off: str | None = typer.Option(None, "--off", help="Comma separated: switch these books OFF"),
+) -> None:
+    """Show or change which books are switched on for THIS account.
+
+    The switch is per profile and lives in `<run_dir>/switchboard.json`. A
+    running agent picks a change up at its next cycle - no restart. A book with
+    no entry falls back to the config's own `enabled` flag.
+    """
+    from oaa.core.switchboard import Switchboard
+
+    settings = _settings_only(profile, config)
+    board = Switchboard.open(settings.config.telemetry.run_dir)
+    changes: dict[str, bool] = {}
+    for names, value in ((on, True), (off, False)):
+        for name in (n.strip() for n in (names or "").split(",") if n.strip()):
+            changes[name] = value
+    if changes:
+        board.update(changes, actor="cli")
+
+    configured = {ref.name: ref.enabled for ref in settings.config.strategies}
+    state = board.state()
+    table = Table("Book", "Config", "Switch", "Trading now")
+    for name in sorted(set(configured) | set(state)):
+        default = configured.get(name, False)
+        live = board.enabled(name, default)
+        switch = "-" if name not in state else ("on" if state[name] else "off")
+        table.add_row(
+            name,
+            "on" if default else "[dim]off[/]",
+            switch if switch == "-" else (f"[green]{switch}[/]" if state[name] else f"[red]{switch}[/]"),
+            "[green]yes[/]" if live else "[dim]no[/]",
+        )
+    console.print(f"[bold]{settings.config.profile}[/] - {board.path}")
+    console.print(table)
+    if board.updated.get("at"):
+        console.print(f"[dim]last changed {board.updated['at']} by {board.updated.get('by')}[/]")
+
+
+@app.command()
 def config_dump(
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
@@ -1314,6 +1357,11 @@ def weekend_scan(
 def weekend_backtest(
     params_path: str = _WEEKEND_PARAMS,
     days: int = typer.Option(365, "--days", help="History to replay"),
+    weekend: str | None = typer.Option(
+        None, "--weekend",
+        help="Replay ONE weekend: the date of its Friday, e.g. 2026-08-21. "
+             "'last' resolves to the most recently completed weekend.",
+    ),
     equity: float = typer.Option(100_000.0, "--equity"),
     refresh: bool = typer.Option(False, "--refresh", help="Ignore the bar cache"),
     json_out: str | None = typer.Option(None, "--json", help="Write the summary here"),
@@ -1324,7 +1372,35 @@ def weekend_backtest(
     from oaa.strategies.weekend.backtest import run_backtest, sharpe_of_weekends
 
     params = _weekend_params(params_path)
-    result = run_backtest(params, days=days, equity=equity, refresh=refresh)
+
+    start = end = None
+    if weekend:
+        import datetime as _dt
+
+        if weekend.lower() == "last":
+            today = _dt.datetime.now(_dt.timezone.utc)
+            friday = today - _dt.timedelta(days=(today.weekday() - 4) % 7 or 7)
+        else:
+            friday = _dt.datetime.fromisoformat(weekend).replace(tzinfo=_dt.timezone.utc)
+        if friday.weekday() != 4:
+            console.print(f"[red]{friday:%Y-%m-%d} is a {friday:%A}, not a Friday[/]")
+            raise typer.Exit(1)
+        start = friday.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + _dt.timedelta(days=3)
+        console.print(
+            f"[dim]single weekend: {start:%a %d %b} -> {end:%a %d %b} - one sample, "
+            f"not a distribution[/]"
+        )
+
+    try:
+        result = run_backtest(
+            params, days=days, equity=equity, refresh=refresh, start=start, end=end
+        )
+    except (RuntimeError, ValueError) as exc:
+        # A blocked egress or an empty cache is an operator problem, not a
+        # stack trace - say what to do about it.
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from None
     summary = result.summary()
     summary["weekend_sharpe"] = sharpe_of_weekends(result, equity)
 
@@ -1397,6 +1473,190 @@ def weekend_run(
         if once:
             break
         time.sleep(params.execution.poll_seconds)
+
+
+@weekend_app.command("diagnose")
+def weekend_diagnose(
+    params_path: str = _WEEKEND_PARAMS,
+    weekend: str | None = typer.Option(
+        None, "--weekend", help="One weekend, by its Friday date, or 'last'"
+    ),
+    days: int = typer.Option(365, "--days"),
+    refresh: bool = typer.Option(False, "--refresh"),
+) -> None:
+    """Why the book did not trade - the distributions behind the gates.
+
+    Zero trades is not a finding until you know whether the gates were right.
+    This prints the sigma the band gate is drawn against, the gross basis
+    points a 2-sigma reversion is actually worth, and the same number across
+    other bar sizes - so the timeframe is chosen against the fee rather than
+    against intuition.
+    """
+    import datetime as _dt
+
+    from oaa.strategies.weekend.data import cached_bars
+    from oaa.strategies.weekend.diagnostics import diagnose, horizon_study
+
+    params = _weekend_params(params_path)
+    end = _dt.datetime.now(_dt.timezone.utc)
+    start = end - _dt.timedelta(days=days)
+    if weekend:
+        if weekend.lower() == "last":
+            friday = end - _dt.timedelta(days=(end.weekday() - 4) % 7 or 7)
+        else:
+            friday = _dt.datetime.fromisoformat(weekend).replace(tzinfo=_dt.timezone.utc)
+        start = friday.replace(hour=0, minute=0, second=0, microsecond=0) - _dt.timedelta(days=3)
+        end = start + _dt.timedelta(days=6)
+
+    symbol = params.symbols[0]
+    try:
+        bars = cached_bars(symbol, params.signal.timeframe, start, end, refresh=refresh)
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from None
+
+    result = diagnose(bars, params, symbol=symbol)
+    if not result.n:
+        console.print("[yellow]no in-window bars in this range[/]")
+        raise typer.Exit(1)
+
+    sigma = result.sigma_summary()
+    dist = Table(title=f"{symbol} - what the weekend tape actually looks like")
+    dist.add_column("measure")
+    dist.add_column("value", justify="right")
+    dist.add_row("in-window bars", str(result.n))
+    for key, value in sigma.items():
+        dist.add_row(f"sigma {key}", f"{value * 100:.3f}%")
+    dist.add_row("modelled round trip", f"{result.cost_bp:.0f}bp")
+    for z in (2.0, 2.5, 3.0):
+        gross = result.gross_move_at(-z, params.signal.exit_z)
+        dist.add_row(
+            f"gross move, {z:g} sigma -> mean",
+            f"{gross:.0f}bp  ({gross / result.cost_bp:.1f}x costs)",
+        )
+    console.print(dist)
+
+    funnel = Table(title="the funnel, in the order the gates run")
+    funnel.add_column("stage")
+    funnel.add_column("bars", justify="right")
+    for stage, count in result.counts(params).items():
+        funnel.add_row(stage, str(count))
+    funnel.add_section()
+    for gate, count in result.funnel.most_common():
+        funnel.add_row(f"[dim]vetoed by {gate}[/]", f"[dim]{count}[/]")
+    console.print(funnel)
+
+    console.print(Panel(result.verdict(params), title="verdict"))
+
+    study = Table(title="the same question at other horizons")
+    for column in ("timeframe", "lookback", "span h", "bars", "sigma", "gross@entry",
+                   "x costs", "signals", "that pay", "+ranging"):
+        study.add_column(column, justify="right")
+    for row in horizon_study(bars, params):
+        multiple = row["edge_multiple"]
+        study.add_row(
+            row["timeframe"], str(row["lookback"]), str(row["span_hours"]), str(row["bars"]),
+            f"{row['sigma_median_pct']:.2f}%", f"{row['gross_at_entry_bp']:.0f}bp",
+            f"[{'green' if multiple >= 2.5 else 'yellow' if multiple >= 1 else 'red'}]{multiple:.1f}x[/]",
+            str(row["signals"]), str(row["signals_that_pay"]), str(row["and_ranging"]),
+        )
+    console.print(study)
+    console.print(
+        "[yellow]Read the long-lookback rows with suspicion.[/] Sigma is the "
+        "dispersion of log PRICE over the window, so a lookback spanning a trend "
+        "reports a large sigma that is drift, not oscillation - and the implied "
+        "'gross move' is then an amplitude the tape never reverts across. Only a "
+        "conditional forward-return study over many weekends settles whether a "
+        "-2 sigma reading is followed by a reversion at all."
+    )
+
+
+@weekend_app.command("edge")
+def weekend_edge(
+    params_path: str = _WEEKEND_PARAMS,
+    days: int = typer.Option(400, "--days", help="History to study"),
+    adx_split: bool = typer.Option(
+        True, "--adx-split/--no-adx-split", help="Split the table by regime"
+    ),
+    refresh: bool = typer.Option(False, "--refresh"),
+    json_out: str | None = typer.Option(None, "--json"),
+) -> None:
+    """Does a displaced weekend actually revert? Model-free forward returns.
+
+    No entry rule, no stop, no sizing: for every in-window bar it records the
+    z-score and what the tape did next at 1h / 2h / 4h / 8h, then groups. This
+    is the study that decides whether the strategy should exist, and it is
+    allowed to say no.
+    """
+    import datetime as _dt
+    import json as _json
+
+    from oaa.strategies.weekend.data import cached_bars
+    from oaa.strategies.weekend.edgestudy import baseline, collect, tabulate, verdict
+
+    params = _weekend_params(params_path)
+    end = _dt.datetime.now(_dt.timezone.utc)
+    start = end - _dt.timedelta(days=days)
+    try:
+        bars = cached_bars(
+            params.symbols[0], params.signal.timeframe, start, end, refresh=refresh
+        )
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from None
+
+    samples = collect(bars, params)
+    if len(samples) < 50:
+        console.print(
+            f"[yellow]only {len(samples)} in-window observations - fetch more "
+            f"history before drawing any conclusion[/]"
+        )
+    rows = tabulate(samples, params, adx_split=adx_split)
+    base = baseline(samples)
+
+    console.print(
+        Panel(
+            "unconditional forward return (the number a signal must beat): "
+            + ", ".join(f"{h:g}h {v:+.0f}bp" for h, v in base.items())
+            + f"\nmodelled round trip: {params.costs.round_trip_bp:.0f}bp"
+            + f"   observations: {len(samples)}",
+            title="baseline",
+        )
+    )
+
+    table = Table(title="forward return after a weekend z-score reading")
+    for column in ("z bucket", "regime", "horizon", "bars", "w/e", "indep",
+                   "mean", "hit", "net of costs", "t"):
+        table.add_column(column, justify="right")
+    for row in rows:
+        net = row["net_of_costs_bp"]
+        thin = row["weekends"] < 8 or row["episodes"] < 20
+        table.add_row(
+            row["bucket"], row["regime"], f"{row['horizon_h']:g}h", str(row["n"]),
+            f"[{'red' if row['weekends'] < 8 else 'green'}]{row['weekends']}[/]",
+            f"[{'red' if row['episodes'] < 20 else 'green'}]{row['episodes']}[/]",
+            f"{row['mean_bp']:+.0f}bp", f"{row['hit_rate']:.0%}",
+            f"[{'green' if net > 0 and not thin else 'red' if net <= 0 else 'yellow'}]"
+            f"{net:+.0f}bp[/]",
+            "-" if row["t"] is None else f"{row['t']:+.1f}",
+        )
+    console.print(table)
+    console.print(
+        "[dim]bars = overlapping 15-minute observations; w/e = distinct weekends; "
+        "indep = non-overlapping episodes. The t-statistic uses `indep` only - "
+        "pooling overlapping bars inside one dislocation counts a single event "
+        "many times and manufactures significance.[/]"
+    )
+    console.print(Panel(verdict(rows, params), title="verdict"))
+
+    if json_out:
+        from pathlib import Path as _Path
+
+        _Path(json_out).write_text(
+            _json.dumps({"baseline": base, "rows": rows, "n": len(samples)}, indent=2),
+            encoding="utf-8",
+        )
+        console.print(f"[dim]wrote {json_out}[/]")
 
 
 @weekend_app.command("flatten")

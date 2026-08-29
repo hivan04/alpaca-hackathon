@@ -6,7 +6,11 @@ broker:
   paper: true
 
 execution:
-  dry_run: true           # flip to false to actually fire orders in dev
+  # false since 29 Aug: the backtesting account now runs LIVE alongside the
+  # judged one. Both are paper accounts, and this one exists to be the place a
+  # book is proved before it reaches the account judges read. A book that has
+  # only ever run dry has not been proved.
+  dry_run: false
 
 risk:
   max_new_positions_per_day: 20

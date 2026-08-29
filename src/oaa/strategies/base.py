@@ -138,6 +138,17 @@ class Strategy(abc.ABC):
         """Config wins over the class default, so a strategy can be re-homed."""
         return getattr(self.ref, "book", None) or self.book
 
+    @property
+    def marks_intraday(self) -> bool:
+        """Does this book open and close inside one session?
+
+        It decides how the replay MARKS the position, not how it trades. The
+        option tape is daily, so a book that is flat by the close has to be
+        re-priced from the model against the intraday spot or it can only ever
+        realise the spread - see `BacktestEngine._leg_marks`.
+        """
+        return self.capital_book == "intraday"
+
     def chain_dte_window(self) -> tuple[int, int] | None:
         """The expiry window this strategy needs to SEE, not the one it trades.
 
@@ -210,17 +221,41 @@ class Strategy(abc.ABC):
 strategy_registry: Registry[Strategy] = Registry("strategy")
 
 
-def load_strategies(config: Config, book: str | None = None) -> list[Strategy]:
-    """Instantiate every enabled strategy named in the config."""
+def load_strategies(
+    config: Config, book: str | None = None, include: set[str] | None = None,
+) -> list[Strategy]:
+    """Instantiate every enabled strategy named in the config.
+
+    `include` names strategies to build even though config has them disabled -
+    used by the runtime switchboard, which can turn a configured-off book ON
+    without a config edit. A strategy built this way is still only TRADED if
+    the switchboard says so; building it early is what makes the switch take
+    effect without a restart.
+    """
     strategy_registry.autoload("oaa.strategies")
     loaded: list[Strategy] = []
-    for ref in config.enabled_strategies(book):
+    wanted = set(include or ())
+    refs = list(config.enabled_strategies(book))
+    seen = {ref.name for ref in refs}
+    refs += [
+        ref for ref in config.strategies
+        if ref.name in wanted and ref.name not in seen
+        and (book is None or ref.book == book)
+    ]
+    for ref in refs:
         # A broken module is tolerated only while nothing asks for it. If the
         # config enables a strategy whose module failed to import, silently
         # running without it would mean trading a book the operator believes
         # is on - so that becomes a hard error naming the real cause, rather
         # than the "unknown strategy" the registry would otherwise report.
         failure = strategy_registry.import_errors.get(ref.name)
+        if failure and ref.name not in strategy_registry and not ref.enabled:
+            # Asked for by the switchboard, not by the config. A broken module
+            # here is a message to the operator, not a reason to stop a loop
+            # that was trading perfectly well without it.
+            log.error("strategy '%s' was switched on but its module fails to "
+                      "import: %s", ref.name, failure)
+            continue
         if failure and ref.name not in strategy_registry:
             raise ConfigError(
                 f"strategy '{ref.name}' is enabled but its module failed to "

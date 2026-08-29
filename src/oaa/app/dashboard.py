@@ -67,11 +67,13 @@ import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from oaa.app import identity as ident  # noqa: E402
+from oaa.app.control import render_control  # noqa: E402
 from oaa.app.theme import palette, style  # noqa: E402
 from oaa.core.errors import DataError  # noqa: E402
 
 PAGE_BACKTEST = "Backtesting"
 PAGE_LIVE = "Live Trading"
+PAGE_CONTROL = "Control"
 
 
 # --------------------------------------------------------------------------- #
@@ -1258,11 +1260,30 @@ def main() -> None:
     settings = _settings(profile, config_path or None)
     _check_stale(settings)
 
-    backtest_tab, live_tab = st.tabs([PAGE_BACKTEST, PAGE_LIVE])
+    # Both accounts are loaded here, not just the selected one: the Control tab
+    # shows and switches BOTH, and seeing them side by side is the whole point.
+    # A profile whose credentials are missing loads as None and renders as such
+    # rather than taking the page down.
+    settings_for = {}
+    for candidate in ("dev", "judged"):
+        try:
+            settings_for[candidate] = (
+                settings if candidate == profile
+                else _settings(candidate, config_path or None)
+            )
+        except Exception as exc:  # noqa: BLE001
+            settings_for[candidate] = None
+            st.session_state[f"_load_error_{candidate}"] = str(exc)
+
+    backtest_tab, live_tab, control_tab = st.tabs(
+        [PAGE_BACKTEST, PAGE_LIVE, PAGE_CONTROL]
+    )
     with backtest_tab:
         render_backtest(settings)
     with live_tab:
         render_live(settings)
+    with control_tab:
+        render_control(settings_for)
 
 
 if __name__ == "__main__":
