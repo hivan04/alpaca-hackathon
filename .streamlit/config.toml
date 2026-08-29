@@ -1,0 +1,5 @@
+# Streamlit theme for the dashboard (`oaa dashboard` / `streamlit run`).
+# primaryColor is the accent Streamlit uses for selected tabs, widget
+# highlights, focus rings, links and slider tracks.
+[theme]
+primaryColor = "#1388a8"
