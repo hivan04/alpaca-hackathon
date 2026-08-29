@@ -122,6 +122,30 @@ def _identity_banner(who: ident.Identity) -> None:
         st.info(body)
 
 
+def _stale_server(exc: Exception, profile: str) -> None:
+    """The settings load itself failed - almost always a stale server.
+
+    `_check_stale` below catches a config that is missing a field the code
+    expects. This catches the mirror image, which it structurally cannot: a
+    config carrying a field the IN-MEMORY schema has never heard of, because
+    the server imported that schema before the field existed. It surfaces as a
+    pydantic ValidationError naming settings that are plainly present in the
+    YAML, which reads like a config bug and is not one.
+    """
+    st.error(
+        f"**Could not load the `{profile}` profile.**\n\n"
+        "If the settings it is complaining about are present in your YAML, this "
+        "server is running older Python than the files on disk. Streamlit reruns "
+        "the script on every interaction but keeps already-imported modules, so "
+        "**Reload config** cannot fix it - it re-reads YAML and `.env`, not code.\n\n"
+        "Restart the process:\n\n```\npkill -f streamlit && make serve\n```",
+        icon=":material/warning:",
+    )
+    with st.expander("The error"):
+        st.code(str(exc))
+    st.stop()
+
+
 def _check_stale(settings: Any) -> None:
     """Catch a server running older Python than the files on disk.
 
@@ -1259,7 +1283,11 @@ def main() -> None:
             st.rerun()
 
     st.session_state["_config_path"] = config_path or None
-    settings = _settings(profile, config_path or None)
+    try:
+        settings = _settings(profile, config_path or None)
+    except Exception as exc:  # noqa: BLE001
+        _stale_server(exc, profile)
+        return
     _check_stale(settings)
 
     # Both accounts are loaded here, not just the selected one: the Control tab
