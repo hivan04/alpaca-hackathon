@@ -99,17 +99,6 @@ in [`docs/DISCOVERY.md`](docs/DISCOVERY.md).
 | `event_premium` | opportunistic (transient) | iron condor on SPY/QQQ | *(dormant)* a scheduled print is due **and** implied is ≥ 1.25× the historical realised move |
 | `momentum_debit_spread` | intraday | vertical debit spread | *(off)* confirmed trend, cheap IV — the opposite-regime strategy |
 | `earnings_calendar` | intraday | calendar spread | *(off)* term-structure inversion into earnings |
-| `weekend_crypto_reversion` | **weekend** (own process) | long spot BTC/USD | *(off)* z ≤ −2σ from the 24h mean, ADX < 25 and not rising, and the reversion is worth ≥ 2.5× the modelled 54bp round trip |
-
-**`weekend_crypto_reversion`** is the fourth book and lives entirely in
-[`src/oaa/strategies/weekend/`](src/oaa/strategies/weekend/README.md). It runs
-as its own process between the Friday equity close and a hard Sunday 20:00 UTC
-flatten, so it *cannot* hold a position while an equity session is live and
-never competes with the carry book for Reg T buying power. Long only — Alpaca
-does not permit short crypto, so the rich side of the band is an exit, not a
-short. Its binding constraint is that crypto fees are a percentage of notional:
-~54bp a round trip, which is why its most restrictive gate is arithmetic rather
-than a signal.
 
 **`vol_carry`** is the headline strategy: it sells the IV–RV spread as
 defined-risk structures held 3–10 sessions, at 7–14 DTE so the decay fits inside
@@ -129,7 +118,6 @@ config/                  every knob, in YAML
   dev.yaml               throwaway account overlay
   judged.yaml            the account judges evaluate
   strategies/*.yaml      per-strategy parameters
-                         (weekend_crypto.yaml owns the weekend book alone)
 
 src/oaa/
   config/                load, merge, validate; credential resolution
@@ -140,8 +128,6 @@ src/oaa/
   options/               OCC symbols, chain filtering, structure builders
   data/                  market data (CLI or SDK), indicators
   strategies/            signal -> structure  (add a file, add a config block)
-    weekend/             the weekend crypto book, self-contained: its own clock,
-                         gates, cost model, engine and replay
   risk/                  hard limits and sizing  (the only thing that can approve)
   execution/             pricing, idempotency, single orders and rollback combos
   brokers/               cli | mcp | rest | sim, one protocol
@@ -167,6 +153,9 @@ docs/DECISIONS.md            why the non-obvious choices were made
 ## Commands
 
 ```
+oaa status              is the agent live, and what has it decided today?
+oaa status --watch 30   the same, refreshing
+oaa status --json       the same, for scripts
 oaa doctor              check every dependency and credential
 oaa discover            what the market is watching + today's regime read
 oaa pool                the accumulated candidate pool
@@ -188,13 +177,6 @@ oaa strategies          registered strategies
 oaa config-dump         the fully merged configuration
 oaa serve               the public dashboard (the submission's Application URL)
 
-oaa weekend status      the weekend book: where the clock is, what is open
-oaa weekend scan        one BTC/USD evaluation, gate by gate, no orders
-oaa weekend backtest    replay the weekend book over crypto history, costs in
-oaa weekend run         the weekend loop (dry run unless --live)
-oaa weekend flatten     close every crypto position now
-oaa weekend diagnose    why it did not trade: the distributions behind the gates
-oaa weekend edge        model-free forward returns - does a dislocation revert?
 ```
 
 ---

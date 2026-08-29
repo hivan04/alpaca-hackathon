@@ -128,7 +128,10 @@ class OptionsConfig(Base):
     min_volume: int = 10
     max_bid_ask_spread_pct: float = 0.12
     min_option_price: float = 0.10
-    max_option_price: float = 25.0
+    #: None disables the per-contract price ceiling. It was 25.0, which quietly
+    #: removed near-the-money contracts on any underlying above roughly $350 -
+    #: distorting the structure that got built rather than refusing it.
+    max_option_price: float | None = None
     strike_selection: Literal["delta", "moneyness", "strike"] = "delta"
     contract_multiplier: int = 100
 
@@ -267,7 +270,9 @@ class StrategyRef(Base):
     #: listed here anyway because the runtime switchboard keys off the config's
     #: strategy list - an unlisted strategy shows as "not wired" and its toggle
     #: does nothing.
-    book: Literal["carry", "intraday", "opportunistic", "weekend"] = "intraday"
+    #: "events" joins "weekend" as a book that runs in its own process
+    #: (`oaa events arm`) and never leases capital from the firewall.
+    book: Literal["carry", "intraday", "opportunistic", "weekend", "events"] = "intraday"
     params_file: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
 

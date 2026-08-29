@@ -1,0 +1,116 @@
+# =============================================================================
+# The events book - one overnight hold across a scheduled earnings print.
+#
+# Read src/oaa/strategies/events/README.md before changing anything here. Every
+# number below has a reason; the ones that matter most are the confidence floor
+# (which decides how often the book trades at all) and max_relative_spread
+# (which decides whether what it trades can clear its costs).
+#
+# This file is NOT referenced from config/default.yaml's `strategies:` list, and
+# that is deliberate - the options runner must never load this book. Its entry
+# point is `oaa events arm`.
+# =============================================================================
+
+book: events
+calendar_path: config/events/earnings_calendar.json
+
+# Nudges the LLM screener towards names a desk can actually trade. It may
+# propose others; every proposal is verified against the calendar regardless,
+# so this shapes the search rather than restricting the outcome.
+universe_hint:
+  - AVGO
+  - DELL
+  - SNOW
+  - PANW
+  - MDB
+  - LULU
+  - ZS
+  - DOCU
+  - CRDO
+  - GTLB
+  - NTAP
+  - CIEN
+
+screen:
+  # Ten names is one LLM call each and, at most, ten positions sharing one
+  # night's risk budget. Beyond that the budget per name gets too small to
+  # clear a single contract's debit and the extra calls buy nothing.
+  top_n: 10
+  # Below a 3% implied move there is no event priced in - and the debit still
+  # crosses two spreads on the way in and two on the way out.
+  min_implied_move_pct: 3.0
+  # THE binding gate. A vertical crosses four half-spreads round trip; on a
+  # thin front weekly that is most of the debit. Worked example: GTLB at $45
+  # with $0.20-wide legs pays ~$80 of a ~$120 credit to the market maker.
+  # Raise this and the book trades more names that cannot clear their costs.
+  max_relative_spread: 0.25
+  min_option_price: 0.30
+  # Per-contract price ceiling for this book. null = none, which is now the
+  # global default too - the $25 cap was removed on 29 Aug because it stripped
+  # near-the-money contracts on expensive names without refusing the trade.
+  # Set a number here to re-impose a ceiling for this book alone.
+  max_option_price: null
+  # abs_divergence ranks rich and cheap events together - the screen asks
+  # whether there IS an event, not which way to lean. Set to implied_move to
+  # rank purely by event size.
+  rank_by: abs_divergence
+
+sentiment:
+  news_lookback_days: 7
+  max_headlines: 25
+  stocktwits_enabled: true
+  max_messages: 30
+  timeout_seconds: 8.0
+  # The evidence block is untrusted third-party text. A smaller window is
+  # cheaper AND a smaller injection target.
+  max_chars: 12000
+
+direction:
+  # The single most important number in this file. At 0.55 the book trades
+  # marginal calls at minimum size; at 0.70 it trades rarely and only on
+  # genuine conviction. Move it after reading a run's abstention rate, not
+  # before.
+  min_confidence: 0.55
+  expected_abstention_rate: 0.40
+  # A confident call citing nothing is a guess with a number attached.
+  require_evidence: true
+  max_tokens: 1200
+  temperature: 0.1
+  # null inherits agents.llm from config/default.yaml. Pin a model and a seed
+  # here to make a run repeatable.
+  model: null
+  seed: 11
+
+sizing:
+  # Everything opened in one night shares this. Three names do not each get a
+  # full allocation.
+  nightly_risk_budget_pct: 0.04
+  # One name, at full confidence.
+  max_risk_per_trade_pct: 0.012
+  # Confidence at the floor still earns a position - 30% of full size. The
+  # gate is where marginal calls die, not the sizing curve.
+  min_size_multiple: 0.30
+  min_contracts: 1
+  # An absolute ceiling that does NOT scale with equity, so a good week cannot
+  # quietly become a bigger bet than this book was designed to hold.
+  max_contracts: 10
+
+structure:
+  # The expiry must contain the print. 1-9 days covers the front weekly for a
+  # Monday-to-Thursday report; the screen refuses any expiry landing before
+  # the reaction session.
+  dte_window: [1, 9]
+  long_delta: 0.45
+  short_delta: 0.25
+  # Above this the debit is paying for most of its own maximum profit.
+  max_debit_to_width: 0.45
+  min_reward_risk: 1.2
+
+schedule:
+  # US/Eastern. Arm into the close of the session before an after-close print.
+  arm_time: "15:45"
+  no_entry_after: "15:55"
+  # Close into the post-print IV collapse, not at the open - the first minutes
+  # are the widest quotes of the day.
+  exit_time: "09:45"
+  hard_exit_time: "10:30"

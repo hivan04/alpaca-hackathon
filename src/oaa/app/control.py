@@ -47,14 +47,6 @@ STRATEGIES: list[dict[str, Any]] = [
         "blurb": "Dormant unless a scheduled print prices above its realised "
                  "distribution. Standing down is the expected outcome.",
     },
-    {
-        "name": "weekend_crypto_reversion",
-        "title": "Weekend crypto",
-        "blurb": "Long BTC/USD at -2.5 sigma from its 24h mean, ADX < 25, flat "
-                 "by Sunday 20:00 UTC. Runs in its own process (`oaa weekend "
-                 "run`), which reads this same switch. Six trades in 58 "
-                 "weekends: uncorrelated optionality, not a P&L engine.",
-    },
 ]
 
 ACCOUNTS = [

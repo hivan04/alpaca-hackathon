@@ -105,7 +105,14 @@ options:
   min_volume: 10
   max_bid_ask_spread_pct: 0.12     # (ask-bid)/mid
   min_option_price: 0.10
-  max_option_price: 25.00
+  # Removed 29 Aug (was 25.00). This is a per-CONTRACT filter, so on an
+  # underlying above roughly $350 it stripped the near-the-money strikes and
+  # left the cheap far-OTM ones: the chain was not empty and nothing raised,
+  # but `atm()` priced an OTM strike as ATM and `by_delta(0.45)` resolved to
+  # whatever delta survived. It refused nothing and distorted quietly, which
+  # is the worst shape a gate can have. Position size is bounded by max loss
+  # in the risk engine, which is the right place for it.
+  max_option_price: null
   strike_selection: delta          # delta | moneyness | strike
   contract_multiplier: 100
 
@@ -342,18 +349,6 @@ strategies:
     book: opportunistic
     params_file: "config/strategies/event_premium.yaml"
 
-  # --- WEEKEND BOOK (Fri 20:05 UTC -> Sun 20:00 UTC, its own process) -------
-  # Listed here so the Control tab can switch it, NOT so the options runner can
-  # trade it: `oaa run` only asks for the carry/intraday/opportunistic books,
-  # and the strategy refuses any symbol without a slash and any time outside
-  # its window. The live loop is `oaa weekend run`, which reads the same
-  # switchboard entry this line creates.
-  - name: weekend_crypto_reversion
-    enabled: false
-    weight: 1.0
-    book: weekend
-    params_file: "config/strategies/weekend_crypto.yaml"
-
   # --- opposite-regime strategy: trend present, IV cheap --------------------
   # Shares the trend measurement with vol_carry, which is what keeps the two
   # mutually exclusive. A test asserts they never co-fire.
@@ -541,9 +536,14 @@ management:
     dte_trigger: 7
   # Close everything before the submission deadline so final P&L is realised.
   flatten_before: null
-  # Scoped to the carry book itself (vol_carry's exits.entry_cutoff_utc). A
-  # global cutoff applied carry reasoning to every book, including the event
-  # book that arms on dated prints.
+  # Global entry cutoff, removed 29 Aug. It was written for the carry book, but
+  # it gates EVERY book, and the event strategy's whole premise is arming on a
+  # dated print - three of the 1-4 Sep prints (LULU, ZS, DOCU, CIEN) fall after
+  # the old 2 Sep 20:00 UTC cutoff, so a global gate deletes half the week.
+  # The carry book keeps its own cutoff in config/strategies/vol_carry.yaml,
+  # which is where the "cannot decay before the flatten" reasoning belongs.
+  # null disables the gate; entry_window_gate() and the orchestrator both
+  # treat null as "no cutoff".
   entry_cutoff_utc: null
   # Flatten the ENTIRE book on the morning of submission day, well before the
   # 15:00 UTC deadline. Realised P&L on a flat account is unambiguous evidence;

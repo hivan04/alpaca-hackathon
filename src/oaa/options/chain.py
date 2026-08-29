@@ -22,7 +22,12 @@ class ChainFilter:
     min_volume: int = 0
     max_spread_pct: float = 0.12
     min_price: float = 0.10
-    max_price: float = 25.0
+    #: None means no ceiling. A per-CONTRACT price cap does not refuse a
+    #: trade - it removes the near-the-money strikes on an expensive name and
+    #: leaves the cheap far-OTM ones, so `atm()` then prices an OTM strike as
+    #: ATM and `by_delta()` resolves to whatever delta survived. A distorted
+    #: structure rather than a refused one, which is why this defaults to off.
+    max_price: float | None = None
     rights: tuple[Right, ...] = (Right.CALL, Right.PUT)
     require_greeks: bool = False
 
@@ -33,7 +38,9 @@ class ChainFilter:
         if q.right not in self.rights:
             return False
         mid = q.mid
-        if mid is None or not (self.min_price <= mid <= self.max_price):
+        if mid is None or mid < self.min_price:
+            return False
+        if self.max_price is not None and mid > self.max_price:
             return False
         if q.spread_pct is not None and q.spread_pct > self.max_spread_pct:
             return False
