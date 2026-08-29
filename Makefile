@@ -198,8 +198,10 @@ live: ## Start both accounts live + the dashboard (pm2)
 	pm2 start ecosystem.config.js
 	@pm2 ls
 	@echo ""
-	@echo "Control tab: http://localhost:8501 -> Control"
-	@echo "Toggle books per account there; no restart needed."
+	@echo "Streamlit operator dashboard: http://localhost:8501 -> Control tab"
+	@echo "  (pm2 process oaa-control - `oaa dashboard`, not `oaa serve`)"
+	@echo "Public FastAPI page: pm2 process oaa-dashboard - `oaa serve`"
+	@echo "Toggle books per account in the Control tab; no restart needed."
 
 .PHONY: live-status
 live-status: ## What is running, and which account each process holds
@@ -220,3 +222,12 @@ live-stop: ## Stop both loops and the dashboard
 switchboard: ## Print the switch state of both accounts
 	@$(BIN)/oaa switchboard --profile dev
 	@$(BIN)/oaa switchboard --profile judged
+
+.PHONY: control
+control: ## Streamlit operator dashboard (backtesting, live, Control tab)
+	$(BIN)/oaa dashboard --profile judged
+
+.PHONY: control-restart
+control-restart: ## Restart it - required after ANY Python change
+	-pkill -f "streamlit run" 2>/dev/null || true
+	$(BIN)/oaa dashboard --profile judged

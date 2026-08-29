@@ -54,6 +54,18 @@ module.exports = {
       exp_backoff_restart_delay: 5000,
     },
     {
+      // The Streamlit operator dashboard - backtesting, live trading, and the
+      // Control tab that switches books on and off per account. This is NOT
+      // `oaa serve`, which is the public FastAPI page the submission links to.
+      ...base,
+      name: "oaa-control",
+      script: PY,
+      args: "dashboard --profile judged --port 8501",
+      env: { OAA_PROFILE: "judged", PYTHONUNBUFFERED: "1", TZ: "America/New_York" },
+      out_file: "logs/control.out.log",
+      error_file: "logs/control.err.log",
+    },
+    {
       ...base,
       name: "oaa-dashboard",
       script: PY,
