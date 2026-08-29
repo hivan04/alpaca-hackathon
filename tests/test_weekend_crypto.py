@@ -387,3 +387,140 @@ def test_a_short_cache_is_refused_rather_than_substituted(tmp_path) -> None:
             dt.datetime(2025, 7, 25, tzinfo=UTC), dt.datetime(2026, 8, 28, tzinfo=UTC),
             cache_dir=directory,
         )
+
+
+# --------------------------------------------------------------------------- #
+# the execution path - never exercised against a live venue, so assert it hard
+# --------------------------------------------------------------------------- #
+def _crypto_ticket(qty: float = 0.0043):
+    from oaa.core.types import Intent, Leg, OrderTicket, Side
+
+    return OrderTicket(
+        idea_id="x",
+        client_order_id="oaa-test",
+        symbol="BTC/USD",
+        legs=[Leg(symbol="BTC/USD", side=Side.BUY, kind=AssetKind.CRYPTO, qty=qty,
+                  intent=Intent.BUY_TO_OPEN)],
+        quantity=1,
+        order_type="limit",
+        limit_price=60_000.0,
+        time_in_force="gtc",
+        risk_stamp="stamp",
+    )
+
+
+def test_the_cli_broker_sends_the_fractional_size_not_one_whole_bitcoin() -> None:
+    """The bug this test exists for: the CLI path read `ticket.quantity`, which
+    is 1 for a single-leg order, and sent `--qty 1` for a 0.0043 BTC ticket -
+    an order for one whole bitcoin. Options carry size on the ticket; crypto
+    and equities carry an absolute size on the leg."""
+    from oaa.brokers.alpaca_cli import AlpacaCliBroker
+    from oaa.config.schema import Config
+
+    broker = AlpacaCliBroker(Config())
+    args = broker._submit_args(_crypto_ticket(0.0043))
+    assert "--qty" in args
+    assert args[args.index("--qty") + 1] == "0.0043"
+    assert "1" != args[args.index("--qty") + 1]
+
+
+def test_no_position_intent_on_a_crypto_order() -> None:
+    """Alpaca rejects position_intent outright on a 24/7 asset."""
+    from oaa.brokers.alpaca_cli import AlpacaCliBroker
+    from oaa.config.schema import Config
+
+    args = AlpacaCliBroker(Config())._submit_args(_crypto_ticket())
+    assert "--position-intent" not in args
+    assert args[args.index("--time-in-force") + 1] == "gtc"
+
+
+def test_closing_a_fractional_position_does_not_truncate_to_zero() -> None:
+    from oaa.brokers.alpaca_cli import _fmt_qty
+
+    assert _fmt_qty(0.0043) == "0.0043"
+    assert _fmt_qty(3.0) == "3"
+    assert float(_fmt_qty(0.00001234)) > 0
+
+
+# --------------------------------------------------------------------------- #
+# the engine - the part that will actually touch the judged account
+# --------------------------------------------------------------------------- #
+class _FakeBroker:
+    """Records what it was asked to do. No network, no Alpaca."""
+
+    def __init__(self, positions=()):
+        self._positions = list(positions)
+        self.closed: list[tuple[str, float]] = []
+        self.submitted: list[object] = []
+
+    def account(self):
+        from oaa.core.types import AccountSnapshot
+
+        return AccountSnapshot(equity=100_000.0, positions=self._positions)
+
+    def close_position(self, symbol, qty=None):
+        self.closed.append((symbol, qty))
+        return None
+
+    def submit(self, ticket):
+        self.submitted.append(ticket)
+        return None
+
+    @staticmethod
+    def client_order_id(idea, suffix=""):
+        return f"oaa-{idea.id}"
+
+
+def _crypto_position(qty: float = 0.0043):
+    from oaa.core.types import PositionSnapshot
+
+    return PositionSnapshot(
+        symbol="BTCUSD", qty=qty, avg_entry_price=60_000.0,
+        market_value=qty * 60_000.0, asset_class="crypto",
+    )
+
+
+def test_the_engine_does_nothing_while_an_equity_session_is_live(tmp_path, params) -> None:
+    from oaa.strategies.weekend.engine import WeekendEngine
+
+    broker = _FakeBroker()
+    engine = WeekendEngine(params, broker, state_path=tmp_path / "state.json")
+    report = engine.cycle(now=dt.datetime(2026, 8, 28, 18, 0, tzinfo=UTC))  # Friday, open
+    assert report.phase is WindowPhase.CLOSED
+    assert not broker.closed and not broker.submitted
+
+
+def test_the_cutoff_closes_crypto_it_did_not_open(tmp_path, params) -> None:
+    """Unattributed crypto is treated as ours and closed - the same convention
+    the options ledger uses, and the safe direction of the error for a book
+    that must not exist during an equity session. Note the position symbol has
+    NO slash: Alpaca returns BTCUSD for positions and takes BTC/USD for orders,
+    so matching on the slash alone would silently skip the flatten."""
+    from oaa.strategies.weekend.engine import WeekendEngine
+
+    params.execution.dry_run = False
+    broker = _FakeBroker(positions=[_crypto_position()])
+    engine = WeekendEngine(params, broker, state_path=tmp_path / "state.json")
+    report = engine.cycle(now=dt.datetime(2026, 8, 30, 20, 30, tzinfo=UTC))  # past cutoff
+    assert report.phase is WindowPhase.FLATTEN
+    assert broker.closed == [("BTCUSD", 0.0043)]
+
+
+def test_levels_survive_a_restart(tmp_path, params) -> None:
+    """The stop and target are computed from the band AT ENTRY. Recomputing
+    them after a restart would move the stop - usually further away, because
+    the band widened around the move that is hurting."""
+    from oaa.strategies.weekend.engine import OpenPosition, WeekendState
+
+    path = tmp_path / "state.json"
+    state = WeekendState(
+        position=OpenPosition(
+            symbol="BTC/USD", qty=0.0043, entry=60_000.0, stop=59_000.0,
+            target=61_500.0, entered_at=dt.datetime.now(UTC).isoformat(),
+            idea_id="abc", client_order_id="oaa-abc",
+        )
+    )
+    state.save(path)
+    reloaded = WeekendState.load(path)
+    assert reloaded.position is not None
+    assert (reloaded.position.stop, reloaded.position.target) == (59_000.0, 61_500.0)

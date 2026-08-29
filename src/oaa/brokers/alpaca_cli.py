@@ -129,9 +129,19 @@ class AlpacaCliBroker(Broker):
         return _fill(payload, ticket)
 
     def _submit_args(self, ticket: OrderTicket) -> list[str]:
+        # Options trade in whole contracts and carry the size on the ticket;
+        # equities and spot crypto carry an ABSOLUTE, possibly fractional size
+        # on the leg. Reading ticket.quantity for all three sent "--qty 1" for
+        # a 0.0043 BTC order - a ticket for one whole bitcoin. The size lives
+        # wherever the instrument put it.
+        leg0 = ticket.legs[0] if ticket.legs else None
+        if leg0 is not None and leg0.is_equity and leg0.qty:
+            size = _fmt_qty(leg0.qty)
+        else:
+            size = str(ticket.quantity)
         args = [
             "order", "submit",
-            "--qty", str(ticket.quantity),
+            "--qty", size,
             "--type", ticket.order_type,
             "--time-in-force", ticket.time_in_force,
             "--client-order-id", ticket.client_order_id,
@@ -152,11 +162,11 @@ class AlpacaCliBroker(Broker):
             args += ["--order-class", "mleg", "--legs", json.dumps(legs)]
         else:
             leg = ticket.legs[0]
-            args += [
-                "--symbol", leg.symbol,
-                "--side", leg.side.value,
-                "--position-intent", leg.resolved_intent().value,
-            ]
+            args += ["--symbol", leg.symbol, "--side", leg.side.value]
+            if leg.is_option:
+                # position_intent is an options concept. Alpaca rejects it on an
+                # equity or crypto order outright.
+                args += ["--position-intent", leg.resolved_intent().value]
         return args
 
     def cancel(self, order_id: str) -> bool:
@@ -176,7 +186,10 @@ class AlpacaCliBroker(Broker):
     def close_position(self, symbol: str, qty: float | None = None) -> Fill | None:
         args = ["position", "close", "--symbol", symbol]
         if qty:
-            args += ["--qty", str(int(abs(qty)))]
+            # Never int() this: a crypto position is fractional, and
+            # int(0.0043) is 0 - a close that closes nothing and leaves the
+            # book exposed through Monday's open.
+            args += ["--qty", _fmt_qty(abs(qty))]
         try:
             return _fill(self.run(args), None)
         except BrokerError as exc:
@@ -199,6 +212,11 @@ class AlpacaCliBroker(Broker):
         for key, value in flags.items():
             args += [f"--{key.replace('_', '-')}", str(value)]
         return self.run(args)
+
+
+def _fmt_qty(qty: float) -> str:
+    """Whole numbers stay whole; fractions keep enough precision for crypto."""
+    return str(int(qty)) if float(qty).is_integer() else f"{qty:.9f}".rstrip("0")
 
 
 def _position(p: dict[str, Any]) -> PositionSnapshot:
