@@ -184,6 +184,15 @@ def doctor(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> None
             account = broker.account()
             row("alpaca connection", True,
                 f"equity ${account.equity:,.2f}, account {account.account_id}")
+            # What the environment SAYS against what the broker actually opens.
+            # A key can be well formed, resolved from exactly the right
+            # variable, and still belong to the other account - and nothing
+            # upstream of this line can see that.
+            expected = (creds.expected_account_id or "").strip().upper()
+            actual = (account.account_id or "").strip().upper()
+            row("account identity", bool(expected) and expected == actual,
+                f"keys open {actual or '?'}, profile expects {expected or '(none recorded)'}"
+                + ("" if expected else " - set it in .env"))
             level = account.options_trading_level
             row("options level", bool(level and level >= 3),
                 f"level {level} (multi-leg spreads need 3)" if level else "unknown",

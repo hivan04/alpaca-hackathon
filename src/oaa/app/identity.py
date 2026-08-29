@@ -38,6 +38,11 @@ class Identity:
     secret_set: bool
     paper: bool
     judged_account_id: str | None
+    #: The account THIS profile is supposed to be holding - the dev account on
+    #: dev, the judged account on judged. `judged_account_id` is the judged one
+    #: whichever profile is active, so it is the wrong thing to label a page
+    #: with and the right thing to warn with.
+    expected_account_id: str | None
     broker: str
     data_provider: str
     configured: bool
@@ -55,6 +60,7 @@ class Identity:
             "secret_set": self.secret_set,
             "paper": self.paper,
             "judged_account_id": self.judged_account_id,
+            "expected_account_id": self.expected_account_id,
             "broker": self.broker,
             "data_provider": self.data_provider,
             "configured": self.configured,
@@ -87,6 +93,7 @@ def resolve(settings: Settings, page: str) -> Identity:
         secret_set=bool(creds.secret_key),
         paper=cfg.broker.paper,
         judged_account_id=creds.account_id,
+        expected_account_id=creds.expected_account_id,
         broker=cfg.broker.primary,
         data_provider=cfg.data.provider,
         configured=creds.configured,
@@ -109,6 +116,7 @@ def print_banner(identity: Identity, stream: Any = None) -> None:
         f"  API key          {BOLD}{identity.key_masked}{RESET}   from {identity.key_source}",
         f"  secret key       {'set' if identity.secret_set else RED + 'MISSING' + RESET}",
         f"  paper trading    {identity.paper}",
+        f"  expected account {identity.expected_account_id or '(unset)'}",
         f"  judged account   {identity.judged_account_id or '(ALPACA_JUDGED_ACCOUNT_ID unset)'}",
         f"  broker / data    {identity.broker} / {identity.data_provider}",
     ]
@@ -121,3 +129,43 @@ def print_banner(identity: Identity, stream: Any = None) -> None:
         )
     lines.append(f"{DIM}{'-' * 68}{RESET}")
     print("\n".join(lines), file=out, flush=True)
+
+
+# --------------------------------------------------------------------------- #
+# live verification
+# --------------------------------------------------------------------------- #
+def verify(settings: Settings) -> dict[str, Any]:
+    """Ask Alpaca which account these keys actually open.
+
+    The banner above reports what the ENVIRONMENT says. This reports what the
+    broker says, and the two disagreeing is the failure the banner exists to
+    catch but cannot see on its own: a key can be perfectly well formed, and
+    resolved from exactly the right variable, and still belong to the other
+    account.
+
+    Never called on render - it is a network round trip behind a button.
+    """
+    out: dict[str, Any] = {
+        "profile": settings.config.profile,
+        "expected": settings.credentials.expected_account_id,
+        "actual": None, "ok": None, "error": None,
+    }
+    try:
+        from oaa.brokers.alpaca_rest import AlpacaRestBroker
+
+        snapshot = AlpacaRestBroker(settings.config, settings.credentials).account()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    out["actual"] = snapshot.account_id
+    out["equity"] = snapshot.equity
+    out["buying_power"] = snapshot.buying_power
+    out["options_level"] = snapshot.options_trading_level
+    out["positions"] = len(snapshot.positions or [])
+    out["open_orders"] = snapshot.open_orders
+    expected = (out["expected"] or "").strip().upper()
+    actual = (snapshot.account_id or "").strip().upper()
+    # No expectation recorded is not a pass. It is an unanswered question.
+    out["ok"] = bool(expected) and expected == actual
+    return out

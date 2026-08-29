@@ -94,13 +94,46 @@ def render_control(settings_for: dict[str, Any]) -> None:
             col.markdown(f"**{label}**\n\n:red[not loaded]")
             continue
         who = ident.resolve(settings, f"control:{profile}")
-        account = who.judged_account_id or "unset"
+        # The account THIS profile should hold - not `judged_account_id`, which
+        # is the judged one whichever profile is active and would label the
+        # backtesting column with the competition account number.
+        account = who.expected_account_id or "unset"
         col.markdown(
-            f"**{label}**  \n`{profile}` · key `{who.key_masked}`  \n"
-            f"account `{account}`"
+            f"**{label}**  \n`{profile}` · key `{who.key_masked}` "
+            f"from `{who.key_source}`  \naccount `{account}`"
             + ("" if who.configured else "  \n:red[no credentials]")
         )
         col.caption(note)
+        checked = st.session_state.get(f"verify::{profile}")
+        if checked:
+            if checked.get("error"):
+                col.warning(f"could not reach Alpaca: {checked['error']}", icon=":material/error:")
+            elif checked["ok"]:
+                col.success(
+                    f"Alpaca confirms `{checked['actual']}` · equity "
+                    f"${checked.get('equity', 0):,.0f} · options level "
+                    f"{checked.get('options_level', '?')} · {checked.get('positions', 0)} open",
+                    icon=":material/check:",
+                )
+            else:
+                col.error(
+                    f"KEY OPENS `{checked['actual']}`, expected "
+                    f"`{checked['expected'] or 'nothing recorded'}` - do not trade this.",
+                    icon=":material/warning:",
+                )
+
+    if st.button(
+        "Verify both accounts with Alpaca",
+        help="Asks the broker which account each key actually opens, and "
+             "compares it with the one this profile expects. A well-formed key "
+             "resolved from the right variable can still belong to the other "
+             "account, and only this catches that.",
+    ):
+        for profile, _, _ in ACCOUNTS:
+            settings = settings_for.get(profile)
+            if settings is not None:
+                st.session_state[f"verify::{profile}"] = ident.verify(settings)
+        st.rerun()
 
     st.divider()
 
