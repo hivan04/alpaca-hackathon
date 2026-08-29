@@ -121,7 +121,7 @@ class IVHistoryStore:
             log.debug("%s: could not seed IV history (%s)", symbol, exc)
             return 0
         dated: list[tuple[dt.date, float]] = []
-        for bar, value in zip(bars, series):
+        for bar, value in zip(bars, series, strict=False):
             if value is None:
                 continue
             stamp = bar.get("timestamp")

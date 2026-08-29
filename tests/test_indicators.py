@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import datetime as _dt
+
 from oaa.data.indicators import (
+    IV_RANK_MIN_OBSERVATIONS,
     adx,
     atr,
     ema,
@@ -11,6 +14,7 @@ from oaa.data.indicators import (
     trend_strength,
     volume_ratio,
 )
+from oaa.data.iv_history import IVHistoryStore
 
 
 def test_indicators_return_none_when_starved():
@@ -67,10 +71,6 @@ def test_volume_ratio(bars):
 # in-memory list of intraday polls that reset on every restart. Same gate, same
 # name, two different numbers.
 # --------------------------------------------------------------------------- #
-import datetime as _dt
-
-from oaa.data.indicators import IV_RANK_MIN_OBSERVATIONS, iv_rank
-from oaa.data.iv_history import IVHistoryStore
 
 
 def test_an_unmeasurable_iv_rank_is_none_not_a_guess():

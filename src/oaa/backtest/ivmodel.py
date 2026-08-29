@@ -50,7 +50,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from oaa.data.indicators import iv_rank as iv_rank_of, vol_estimator
+from oaa.data.indicators import iv_rank as iv_rank_of
+from oaa.data.indicators import vol_estimator
 
 
 @dataclass

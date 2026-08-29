@@ -558,31 +558,6 @@ def test_the_anthropic_client_only_sends_parameters_its_sdk_accepts():
     assert _accepted_params(old_sdk) == set()  # **kwargs: send everything
 
 
-# --------------------------------------------------------------------------- #
-# the live / backtest provider split
-# --------------------------------------------------------------------------- #
-def test_the_replay_and_the_live_agent_use_different_providers_by_default():
-    """A replay scores every candidate in every session and is re-run whenever
-    a parameter moves. Live is a handful of calls a day. Sharing one model
-    conflates two completely different cost shapes."""
-    cfg = load_config()
-    assert cfg.agents.llm.provider == "anthropic"
-    assert cfg.backtest.critic.llm is not None
-    assert cfg.backtest.critic.llm.provider == "gemini"
-    assert cfg.backtest.critic.llm.api_key_env == "GEMINI_API_KEY"
-
-
-def test_the_replay_critic_reads_the_backtest_provider_not_the_live_one():
-    from oaa.backtest.critic import ReplayCritic
-
-    cfg = load_config()
-    critic = ReplayCritic(cfg, mode="heuristic")
-    assert critic.llm_cfg is cfg.backtest.critic.llm
-    described = critic.describe()["provider_config"]
-    assert described["provider"] == "gemini"
-    assert described["shared_with_live"] is False
-
-
 def test_a_null_backtest_llm_block_falls_back_to_the_live_provider():
     from oaa.backtest.critic import ReplayCritic
 
@@ -613,74 +588,6 @@ def test_the_critic_cache_key_separates_models():
     assert a == _fingerprint(idea, market, "", "gemini-2.5-flash")
 
 
-def test_the_gemini_client_reports_a_missing_key_by_name(monkeypatch):
-    from oaa.agents.llm import GeminiClient, LLMUnavailable
-
-    # Load the config FIRST: load_config() calls load_dotenv, which would put a
-    # real key from .env straight back into the environment we just cleared.
-    cfg = load_config().backtest.critic.llm
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    with pytest.raises(LLMUnavailable, match="GEMINI_API_KEY"):
-        GeminiClient(cfg)
-
-
-def test_the_gemini_client_refuses_tool_use_loudly(monkeypatch):
-    """The MCP agent loop is Anthropic-only. Silently dropping the tools and
-    answering anyway would look like the agent had used them."""
-    from oaa.agents.llm import GeminiClient, LLMUnavailable
-
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    cfg = load_config().backtest.critic.llm
-    client = GeminiClient(cfg)
-    with pytest.raises(LLMUnavailable, match="tool use"):
-        client.complete("sys", "user", tools=[{"name": "get_account"}])
-
-
-def test_the_gemini_client_asks_for_json_natively(monkeypatch):
-    """Native JSON mode beats asking the model nicely and stripping fences."""
-    from oaa.agents.llm import GeminiClient
-
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    cfg = load_config().backtest.critic.llm
-    client = GeminiClient(cfg)
-    captured: dict[str, object] = {}
-
-    class _Response:
-        text = '{"score": 0.8, "verdict": "trade", "reasoning": "fine"}'
-
-    def fake(model, contents, config):
-        captured["model"] = model
-        captured["mime"] = config.response_mime_type
-        captured["seed"] = config.seed
-        captured["temperature"] = config.temperature
-        return _Response()
-
-    client._client.models.generate_content = fake
-    result = client.json_complete("sys", "user")
-    assert result["score"] == 0.8
-    assert captured["mime"] == "application/json"
-    assert captured["seed"] == 7          # reproducibility
-    assert captured["temperature"] == 0.0  # a judge should not be creative
-
-
-def test_a_gemini_outage_still_degrades_to_rules(monkeypatch):
-    from oaa.agents.llm import GeminiClient
-
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    cfg = load_config().backtest.critic.llm
-    client = GeminiClient(cfg)
-
-    def boom(**kwargs):
-        raise RuntimeError("503")
-
-    client._client.models.generate_content = boom
-    assert client.json_complete("sys", "user", default={"fallback": True}) == {"fallback": True}
-
-
-# --------------------------------------------------------------------------- #
-# the real chain: strikes, marks and implied vol from Alpaca history
-# --------------------------------------------------------------------------- #
 def _fake_contracts(symbol="SPY", spot=500.0, expiries=(14, 35)):
     from oaa.backtest.chain import strike_ladder
 

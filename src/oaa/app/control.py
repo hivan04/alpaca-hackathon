@@ -90,7 +90,7 @@ def render_control(settings_for: dict[str, Any]) -> None:
     # --- who am I about to change? ------------------------------------- #
     header = st.columns([3, 2, 2])
     header[0].markdown("**Strategy**")
-    for col, (profile, label, note) in zip(header[1:], ACCOUNTS):
+    for col, (profile, label, note) in zip(header[1:], ACCOUNTS, strict=False):
         settings = settings_for.get(profile)
         if settings is None:
             col.markdown(f"**{label}**\n\n:red[not loaded]")
@@ -147,7 +147,7 @@ def render_control(settings_for: dict[str, Any]) -> None:
         row[0].markdown(f"**{title}**")
         row[0].caption(spec["blurb"])
 
-        for col, (profile, label, _) in zip(row[1:], ACCOUNTS):
+        for col, (profile, label, _) in zip(row[1:], ACCOUNTS, strict=False):
             board = boards.get(profile)
             if board is None:
                 col.write("—")

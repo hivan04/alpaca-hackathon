@@ -42,6 +42,7 @@ from oaa.config.loader import Settings
 from oaa.core import clock
 from oaa.core.errors import DataError, StrategyError
 from oaa.core.logging import get_logger
+from oaa.core.switchboard import Switchboard
 from oaa.core.types import (
     AccountSnapshot,
     Decision,
@@ -60,7 +61,6 @@ from oaa.partners.base import PartnerHub
 from oaa.risk.engine import RiskEngine
 from oaa.signals.catalyst import CatalystEngine, MacroCalendar
 from oaa.signals.gates import parse_utc
-from oaa.core.switchboard import Switchboard
 from oaa.strategies.base import Strategy, StrategyContext, load_strategies
 from oaa.telemetry.costs import CostModel
 from oaa.telemetry.journal import Journal
