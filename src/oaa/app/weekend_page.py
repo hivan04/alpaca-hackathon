@@ -27,7 +27,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from oaa.app.theme import palette, style
+from oaa.app.theme import is_dark, palette, style
 from oaa.strategies.weekend.clock import WindowPhase
 
 UTC = dt.timezone.utc
@@ -173,7 +173,7 @@ def _forward_curve(
 
 # --------------------------------------------------------------------------- #
 def render_weekend(settings: Any) -> None:
-    colours = palette(str(st.get_option("theme.base") or "light").lower() == "dark")
+    colours = palette(is_dark())
     try:
         params = _params()
     except Exception as exc:  # noqa: BLE001

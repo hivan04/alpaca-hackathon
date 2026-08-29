@@ -1,5 +1,17 @@
 # Streamlit theme for the dashboard (`oaa dashboard` / `streamlit run`).
-# primaryColor is the accent Streamlit uses for selected tabs, widget
-# highlights, focus rings, links and slider tracks.
+#
+# primaryColor is the accent Streamlit uses for its own chrome: selected tabs,
+# widget highlights, focus rings, links, slider tracks. The sidebar "Dark mode"
+# toggle flips theme.base at runtime, so both sections below matter - the dark
+# value is the same hue lifted for legibility on a dark surface. These must stay
+# in step with ACCENT_LIGHT / ACCENT_DARK in src/oaa/app/theme.py, which colour
+# the Plotly charts.
 [theme]
+base = "light"
 primaryColor = "#1388a8"
+
+[theme.light]
+primaryColor = "#1388a8"
+
+[theme.dark]
+primaryColor = "#4cc4de"

@@ -69,7 +69,7 @@ import streamlit as st  # noqa: E402
 from oaa.app import identity as ident  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
 from oaa.app.positions import render_positions  # noqa: E402
-from oaa.app.theme import palette, style  # noqa: E402
+from oaa.app.theme import is_dark, mode_toggle, palette, style  # noqa: E402
 from oaa.app.weekend_page import render_weekend  # noqa: E402
 from oaa.core.errors import DataError  # noqa: E402
 
@@ -179,10 +179,8 @@ def _check_stale(settings: Any) -> None:
 
 
 def _dark() -> bool:
-    try:
-        return str(st.get_option("theme.base") or "light").lower() == "dark"
-    except Exception:  # noqa: BLE001
-        return False
+    """Whether to draw dark. Set by the sidebar toggle - see oaa.app.theme."""
+    return is_dark()
 
 
 # --------------------------------------------------------------------------- #
@@ -1266,6 +1264,7 @@ def main() -> None:
     )
     with st.sidebar:
         st.title("Options Alpha Agents")
+        mode_toggle()
         profile = st.selectbox(
             "Account profile", ["dev", "judged"],
             help=(
