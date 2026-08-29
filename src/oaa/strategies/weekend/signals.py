@@ -150,6 +150,25 @@ def expected_reversion_bp(z: float, sigma: float, exit_z: float) -> float:
 # --------------------------------------------------------------------------- #
 # the stack
 # --------------------------------------------------------------------------- #
+def required_bars(params: WeekendParams) -> int:
+    """How much history the stack actually reads.
+
+    Everything here is a rolling window: the z-score reads `lookback_bars`, the
+    Wilder ADX converges in a few multiples of its period, and the slope looks
+    back eight bars. Nothing needs the whole series - and feeding it the whole
+    series is not merely wasteful, it makes the replay diverge from the live
+    book, which only ever fetches a few days of bars.
+    """
+    sp = params.signal
+    return max(sp.min_bars, sp.lookback_bars + 1, sp.adx_period * 4 + 20)
+
+
+def window_of(bars: Sequence[Bar], params: WeekendParams, upto: int) -> Sequence[Bar]:
+    """The bounded slice ending at `upto` (inclusive) that the stack should see."""
+    need = required_bars(params) + 40
+    return bars[max(0, upto + 1 - need) : upto + 1]
+
+
 def evaluate(symbol: str, bars: Sequence[Bar], params: WeekendParams) -> WeekendSignal:
     """Run every gate. Never raises: a bad read is a rejection, not a crash."""
     sp = params.signal

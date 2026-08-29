@@ -16,12 +16,21 @@
 # Long only, and that is a venue fact: Alpaca does not permit short crypto. The
 # rich side of the band is an exit, never an entry.
 #
-# The binding constraint
-#   Crypto fees are a percentage of notional, not a per-contract charge. A
-#   round trip costs ~54bp all-in on the model in `costs` below. A 2-sigma
-#   reversion on a 40bp band is worth 70bp gross - not enough. The `edge` gate
-#   refuses anything under 2.5x the round trip, and it is expected to reject
-#   more candidates than every other gate combined.
+# The binding constraint, and it is not the signal
+#   Crypto fees are a percentage of notional, not a per-contract charge: ~54bp
+#   a round trip. Measured over 58 weekends, the reversion after a -2.5 sigma
+#   reading is worth +79bp gross - so roughly two thirds of the edge is paid
+#   away in friction, and the strategy is turnover-bounded rather than
+#   signal-bounded. Relaxing the gates to trade more turns it negative: at 35
+#   trades the modelled costs ($1,390) exceed the gross P&L ($1,233).
+#
+# What this book is, honestly
+#   At these settings it took SIX trades in 58 weekends: +$283 on $100k, or
+#   +28bp over thirteen months. It is a rigour artefact and a source of
+#   uncorrelated optionality, not a P&L engine, and the expected contribution
+#   to any single judged week is approximately zero. The parameters above were
+#   chosen on the same 58 weekends they are quoted against; six trades is not
+#   a distribution, and nothing here should be sized as though it were.
 # =============================================================================
 
 enabled: false          # `oaa weekend run --live` also requires this to be true
@@ -49,15 +58,29 @@ window:
 signal:
   timeframe: "15Min"
   lookback_bars: 96        # 24 hours - a full crypto day, not a few thin hours
-  entry_z: 2.0
+  # --- calibrated 29 Aug against 58 weekends of Alpaca BTC history ---------
+  # `oaa weekend edge --days 400` measured forward returns after every
+  # in-window reading. The traded bucket, ADX < 25:
+  #     z <= -2.5, 8h horizon:  +79bp gross, 88% hit, +25bp net of costs
+  #                             11 independent episodes across 11 weekends
+  # The same bucket with ADX >= 25: +15bp gross, -39bp net, t = -0.3. The
+  # regime gate is doing real work, and `oaa weekend backtest` confirms it
+  # end to end - as the ADX ceiling is relaxed the hit rate falls monotonically
+  # 100% -> 83% -> 70% -> 61% -> 51% and net P&L goes +$283 -> -$157.
+  entry_z: 2.5             # 2.0 was measured at -2bp net; 2.5 at +25bp
   exit_z: -0.25            # take the reversion just short of the mean
-  adx_max: 25.0            # the regime gate: above this it is a trend
+  adx_max: 25.0            # LOAD-BEARING - see above, not a decoration
   adx_period: 14
-  adx_slope_max: 4.0       # and it must not be a trend in the making
-  min_sigma: 0.0035        # below this the band cannot pay the round trip
+  # 99 = off. The slope gate was blocking 4 of the 6 qualifying trades in the
+  # 58-weekend replay (+$144 with it, +$283 without) - it was standing the book
+  # down on the ADX rise that the dislocation itself causes. Kept as a knob
+  # rather than deleted, because on a longer sample it may earn its place.
+  adx_slope_max: 99.0
+  min_sigma: 0.0015        # measured weekend sigma is 0.12-0.72%; 0.35% was
+                           # above the whole distribution and vetoed everything
   max_sigma: 0.030         # above this the fitted mean is meaningless
   shock_bar_return: 0.015  # do not catch a knife inside a liquidation cascade
-  min_edge_multiple: 2.5   # THE gate: expected reversion vs modelled cost
+  min_edge_multiple: 1.2   # THE gate: expected reversion vs modelled cost
   min_bars: 120
 
 # -----------------------------------------------------------------------------
@@ -69,7 +92,10 @@ exits:
   atr_stop_multiple: 1.5
   min_stop_pct: 0.008
   max_stop_pct: 0.035
-  max_hold_hours: 10.0
+  # 8, from the edge study: the reversion is worth +11bp at 1h, +36bp at 2h,
+  # +54bp at 4h and +79bp at 8h. It builds the whole way, so the horizon is the
+  # window's, not the signal's - and 8h still leaves runway before the flatten.
+  max_hold_hours: 8.0
   cooldown_hours: 6.0      # a stop means the regime read was wrong; sit out
 
 # -----------------------------------------------------------------------------

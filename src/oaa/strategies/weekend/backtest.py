@@ -31,7 +31,12 @@ from oaa.core.logging import get_logger
 from oaa.strategies.weekend.clock import WindowPhase
 from oaa.strategies.weekend.data import bar_time, cached_bars
 from oaa.strategies.weekend.params import WeekendParams
-from oaa.strategies.weekend.signals import evaluate, stop_price, target_price
+from oaa.strategies.weekend.signals import (
+    evaluate,
+    stop_price,
+    target_price,
+    window_of,
+)
 
 log = get_logger("weekend.backtest")
 UTC = dt.timezone.utc
@@ -177,14 +182,28 @@ def run_backtest(
     days: int = 365,
     equity: float = 100_000.0,
     end: dt.datetime | None = None,
+    start: dt.datetime | None = None,
     bars: Sequence[Bar] | None = None,
     refresh: bool = False,
 ) -> BacktestResult:
+    """`start` wins over `days` when both are given.
+
+    A single-weekend replay is a legitimate request - "what would it have done
+    last Saturday" - but note what it is: one sample. The summary reports
+    `weekends` so a result computed from one of them is never mistaken for a
+    distribution.
+    """
     symbol = symbol or params.symbols[0]
     end = end or dt.datetime.now(UTC)
-    start = end - dt.timedelta(days=days)
+    start = start or (end - dt.timedelta(days=days))
+    # The signal needs a 24h mean and a Wilder ADX before the window even
+    # opens, so the DATA range is padded backwards past the replay range. Only
+    # entries are confined to the window; the lookback may - and must - reach
+    # into the weekday tape that formed the mean.
+    warmup_bars = max(params.signal.min_bars, params.signal.lookback_bars + 1) + 40
+    pad = dt.timedelta(minutes=15 * warmup_bars)
     series = list(bars) if bars is not None else cached_bars(
-        symbol, params.signal.timeframe, start, end, refresh=refresh
+        symbol, params.signal.timeframe, start - pad, end, refresh=refresh
     )
     if len(series) < params.signal.min_bars + 10:
         raise ValueError(f"only {len(series)} bars for {symbol}; need history to replay")
@@ -230,7 +249,11 @@ def run_backtest(
             continue
 
         result.bars_scanned += 1
-        signal = evaluate(symbol, series[: i + 1], params)
+        # A BOUNDED window, not the whole prefix. Passing series[:i+1] made the
+        # replay quadratic - at bar 38,000 every ADX call walked 38,000 bars -
+        # and, worse, gave the replay a longer memory than the live book, which
+        # fetches only a few days. Same slice on both sides now.
+        signal = evaluate(symbol, window_of(series, params, i), params)
         if not signal.actionable:
             result.gate_rejections[signal.blocked_by or "unknown"] += 1
             continue

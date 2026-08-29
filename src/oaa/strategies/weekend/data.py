@@ -132,6 +132,15 @@ def bar_time(bar: Bar) -> dt.datetime:
 # --------------------------------------------------------------------------- #
 # a tiny disk cache, so a backtest re-run costs nothing
 # --------------------------------------------------------------------------- #
+class InsufficientHistory(RuntimeError):
+    """The cache cannot cover the range asked for.
+
+    Raised rather than logged. A study that asks for 400 days, silently
+    receives 10, and prints a 100%-hit-rate table with a t-stat of 14 is worse
+    than one that fails: the numbers look like evidence and are one weekend.
+    """
+
+
 def cached_bars(
     symbol: str,
     timeframe: str,
@@ -139,6 +148,7 @@ def cached_bars(
     end: dt.datetime,
     cache_dir: str | Path = "data/cache/weekend",
     refresh: bool = False,
+    min_coverage: float = 0.6,
 ) -> list[Bar]:
     """Bars for [start, end), served from disk when disk can cover it.
 
@@ -155,7 +165,12 @@ def cached_bars(
     stem = f"{symbol.replace('/', '')}_{timeframe}"
     path = directory / f"{stem}_{start:%Y%m%d}_{end:%Y%m%d}.json"
 
+    best: tuple[float, str, str, str] | None = None   # (coverage, name, from, to)
     if not refresh:
+        # Try EVERY candidate before giving up. Filenames sort by their start
+        # date, so the longest history is not necessarily first - an early
+        # `raise` here meant a freshly downloaded 410-day file was skipped in
+        # favour of a 10-day one that happened to sort later.
         for candidate in [path, *sorted(directory.glob(f"{stem}_*.json"), reverse=True)]:
             if not candidate.exists():
                 continue
@@ -169,14 +184,34 @@ def cached_bars(
             sliced = [b for b in bars if start <= bar_time(b) <= end]
             if len(sliced) < 100:
                 continue
-            covered = bar_time(bars[0])
-            if covered > start + dt.timedelta(days=2):
-                log.warning(
-                    "%s starts at %s, later than the requested %s - replaying the "
-                    "shorter window", candidate.name, covered.date(), start.date()
-                )
-            log.info("served %d bars from %s", len(sliced), candidate.name)
+            covered_from, covered_to = bar_time(bars[0]), bar_time(bars[-1])
+            asked = (end - start).total_seconds()
+            have = (min(covered_to, end) - max(covered_from, start)).total_seconds()
+            coverage = have / asked if asked > 0 else 1.0
+            if coverage < min_coverage:
+                if best is None or coverage > best[0]:
+                    best = (
+                        coverage, candidate.name,
+                        f"{covered_from:%Y-%m-%d}", f"{covered_to:%Y-%m-%d}",
+                    )
+                continue
+            log.info(
+                "served %d bars from %s (%s -> %s)",
+                len(sliced), candidate.name, covered_from.date(), covered_to.date(),
+            )
             return sliced
+
+    if best is not None:
+        coverage, name, covered_from, covered_to = best
+        asked_days = (end - start).total_seconds() / 86400
+        raise InsufficientHistory(
+            f"asked for {symbol} {timeframe} from {start:%Y-%m-%d} to {end:%Y-%m-%d} "
+            f"({asked_days:.0f} days); the best cache file ({name}) covers "
+            f"{covered_from} to {covered_to} ({coverage * asked_days:.0f} days). "
+            f"Refusing to substitute the shorter window silently - a study run on it "
+            f"would report one weekend as if it were a distribution.\n\n"
+            f"    python3 scripts/fetch_weekend_bars.py --days {int(asked_days) + 10}\n"
+        )
 
     try:
         bars = fetch_bars(symbol=symbol, timeframe=timeframe, start=start, end=end)

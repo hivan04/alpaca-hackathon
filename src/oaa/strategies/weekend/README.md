@@ -118,15 +118,60 @@ oaa weekend flatten --live          close every crypto position now
 History for the replay comes from `scripts/fetch_weekend_bars.py`, which caches
 bars to `data/cache/weekend/` so a backtest is reproducible offline.
 
-## What would falsify this
+## What the evidence says (58 weekends, measured 29 Aug)
 
-Honest failure modes, in the order they are likely:
+`oaa weekend edge --days 400` measures forward returns after every in-window
+reading — no entry rule, no stop, no sizing. Overlapping bars inside one
+dislocation are collapsed into independent episodes, and the t-statistic is
+computed on those alone.
 
-1. **The edge gate never fires.** If 400 days of history produce three trades,
-   the band is too tight to pay 54bp and the book should not run.
-2. **ADX below 25 does not mean reverting.** The regime gate is a hypothesis.
-   The backtest reports hit rate conditioned on it; if it is 50%, the gate is
-   decoration.
-3. **Weekend spreads are wider than 4bp.** Then the cost model is optimistic
-   and every number above shifts against the book. `oaa weekend scan` prints
-   the live spread — measure it before trusting the default.
+| z bucket | regime | 8h forward | hit | net of 54bp | episodes / weekends |
+|---|---|---|---|---|---|
+| z ≤ −2.5 | **ranging** | **+79bp** | 88% | **+25bp** | 11 / 11 |
+| z ≤ −2.5 | trending | +15bp | 53% | −39bp | 22 / 20 |
+| −2.5 < z ≤ −2 | ranging | +52bp | 89% | −2bp | 15 / 15 |
+| −2.5 < z ≤ −2 | trending | +2bp | 54% | −52bp | 34 / 28 |
+
+Unconditional forward return over the same bars: **+1bp**. So the z-score
+carries information, and it carries it *only in the ranging regime* — the ADX
+gate is load-bearing, not decoration.
+
+The end-to-end replay says the same thing as the gate is relaxed:
+
+| ADX gate | trades | hit rate | net P&L | modelled costs |
+|---|---|---|---|---|
+| ADX < 25 (shipped) | 6 | 83% | **+$283** | $232 |
+| ADX < 25, looser bands | 10 | 70% | +$228 | $369 |
+| ADX < 30 | 18 | 61% | +$62 | $694 |
+| no ADX gate | 35 | 51% | **−$157** | $1,390 |
+
+Hit rate falls monotonically with turnover and the P&L crosses zero. At 35
+trades the costs ($1,390) exceed the gross ($1,233): **this strategy is
+turnover-bounded, not signal-bounded.** That single table is the argument for
+every gate in the stack.
+
+## What this book actually is
+
+Six trades in 58 weekends. +$283 on $100k — **+28bp over thirteen months**, at
+0.1 trades per weekend. Uncorrelated with the options books and effectively
+free to run, but the expected contribution to any single judged week is
+approximately zero, and it should be presented that way rather than as a P&L
+engine.
+
+The honest caveats, stated once: the parameters were chosen on the same 58
+weekends they are quoted against; six trades is not a distribution; and the
+best traded bucket carries t = +1.7 on 11 episodes, which is a direction, not a
+proof. The cost model is also the selectivity dial rather than only a
+deduction — assuming *higher* costs makes the edge gate stricter and, in this
+sample, raises net P&L. Any P&L number here should be read as "the machinery
+works and the gates are doing something real", not as an expected return.
+
+## What would still falsify it
+
+1. **Weekend spreads are wider than 4bp.** The whole cost line moves and the
+   +25bp net becomes negative. `oaa weekend scan` prints the live half-spread
+   against the assumption — measure it before trusting the default.
+2. **The ranging edge does not survive another year.** 11 episodes is thin.
+3. **The 8-hour horizon is a fit.** The reversion builds monotonically (+11bp
+   at 1h → +79bp at 8h), which is reassuring, but 8h is also the longest
+   horizon the weekend window allows — the study cannot see past its own edge.
