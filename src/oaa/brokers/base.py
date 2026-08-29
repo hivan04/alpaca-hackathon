@@ -62,6 +62,16 @@ class Broker(abc.ABC):
     def order_status(self, order_id: str) -> Fill | None:
         raise NotImplementedError
 
+    def orders(self, limit: int = 200, after: Any = None) -> list[dict[str, Any]]:
+        """Order history as plain rows, newest first. Signature matches the
+        REST backend's, which is the one that can actually answer it.
+
+        Optional by design: a backend that cannot read history returns nothing
+        rather than raising, so a dashboard panel degrades to an empty table
+        instead of taking the page down with an AttributeError.
+        """
+        return []
+
     # -- helpers shared by every backend ---------------------------------- #
     @staticmethod
     def client_order_id(idea: TradeIdea, suffix: str = "") -> str:

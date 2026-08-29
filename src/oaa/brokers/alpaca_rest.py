@@ -287,7 +287,15 @@ class AlpacaRestBroker(Broker):
                     "qty": _maybe_float(getattr(item, "qty", None)) or 0.0,
                     "filled_qty": filled_qty,
                     "filled_avg_price": price,
-                    "notional": round(price * filled_qty * 100, 2) if price else None,
+                    # x100 is the OPTION contract multiplier and applies to
+                    # nothing else. A 0.0043 BTC fill at $70k is $301 of
+                    # notional, not $30,100 - and a crypto row inflated by two
+                    # orders of magnitude next to real option rows is the kind
+                    # of number an operator acts on before questioning.
+                    "notional": (
+                        round(price * filled_qty * (100 if is_occ(symbol) else 1), 2)
+                        if price else None
+                    ),
                     "status": str(getattr(getattr(item, "status", None), "value", "") or ""),
                     "order_type": str(getattr(getattr(item, "order_type", None), "value", "") or ""),
                     "order_id": str(getattr(item, "id", "") or ""),
