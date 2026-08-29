@@ -38,8 +38,17 @@ from oaa.strategies.weekend.costs import CryptoCostModel
 from oaa.strategies.weekend.params import WeekendParams, load_params
 from oaa.strategies.weekend.signals import WeekendSignal, evaluate
 
+# Imported for its REGISTRATION side effect, and this line is load-bearing.
+# `Registry.autoload` walks `oaa.strategies` with pkgutil, which yields this
+# subpackage and imports this file - but nothing deeper. Without the import
+# below, `@strategy_registry.register("weekend_crypto_reversion")` never runs,
+# and the moment an operator flips the Control tab toggle the runner raises
+# "unknown strategy" while holding live positions.
+from oaa.strategies.weekend.strategy import WeekendCryptoReversion  # noqa: E402
+
 __all__ = [
     "CryptoCostModel",
+    "WeekendCryptoReversion",
     "WeekendParams",
     "WeekendSignal",
     "WeekendWindow",

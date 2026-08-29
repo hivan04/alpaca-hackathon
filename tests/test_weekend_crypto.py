@@ -524,3 +524,117 @@ def test_levels_survive_a_restart(tmp_path, params) -> None:
     reloaded = WeekendState.load(path)
     assert reloaded.position is not None
     assert (reloaded.position.stop, reloaded.position.target) == (59_000.0, 61_500.0)
+
+
+# --------------------------------------------------------------------------- #
+# the Control tab's switch
+# --------------------------------------------------------------------------- #
+def test_the_weekend_book_is_wired_into_the_strategy_list() -> None:
+    """The Control tab keys off `config.strategies`. A strategy that is only
+    registered shows as 'not wired' and its toggle does nothing - which is
+    exactly as useless as having no toggle."""
+    from oaa.config.loader import load_config
+
+    refs = {r.name: r for r in load_config().strategies}
+    assert "weekend_crypto_reversion" in refs, "not wired: the toggle would be inert"
+    ref = refs["weekend_crypto_reversion"]
+    assert ref.book == "weekend"
+    assert ref.enabled is False, "live trading stays opt-in"
+
+
+def test_switching_the_book_off_stops_it_opening(tmp_path, params) -> None:
+    from oaa.core.switchboard import Switchboard
+    from oaa.strategies.weekend.engine import STRATEGY_NAME, WeekendEngine
+
+    board = Switchboard.open(tmp_path)
+    board.set(STRATEGY_NAME, False, actor="test")
+
+    params.enabled = True
+    engine = WeekendEngine(
+        params, _FakeBroker(), state_path=tmp_path / "state.json", run_dir=tmp_path
+    )
+    assert engine.switched_on() is False
+    report = engine.cycle(now=dt.datetime(2026, 8, 29, 12, 0, tzinfo=UTC))  # Saturday
+    assert report.action == "off"
+    assert not engine.broker.submitted
+
+
+def test_a_switched_off_book_still_flattens_what_it_holds(tmp_path, params) -> None:
+    """An off switch that abandoned an open BTC position with a live stop -
+    through a Sunday, picked up by nobody until Monday - would be worse than
+    the mistake it prevents."""
+    from oaa.core.switchboard import Switchboard
+    from oaa.strategies.weekend.engine import STRATEGY_NAME, WeekendEngine
+
+    board = Switchboard.open(tmp_path)
+    board.set(STRATEGY_NAME, False, actor="test")
+
+    params.execution.dry_run = False
+    broker = _FakeBroker(positions=[_crypto_position()])
+    engine = WeekendEngine(
+        params, broker, state_path=tmp_path / "state.json", run_dir=tmp_path
+    )
+    report = engine.cycle(now=dt.datetime(2026, 8, 30, 20, 30, tzinfo=UTC))
+    assert report.phase is WindowPhase.FLATTEN
+    assert broker.closed == [("BTCUSD", 0.0043)]
+
+
+def test_an_absent_switchboard_leaves_the_yaml_in_charge(tmp_path, params) -> None:
+    from oaa.strategies.weekend.engine import WeekendEngine
+
+    params.enabled = True
+    engine = WeekendEngine(
+        params, _FakeBroker(), state_path=tmp_path / "state.json", run_dir=tmp_path
+    )
+    assert engine.switched_on() is True
+    params.enabled = False
+    assert engine.switched_on() is False
+
+
+def test_flipping_the_toggle_cannot_raise_unknown_strategy() -> None:
+    """`Registry.autoload` walks `oaa.strategies` and imports this subpackage's
+    __init__ but nothing deeper, so the registration only happens because that
+    __init__ imports `.strategy`. Without it, the first operator to flip the
+    Control tab toggle takes down a runner that is holding live positions."""
+    from oaa.config.loader import load_config
+    from oaa.strategies.base import load_strategies
+
+    built = load_strategies(load_config(), include={"weekend_crypto_reversion"})
+    names = {s.name for s in built}
+    assert "weekend_crypto_reversion" in names
+
+
+def test_the_options_runner_never_trades_the_weekend_book() -> None:
+    """Switched on, it is BUILT so its exit rules are available - but it must
+    not appear in any of the three books the equity cycles trade."""
+    from oaa.config.loader import load_config
+    from oaa.strategies.base import load_strategies
+
+    built = load_strategies(load_config(), include={"weekend_crypto_reversion"})
+    equity_books = [
+        s.name for s in built
+        if s.capital_book in {"carry", "intraday", "opportunistic"}
+    ]
+    assert "weekend_crypto_reversion" not in equity_books
+
+
+def test_the_strategy_refuses_an_equity_symbol_even_if_someone_wires_it_in() -> None:
+    """The second interlock, asserted directly: no slash, no trade."""
+    from oaa.config.schema import Config, StrategyRef
+    from oaa.core.types import AccountSnapshot, MarketContext
+    from oaa.strategies.base import StrategyContext
+    from oaa.strategies.weekend.strategy import WeekendCryptoReversion
+
+    ref = StrategyRef(name="weekend_crypto_reversion", book="weekend")
+    strategy = WeekendCryptoReversion(ref, Config())
+    ctx = StrategyContext(
+        account=AccountSnapshot(equity=100_000.0),
+        config=Config(),
+        market=MarketContext(
+            symbol="SPY",
+            asof=dt.datetime(2026, 8, 29, 12, 0, tzinfo=UTC),  # inside the window
+            spot=600.0,
+            intraday_bars=make_bars(kind="range"),
+        ),
+    )
+    assert strategy.generate(ctx) == []

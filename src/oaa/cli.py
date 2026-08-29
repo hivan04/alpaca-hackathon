@@ -1467,12 +1467,16 @@ def weekend_run(
             raise typer.Exit(1)
         params.execution.dry_run = False
     settings, broker, _data = _boot(profile, config)
-    engine = WeekendEngine(params, broker, journal=_journal(settings))
+    run_dir = getattr(settings.config.telemetry, "run_dir", None)
+    engine = WeekendEngine(
+        params, broker, journal=_journal(settings), run_dir=run_dir
+    )
 
     console.print(
         Panel(
             f"{params.describe()}\nprofile={settings.config.profile} "
-            f"dry_run={params.execution.dry_run}",
+            f"dry_run={params.execution.dry_run} "
+            f"switch={'ON' if engine.switched_on() else 'OFF'}",
             title="weekend runner",
         )
     )
@@ -1682,7 +1686,10 @@ def weekend_flatten(
     if live:
         params.execution.dry_run = False
     settings, broker, _data = _boot(profile, config)
-    engine = WeekendEngine(params, broker, journal=_journal(settings))
+    engine = WeekendEngine(
+        params, broker, journal=_journal(settings),
+        run_dir=getattr(settings.config.telemetry, "run_dir", None),
+    )
     console.print(f"closed {engine.flatten('manual')} crypto position(s)")
 
 

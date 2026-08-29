@@ -50,8 +50,10 @@ STRATEGIES: list[dict[str, Any]] = [
     {
         "name": "weekend_crypto_reversion",
         "title": "Weekend crypto",
-        "blurb": "Weekend reversion in crypto. Not yet wired into the strategy "
-                 "list - the switch is remembered until it is.",
+        "blurb": "Long BTC/USD at -2.5 sigma from its 24h mean, ADX < 25, flat "
+                 "by Sunday 20:00 UTC. Runs in its own process (`oaa weekend "
+                 "run`), which reads this same switch. Six trades in 58 "
+                 "weekends: uncorrelated optionality, not a P&L engine.",
     },
 ]
 

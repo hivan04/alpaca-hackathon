@@ -44,6 +44,17 @@ class Book(str, Enum):
     CARRY = "carry"
     INTRADAY = "intraday"
     OPPORTUNISTIC = "opportunistic"
+    #: Spot crypto, traded by its own process between the Friday equity close
+    #: and the Sunday flatten. It never leases capital here - its window cannot
+    #: overlap a session, so there is no Reg T to share - but it is listed so
+    #: that `config.strategies` stays inside the set of books the firewall
+    #: knows, and so that `Book.parse` does not silently relabel it.
+    #:
+    #: It is deliberately NOT resident. If a crypto position is somehow still
+    #: alive when an equity session opens, the 15:15 cutoff treating it as a
+    #: transient tenant and closing it is exactly the behaviour wanted; a
+    #: resident label would leave it sitting there.
+    WEEKEND = "weekend"
 
     @property
     def is_transient(self) -> bool:

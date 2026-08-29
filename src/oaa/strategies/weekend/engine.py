@@ -19,6 +19,16 @@ options ledger uses.
 Exits are enforced here rather than resting at the broker on purpose: a resting
 stop on a 24/7 venue can be swept by a two-second wick that never trades a
 share of size. Polling every 60s costs a little slippage and avoids that.
+
+The switchboard
+---------------
+This loop reads the same `runs/<profile>/switchboard.json` the options runner
+reads, and the Control tab writes. The toggle means what it means everywhere
+else in this system: switching the book OFF stops it OPENING, and does not
+touch what it already holds. An off switch that abandoned an open BTC position
+with a live stop - through a Sunday, to be picked up by nobody until Monday -
+would be worse than the mistake it prevents. So a switched-off cycle still
+manages, still stops out, and still flattens at the cutoff.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from oaa.core.logging import get_logger
+from oaa.core.switchboard import Switchboard
 from oaa.core.types import (
     AssetKind,
     Decision,
@@ -49,6 +60,8 @@ from oaa.strategies.weekend.strategy import build_idea
 log = get_logger("weekend.engine")
 UTC = dt.timezone.utc
 STATE_PATH = "runs/weekend_state.json"
+#: The name the Control tab's toggle and config/default.yaml both use.
+STRATEGY_NAME = "weekend_crypto_reversion"
 
 
 @dataclass
@@ -133,12 +146,23 @@ class WeekendEngine:
         broker: Any,
         journal: Any = None,
         state_path: str | Path = STATE_PATH,
+        run_dir: str | Path | None = None,
     ) -> None:
         self.params = params
         self.broker = broker
         self.journal = journal
         self.state_path = state_path
         self.state = WeekendState.load(state_path)
+        #: Per-account, re-read on every cycle. `run_dir` is the profile's own
+        #: telemetry directory, so the dev and judged switchboards stay as
+        #: separate as their credentials.
+        self.switchboard = Switchboard.open(run_dir)
+
+    # ------------------------------------------------------------------ #
+    def switched_on(self) -> bool:
+        """The runtime switch. Falls back to the YAML's `enabled` when the
+        switchboard has no opinion, so a missing file changes nothing."""
+        return self.switchboard.enabled(STRATEGY_NAME, default=self.params.enabled)
 
     # ------------------------------------------------------------------ #
     def cycle(self, now: dt.datetime | None = None) -> CycleReport:
@@ -146,6 +170,14 @@ class WeekendEngine:
         phase = self.params.window.phase(now)
         report = CycleReport(phase=phase, now=now)
         self.state.last_cycle = now.isoformat()
+
+        if self.switchboard.reload_if_changed():
+            log.info(
+                "switchboard changed: weekend book is %s",
+                "ON" if self.switched_on() else "OFF",
+            )
+            self._journal_event("switchboard", enabled=self.switched_on(),
+                                source=str(self.switchboard.path))
 
         if phase is WindowPhase.CLOSED:
             report.detail = "outside the weekend window"
@@ -160,6 +192,17 @@ class WeekendEngine:
             return report
 
         symbol = self.params.symbols[0]
+
+        # Switched off and holding nothing: there is nothing to manage and
+        # nothing to open, so return before touching the network. A book that
+        # is off should cost no requests. (Holding something is different -
+        # that still needs a price, and is handled below.)
+        if not self.switched_on() and self.state.position is None:
+            report.action = "off"
+            report.detail = "switched off at the Control tab"
+            self._persist()
+            return report
+
         bars = self._bars(symbol)
         quote = latest_quote(symbol)
         price = quote["mid"] if quote else (float(bars[-1]["close"]) if bars else 0.0)
@@ -184,6 +227,14 @@ class WeekendEngine:
             return report
 
         # -- entries, only while fully open -------------------------------- #
+        # Re-checked here, after the exit logic: a book switched off while it
+        # holds a position manages and closes that position, and only then
+        # declines to open a new one.
+        if not self.switched_on():
+            report.action = "off"
+            report.detail = "switched off at the Control tab - managing only"
+            self._persist()
+            return report
         if phase is WindowPhase.MANAGE_ONLY:
             report.detail = "past last entry - exits only"
             self._persist()

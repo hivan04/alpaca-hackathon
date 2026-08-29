@@ -261,7 +261,13 @@ class StrategyRef(Base):
     enabled: bool = True
     weight: float = 1.0
     #: Which capital book this strategy trades from. Gated by the firewall.
-    book: Literal["carry", "intraday", "opportunistic"] = "intraday"
+    #: "weekend" is the odd one out and deliberately so: it runs in its own
+    #: process (`oaa weekend run`) inside a window that cannot overlap an
+    #: equity session, so it never leases capital from the firewall. It is
+    #: listed here anyway because the runtime switchboard keys off the config's
+    #: strategy list - an unlisted strategy shows as "not wired" and its toggle
+    #: does nothing.
+    book: Literal["carry", "intraday", "opportunistic", "weekend"] = "intraday"
     params_file: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
 

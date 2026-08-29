@@ -339,6 +339,18 @@ strategies:
     book: opportunistic
     params_file: "config/strategies/event_premium.yaml"
 
+  # --- WEEKEND BOOK (Fri 20:05 UTC -> Sun 20:00 UTC, its own process) -------
+  # Listed here so the Control tab can switch it, NOT so the options runner can
+  # trade it: `oaa run` only asks for the carry/intraday/opportunistic books,
+  # and the strategy refuses any symbol without a slash and any time outside
+  # its window. The live loop is `oaa weekend run`, which reads the same
+  # switchboard entry this line creates.
+  - name: weekend_crypto_reversion
+    enabled: false
+    weight: 1.0
+    book: weekend
+    params_file: "config/strategies/weekend_crypto.yaml"
+
   # --- opposite-regime strategy: trend present, IV cheap --------------------
   # Shares the trend measurement with vol_carry, which is what keeps the two
   # mutually exclusive. A test asserts they never co-fire.
