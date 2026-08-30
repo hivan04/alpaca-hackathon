@@ -25,6 +25,7 @@ from oaa.data.indicators import (
     volume_ratio,
 )
 from oaa.data.iv_history import IVHistoryStore
+from oaa.data.term_structure import term_structure_from_config
 from oaa.options.occ import parse_occ
 
 log = get_logger("data.alpaca")
@@ -238,6 +239,9 @@ class AlpacaDataProvider(MarketDataProvider):
             realised_vol=vol_estimator(self.cfg.data.volatility_estimator)(history, 20),
             implied_vol=atm_iv,
             iv_rank=iv_rank(atm_iv, self._iv_history.series(symbol)),
+            term_structure=term_structure_from_config(
+                chain, spot, dt.datetime.now(dt.timezone.utc).date(), self.cfg
+            ),
             trend_strength=trend_strength(history),
             adx=adx(history),
             volume_ratio=volume_ratio(history),

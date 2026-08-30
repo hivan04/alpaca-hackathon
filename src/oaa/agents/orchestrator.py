@@ -11,7 +11,22 @@ margin the resident book needs at the close.
     15:15  intraday_cutoff     HARD cutoff: cancel, liquidate TRANSIENT, confirm
     15:45  carry_verify        prove no residual transient exposure, carry margin
                                covered with fresh Reg T headroom
+    15:50  events_arm          the events book: read the sentiment, call the
+                               direction, open into tonight's confirmed prints
     16:10  report
+
+and, first thing the next morning:
+
+    09:45  events_flatten      close what last night's prints have now reported
+
+The events book is the one book here that does NOT hold a firewall lease. Its
+life is a single overnight hold that begins after the 15:15 transient cutoff,
+which is a shape the intraday/carry tenancy model has no phase for. Bending the
+firewall to admit it would weaken the interlock that keeps the day books out of
+the carry book's margin, so instead `_events_engine` builds it a RiskEngine with
+`firewall=None` - identical to what `oaa events arm` has always done - and every
+other guarantee (signed risk stamp, one audited order path, the same journal)
+is unchanged. See `docs/` and the events book README for the full argument.
 
 Within a trading cycle the pipeline is:
 
@@ -261,6 +276,9 @@ class Orchestrator:
             "intraday_cutoff": self.intraday_cutoff,
             "carry_verify": self.carry_verify,
             "submission_flatten": self.submission_flatten,
+            "events_arm": self.events_arm,
+            "events_flatten": self.events_flatten,
+            "events_watch": self.events_watch,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -367,6 +385,7 @@ class Orchestrator:
             self._execute_idea(
                 strategy=strategy, idea=idea, market=market, account=account,
                 cycle=cycle, result=result, market_open=market_open,
+                contexts=contexts,
             )
             account = self._account()
 
@@ -443,6 +462,7 @@ class Orchestrator:
             self._execute_idea(
                 strategy=strategy, idea=idea, market=market, account=account,
                 cycle=cycle, result=result, market_open=market_open,
+                contexts=contexts,
             )
             account = self._account()
 
@@ -466,6 +486,214 @@ class Orchestrator:
                 "transient books did not go flat - carry verification will fail"
             )
             self.risk.halt("15:15 cutoff failed to confirm a flat transient book")
+        self.journal.snapshot(self._account())
+        return result
+
+    # ================================================================== #
+    # THE EVENTS BOOK
+    # ================================================================== #
+    # Two cycles, and a different use of the model from every other book here.
+    #
+    # Elsewhere the LLM is a CRITIC: a deterministic gate stack finds the
+    # candidate and the model scores what the rules already proposed. In this
+    # book the model is a JUDGE. The calendar opens the gate - the entry
+    # condition is a date, so the book cannot fail to fire the way a threshold
+    # crossing can - and what the model then supplies is the one thing no
+    # indicator on this repo's tape can: a directional read of the sentiment
+    # circulating around a name in the hours before it reports. It reads an
+    # evidence pack (Alpaca headlines + the StockTwits public stream, sanitised
+    # and budget-capped), returns a direction, a confidence and the evidence it
+    # actually cited, and an abstention is a valid and expected answer. The
+    # confidence then sets the size. Nothing downstream changes: the idea still
+    # meets RiskEngine, still routes through ExecutionRouter, still lands in the
+    # journal under `cycle == "events_arm"` for the judges to read.
+    #
+    # The engine is built lazily and cached: constructing it costs a params
+    # file read and an LLM handle, and 22 of the day's 24 cycles have no use
+    # for either.
+    _events_engine_cache: Any = None
+
+    def _events_ref(self) -> Any:
+        for ref in self.cfg.strategies:
+            if ref.book == "events":
+                return ref
+        return None
+
+    def _events_engine(self) -> Any:
+        """Build (once) the same engine `oaa events arm` builds.
+
+        The RiskEngine here takes `firewall=None` deliberately. This book arms
+        at 15:50, after the 15:15 transient cutoff, and holds overnight: no
+        firewall phase permits that, and no phase should have to. The trade-off
+        is stated rather than hidden - an events leg is unattributed to the
+        ledger and would therefore be treated as transient if it were somehow
+        still open at a later 15:15 cutoff. The morning flatten is what makes
+        that unreachable in the normal case, and a sweep is the conservative
+        error if it ever is reached.
+        """
+        if self._events_engine_cache is not None:
+            return self._events_engine_cache
+
+        from oaa.strategies.events import EventsEngine, load_params
+        from oaa.strategies.events.strategy import EarningsEventDirectional
+
+        ref = self._events_ref()
+        if ref is None:
+            raise StrategyError(
+                "no strategy in config declares `book: events` - the events "
+                "cycles have nothing to run. Add earnings_event_directional "
+                "to config/default.yaml's strategies list."
+            )
+        params_path = self.settings.path(
+            ref.params_file or "config/strategies/earnings_event.yaml"
+        )
+        self._events_engine_cache = EventsEngine(
+            settings=self.settings,
+            broker=self.broker,
+            data=self.data,
+            llm=self.llm,
+            params=load_params(params_path),
+            strategy=EarningsEventDirectional(ref, self.cfg),
+            risk=RiskEngine(self.cfg, firewall=None),
+            router=self.executor,
+            journal=self.journal,
+        )
+        log.info("events engine ready (firewall bypassed by design), params=%s", params_path)
+        return self._events_engine_cache
+
+    def _events_switched_on(self, result: CycleResult) -> bool:
+        """The Control tab's toggle, honoured here as it is for every book."""
+        ref = self._events_ref()
+        if ref is None:
+            result.errors.append("no strategy declares `book: events`")
+            return False
+        if not self._switched_on(ref.name):
+            result.notes.append(f"{ref.name} is switched off - standing down")
+            return False
+        return True
+
+    def events_watch(self, cycle: str = "events_watch") -> CycleResult:
+        """Read the names whose prints are coming. Several times a day.
+
+        This is the half of the book that used not to exist. The direction
+        model saw a name once, at 15:50 on arm day, and judged the print from
+        whatever was on the wire in that minute - so an estimate revision that
+        landed on the Tuesday was information the book never had. The watch
+        reads each name on the day the news arrives, judges the new items once,
+        and retires the name the day it reports.
+
+        It opens nothing and touches no capital, so it runs whether or not the
+        book is switched on: standing the ARM down is a decision about risk,
+        and losing the run-up as a side effect of it would be an accident.
+        """
+        result = CycleResult(cycle=cycle, started=dt.datetime.now(dt.timezone.utc))
+        if self._events_ref() is None:
+            result.errors.append("no strategy declares `book: events`")
+            return result
+        try:
+            report = self._events_engine().watch(clock.today())
+        except Exception as exc:  # noqa: BLE001 - a dead feed is not a dead loop
+            log.exception("events watch failed: %s", exc)
+            result.errors.append(f"events watch failed: {exc}")
+            return result
+
+        result.symbols_scanned = len(report.watching)
+        result.notes.append(report.summary())
+        result.errors.extend(report.errors)
+        if report.noted:
+            result.notes.append("noted: " + ", ".join(sorted(report.noted)))
+        if report.retired:
+            result.notes.append(
+                "stopped watching (reported): " + ", ".join(sorted(report.retired))
+            )
+        self.journal.event(
+            "events_watch",
+            watching=report.watching,
+            new_items=report.new_items,
+            noted=report.noted,
+            quiet=report.quiet,
+            retired=report.retired,
+        )
+        return result
+
+    def events_arm(self, cycle: str = "events_arm") -> CycleResult:
+        """15:50 ET. Open into tonight's confirmed prints.
+
+        Everything expensive is inside `EventsEngine.arm`: the week screen, the
+        vol screen, the evidence pack, the direction call, the sizing. This
+        method's job is to run it inside the loop's error and reporting
+        contract, so a bad night degrades to a logged cycle rather than a dead
+        process.
+        """
+        result = CycleResult(cycle=cycle, started=dt.datetime.now(dt.timezone.utc))
+        if not self._events_switched_on(result):
+            return result
+        if self.risk.state.halted:
+            result.notes.append(f"risk halted: {self.risk.state.halt_reason}")
+            return result
+
+        try:
+            report = self._events_engine().arm(clock.today())
+        except Exception as exc:  # noqa: BLE001 - one bad night, not the process
+            log.exception("events arm failed: %s", exc)
+            result.errors.append(f"events arm failed: {exc}")
+            return result
+
+        result.symbols_scanned = len(report.screened)
+        result.ideas_generated = len(report.considered)
+        result.ideas_approved = len(report.opened)
+        result.orders_placed = len(report.opened)
+        result.notes.append(report.summary())
+        result.errors.extend(report.errors)
+        if report.unverified:
+            result.notes.append(
+                "unconfirmed, not armed: " + ", ".join(sorted(report.unverified))
+            )
+        # A judge that never abstains is not judging. The engine logs this too;
+        # it is repeated on the cycle so it reaches the dashboard and the EOD
+        # report rather than only the process log.
+        if report.calls and report.abstention_rate == 0.0:
+            result.notes.append(
+                "WARNING: abstention rate 0% - the direction model declined "
+                "nothing tonight, which is what a broken filter looks like"
+            )
+        self.journal.event(
+            "events_arm",
+            considered=report.considered,
+            opened=[idea.symbol for idea in report.opened],
+            declined=report.declined,
+            abstention_rate=report.abstention_rate,
+            budget=report.budget,
+            budget_used=report.budget_used,
+            unverified=report.unverified,
+        )
+        self.journal.snapshot(self._account())
+        return result
+
+    def events_flatten(self, cycle: str = "events_flatten") -> CycleResult:
+        """09:45 ET. Close what reported overnight, into the IV collapse.
+
+        Unconditional by design: this runs whether or not the book is switched
+        on, because a book switched off mid-hold must still have its open risk
+        closed. The same reasoning as `_refresh_strategies`.
+        """
+        result = CycleResult(cycle=cycle, started=dt.datetime.now(dt.timezone.utc))
+        if self._events_ref() is None:
+            result.errors.append("no strategy declares `book: events`")
+            return result
+        try:
+            closed = self._events_engine().flatten(clock.today())
+        except Exception as exc:  # noqa: BLE001
+            log.exception("events flatten failed: %s", exc)
+            result.errors.append(f"events flatten failed: {exc}")
+            return result
+
+        result.positions_closed = len(closed)
+        result.notes.append(
+            f"closed {len(closed)} events leg(s): {', '.join(closed)}" if closed
+            else "no events positions were open"
+        )
+        self.journal.event("events_flatten", closed=closed)
         self.journal.snapshot(self._account())
         return result
 
@@ -709,7 +937,15 @@ class Orchestrator:
         cycle: str,
         result: CycleResult,
         market_open: bool = True,
+        contexts: dict[str, MarketContext] | None = None,
     ) -> None:
+        """`contexts` is this cycle's full snapshot set, not just this symbol's.
+
+        The aggregate-Greek gate needs it: the greeks of an already-open
+        position are recovered by matching its OCC symbol against the chains,
+        and a position can be on a symbol other than the one being traded -
+        which is precisely the case the gate exists to catch.
+        """
         decision = Decision(cycle=cycle, symbol=idea.symbol, strategy=strategy.name, idea=idea)
         try:
             # 0. modelled cost, attached before anything else so the rejection
@@ -740,8 +976,12 @@ class Orchestrator:
                 return
 
             # 2. deterministic risk (firewall checked first, inside) ---------- #
-            verdict = self.risk.evaluate(idea, account, market_open=market_open)
+            verdict = self.risk.evaluate(
+                idea, account, market_open=market_open, contexts=contexts,
+            )
             decision.verdict = verdict
+            if verdict.metrics:
+                idea.meta["risk_metrics"] = dict(verdict.metrics)
             if not verdict.approved:
                 decision.action = DecisionAction.SKIP
                 self.journal.record(decision)

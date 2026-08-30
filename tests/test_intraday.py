@@ -370,3 +370,120 @@ def test_the_thesis_reports_the_confirmations_it_missed(
     assert "confirmations agree" in thesis
     # the catalyst vote was lost here, so the rationale must say so
     assert "Not confirming" in thesis or "0 headline" in thesis
+
+
+# --------------------------------------------------------------------------- #
+# term structure - the seventh confirmation
+#
+# The property that has to hold is not "it improves the P&L" - one sample
+# cannot show that. It is that the vote is STRICTLY ADDITIVE: `needed` is
+# min(confirmations_required, possible) and `confirmations` is a sum over votes
+# that passed, so raising `possible` from 6 to 7 cannot take a candidate that
+# used to trade and stop it trading. If that ever stops being true, this signal
+# has started holding the book back instead of helping it, and these tests are
+# what say so.
+# --------------------------------------------------------------------------- #
+def _term_chain(front_iv: float, back_iv: float, base_chain: list) -> list:
+    """The 0-2 DTE fixture plus a back expiry, so a slope exists at all."""
+    from tests.conftest import _expiry_slice
+
+    front = [q.model_copy(update={"implied_volatility": front_iv}) for q in base_chain]
+    back = [
+        q.model_copy(update={"implied_volatility": back_iv})
+        for q in _expiry_slice(dt.date(2026, 8, 28), 30, vol=back_iv, half_spread=0.02)
+    ]
+    return front + back
+
+
+def _with_term(strat, ctx, front_iv, back_iv, base_chain):
+    from oaa.data.term_structure import term_structure
+
+    chain = _term_chain(front_iv, back_iv, base_chain)
+    ctx.market.chain = chain
+    ctx.market.term_structure = term_structure(
+        chain, ctx.market.spot, ctx.market.asof.date()
+    )
+    return ctx
+
+
+def test_a_slope_inside_the_band_adds_a_confirmation(
+    intraday_chain, intraday_bars, attention, account
+):
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+    # +10% relative slope: mild backwardation, inside [-10%, +25%].
+    ctx = _with_term(strat, ctx, 0.22, 0.20, intraday_chain)
+    gate = strat._momentum_gate(ctx.market, intraday_bars)
+    assert gate.metrics["term_slope_pct"] == 0.1
+    assert "term slope" not in (gate.metrics.get("confirmations_failed") or "")
+
+
+def test_a_slope_outside_the_band_costs_a_vote_and_nothing_else(
+    intraday_chain, intraday_bars, attention, account
+):
+    """The failing case must not remove a confirmation another gate earned."""
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+    baseline = strat._momentum_gate(ctx.market, intraday_bars)
+
+    ctx = _with_term(strat, ctx, 0.40, 0.20, intraday_chain)   # +100%, way outside
+    gate = strat._momentum_gate(ctx.market, intraday_bars)
+
+    assert gate.metrics["confirmations"] == baseline.metrics["confirmations"]
+    assert gate.metrics["confirmations_possible"] == (
+        baseline.metrics["confirmations_possible"] + 1
+    )
+    assert "backwardation" in gate.metrics["confirmations_failed"]
+
+
+def test_the_vote_can_never_turn_a_trade_into_a_rejection(
+    intraday_chain, intraday_bars, attention, account
+):
+    """The whole point, asserted end to end rather than argued in a comment."""
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+    without = strat.generate(ctx)
+    assert without, "the fixture must trade, or this test proves nothing"
+
+    for front_iv, back_iv in ((0.40, 0.20), (0.10, 0.20), (0.22, 0.20)):
+        strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+        ctx = _with_term(strat, ctx, front_iv, back_iv, intraday_chain)
+        assert strat.generate(ctx), (
+            f"a {front_iv:.0%}/{back_iv:.0%} term structure stopped a trade that "
+            "fires without the signal - the vote is no longer additive"
+        )
+
+
+def test_a_modelled_slope_does_not_vote(
+    intraday_chain, intraday_bars, attention, account
+):
+    """The modelled surface's term slope is `backtest.chain.term_slope`, a
+    constant. A vote read off it would fire identically forever."""
+    from oaa.data.term_structure import term_structure
+
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+    baseline = strat._momentum_gate(ctx.market, intraday_bars)
+
+    chain = [
+        q.model_copy(update={"iv_source": "modelled (no bar)"})
+        for q in _term_chain(0.22, 0.20, intraday_chain)
+    ]
+    ctx.market.chain = chain
+    ctx.market.term_structure = term_structure(
+        chain, ctx.market.spot, ctx.market.asof.date(), require_measured=False
+    )
+    gate = strat._momentum_gate(ctx.market, intraday_bars)
+
+    assert "term_slope_pct" not in gate.metrics
+    assert gate.metrics["confirmations_possible"] == baseline.metrics["confirmations_possible"]
+    assert "modelled" in gate.metrics["confirmations_failed"]
+
+
+def test_a_chain_with_no_back_expiry_does_not_vote(
+    intraday_chain, intraday_bars, attention, account
+):
+    """The 0-2 DTE fixture on its own. None must mean unanswerable, not flat -
+    a caller reading None as 0.0 would place it inside the band and
+    manufacture a confirmation out of missing data."""
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account)
+    assert ctx.market.term_structure is None
+    gate = strat._momentum_gate(ctx.market, intraday_bars)
+    assert "term_slope_pct" not in gate.metrics
+    assert "no two expiries" in gate.metrics["confirmations_failed"]

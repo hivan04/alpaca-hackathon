@@ -19,7 +19,8 @@ class Base(BaseModel):
 # meta / broker
 # --------------------------------------------------------------------------- #
 class MetaConfig(Base):
-    project: str = "Options Alpha Agents"
+    project: str = "Eventus Algorithm"
+    #: The hackathon track, submitted verbatim. Not the project name.
     track: str = "Options Alpha Agents"
     version: str = "0.1.0"
 
@@ -95,6 +96,27 @@ class DataConfig(Base):
     fetch_news: bool = True
     news_limit: int = 20
     news_lookback_hours: int = 6
+    # --- ATM IV term structure ------------------------------------------- #
+    # Where the two anchors sit on the ladder. These live here, not in a
+    # strategy's params, because the slope must mean the SAME THING on the live
+    # path and the replay path. IV rank did not, for exactly the reason of two
+    # call sites with two definitions, and the gate on top of it could not tell
+    # (`claude/iv-rank-divergence.md`).
+    #
+    # 1 rather than 0 for the front: a 0 DTE contract on expiry morning has its
+    # recovered vol dominated by the bid-ask and the pin. 30 for the back is
+    # the conventional 30-day surface reference, so the number is comparable to
+    # something outside this repo.
+    term_front_dte: int = 1
+    term_back_dte: int = 30
+    #: Below this gap the two expiries are the same maturity and the "slope" is
+    #: quote noise over a small denominator.
+    term_min_separation_days: int = 7
+    #: Plausibility ceiling on |slope_pct|. Beyond it the reading is reported as
+    #: unmeasurable rather than as an extreme slope - measured 30 Aug, a 0 DTE
+    #: front anchor produced +621% on XLF, which is the pin and the bid-ask, not
+    #: a forecast. 0 disables the check.
+    term_max_abs_slope_pct: float = 1.0
     cache: CacheConfig = Field(default_factory=CacheConfig)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
@@ -145,10 +167,33 @@ class RiskConfig(Base):
     max_positions_per_underlying: int = 2
     max_risk_per_trade_pct: float = 0.02
     max_portfolio_risk_pct: float = 0.20
+    #: Delta-equivalent notional a SINGLE structure may control, as a fraction
+    #: of equity. Enforced from 30 Aug; before that it was declared here and
+    #: read by nothing.
     max_notional_per_trade_pct: float = 0.10
     min_cash_buffer_pct: float = 0.15
     allow_undefined_risk: bool = False
+    # --- aggregate GREEK caps -------------------------------------------- #
+    # Enforced from 30 Aug. Until then these two sat in the config, in the
+    # docs and in NO code path: every portfolio limit counted structures, and a
+    # count cannot see twenty-five positions that are one bet. Measured 28 Aug,
+    # the intraday universe behaves like 2.4 independent bets.
+    #
+    # Because they were never enforced, no value here was ever calibrated
+    # against a run - so the defaults are set from the measured distribution
+    # (see `claude/portfolio-greek-caps.md`), not carried over. The old 0.35
+    # carried a comment reading "per $1k equity"; the enforced definition is
+    # the fraction-of-equity one below, which is the form that can be compared
+    # across account sizes.
+    #
+    # <= 0 means MEASURE ONLY: the exposure is computed and journalled on every
+    # verdict, and nothing is refused. That is the honest setting for a limit
+    # you have not yet calibrated, and it is how these were calibrated.
+
+    #: |net dollar delta| / equity. 0.35 = a 1% move in the underlyings moves
+    #: the book by 0.35% of equity.
     max_net_delta: float = 0.35
+    #: |net vega| in dollars per vol POINT, per $10k of equity.
     max_net_vega: float = 50.0
     daily_loss_limit_pct: float = 0.04
     max_drawdown_halt_pct: float = 0.15
@@ -349,6 +394,17 @@ CycleAction = Literal[
     "intraday_cutoff",
     "carry_verify",
     "submission_flatten",
+    # The events book. It arms on a DATE rather than a signal, in the last
+    # minutes of the session, and holds one night across a confirmed earnings
+    # print. It runs inside `oaa run` from 30 Aug, but deliberately does NOT
+    # lease capital from the temporal firewall - see
+    # `Orchestrator._events_engine`, which builds it a RiskEngine with
+    # firewall=None, exactly as `oaa events arm` has always done.
+    "events_arm",
+    "events_flatten",
+    # Reads the names whose prints are coming, several times a day, and stops
+    # reading each one the day its print is behind us. Opens nothing.
+    "events_watch",
 ]
 
 
@@ -409,7 +465,7 @@ class AppConfig(Base):
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8080
-    title: str = "Options Alpha Agents"
+    title: str = "Eventus Algorithm"
     public: bool = True
     refresh_seconds: int = 15
 
@@ -524,6 +580,13 @@ class BacktestConfig(Base):
     output_dir: str = "runs/backtests"
     #: sessions the replay evaluates, in Eastern time
     session_times_et: list[str] = Field(default_factory=lambda: ["10:00"])
+    #: Cadence, in minutes, at which OPEN positions are re-marked and their
+    #: exit rules evaluated BETWEEN the scan moments above. Entries stay on
+    #: `session_times_et`. A position living 20-90 minutes was previously
+    #: observed 2-6 times in its whole life, which is too coarse for any exit
+    #: dial - target, stop or trailing - to mean what it says. 0 disables the
+    #: fine loop and restores scan-grid-only management.
+    mark_interval_minutes: int = 1
     #: how far back a session looks for headlines feeding the catalyst read
     news_lookback_hours: float = 18.0
     fetch_news: bool = True

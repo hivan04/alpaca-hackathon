@@ -68,10 +68,11 @@ import streamlit as st  # noqa: E402
 
 from oaa.app import correlation as corr  # noqa: E402
 from oaa.app import identity as ident  # noqa: E402
+from oaa.app import skin  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
 from oaa.app.events_page import render_events  # noqa: E402
 from oaa.app.positions import render_positions  # noqa: E402
-from oaa.app.theme import is_dark, mode_toggle, palette, style  # noqa: E402
+from oaa.app.theme import is_dark, palette, style  # noqa: E402
 from oaa.core.errors import DataError  # noqa: E402
 
 PAGE_BACKTEST = "Backtesting"
@@ -79,6 +80,10 @@ PAGE_LIVE = "Live Trading"
 PAGE_POSITIONS = "Positions"
 PAGE_EVENTS = "Events"
 PAGE_CONTROL = "Control"
+
+#: The dashboard is a viewer; the config it reads is the one the agent runs on.
+#: `oaa dashboard --config ...` is the way to point it somewhere else.
+DEFAULT_CONFIG = "config/default.yaml"
 
 
 # --------------------------------------------------------------------------- #
@@ -140,7 +145,8 @@ def _stale_server(exc: Exception, profile: str) -> None:
         "If the settings it is complaining about are present in your YAML, this "
         "server is running older Python than the files on disk. Streamlit reruns "
         "the script on every interaction but keeps already-imported modules, so "
-        "**Reload config** cannot fix it - it re-reads YAML and `.env`, not code.\n\n"
+        "re-reading the config cannot fix it - that reloads YAML and `.env`, not "
+        "code.\n\n"
         "Restart the process:\n\n```\npkill -f streamlit && make serve\n```",
         icon=":material/warning:",
     )
@@ -335,9 +341,19 @@ def render_backtest(settings: Any) -> None:
     cfg = settings.config
     colours = palette(_dark())
 
-    # -- controls ------------------------------------------------------- #
-    with st.sidebar:
-        st.header("Backtest")
+    # -- history + controls --------------------------------------------- #
+    # Reading a saved run is the common case, so it leads. The selectbox has
+    # Streamlit's typeahead, which is the "search" part of searching history.
+    skin.eyebrow("Backtest history")
+    history_col, _spacer = st.columns([2, 3], vertical_alignment="center")
+    with history_col:
+        saved = list_runs(settings)
+        options = ["(current run)"] + [
+            f"{r['id']}  |  {', '.join(r['symbols'][:4])}" for r in saved
+        ]
+        picked = st.selectbox("Load a previous run", options, label_visibility="collapsed")
+
+    with st.expander("Run a new backtest", expanded=False):
         available = sorted(set(cfg.universe.active()) | {"SPY", "QQQ", "IWM"})
         symbols = st.multiselect(
             "Investment universe", available,
@@ -413,14 +429,6 @@ def render_backtest(settings: Any) -> None:
         label = st.text_input("Run label", "")
         run_clicked = st.button("Run backtest", type="primary", width="stretch")
 
-        st.divider()
-        st.caption("Saved runs")
-        saved = list_runs(settings)
-        options = ["(current run)"] + [
-            f"{r['id']}  |  {', '.join(r['symbols'][:4])}" for r in saved
-        ]
-        picked = st.selectbox("Load a previous run", options, label_visibility="collapsed")
-
     # -- resolve which result is on screen ------------------------------ #
     if run_clicked:
         if not symbols:
@@ -470,7 +478,8 @@ def render_backtest(settings: Any) -> None:
     if not payload:
         st.markdown(
             "### No backtest loaded\n"
-            "Set the universe and window in the sidebar, then **Run backtest**. "
+            "Open **Run a new backtest** above, set the universe and window, "
+            "then **Run backtest**. "
             "Every run is saved under `runs/backtests/` and can be reopened here."
         )
         _methodology(cfg)
@@ -608,7 +617,7 @@ def _render_result(payload: dict[str, Any], colours: dict[str, Any], cfg: Any) -
         )
         if risk.get("profile") != "judged":
             st.caption(f":orange[{note} - the judged account runs different "
-                       "limits; switch the profile in the sidebar to match it.]")
+                       "limits; switch the profile beside the title to match it.]")
         else:
             st.caption(note)
     with right:
@@ -1411,35 +1420,53 @@ def _live_decision_detail(row: dict[str, Any]) -> None:
         )
 
 
+
+# --------------------------------------------------------------------------- #
+# masthead
+# --------------------------------------------------------------------------- #
+def _render_masthead(settings: Any) -> None:
+    """Just the name.
+
+    The account identity - profile, masked key, which env var it came from -
+    used to sit here as a subtitle and a pill. It is not lost: `_identity_banner`
+    prints it at the top of every tab, which is where it should be read. A
+    nameplate is for knowing what you are looking at; the banner is for
+    checking which account you are about to trade.
+    """
+    skin.masthead(settings.config.meta.project)
+
+
 # --------------------------------------------------------------------------- #
 def main() -> None:
     st.set_page_config(
-        page_title="Options Alpha Agents", page_icon="*", layout="wide",
+        page_title="Eventus Algorithm", page_icon="*", layout="wide",
+        initial_sidebar_state="collapsed",
     )
-    with st.sidebar:
-        st.title("Options Alpha Agents")
-        mode_toggle()
-        profile = st.selectbox(
-            "Account profile", ["dev", "judged"],
+    skin.inject()
+
+    # The profile switch lives in the masthead band, beside the pill that
+    # reports which account is live - the read and the control in one place,
+    # because a switch you have to go and find is a switch you forget to check.
+    #
+    # It is declared BEFORE the masthead even though it renders to the right of
+    # it: the masthead needs the settings this selects, and Streamlit lays
+    # columns out by position, not by the order their bodies execute.
+    head_col, profile_col = st.columns([6, 1], vertical_alignment="center")
+    with profile_col:
+        profile = st.segmented_control(
+            "Account profile", ["dev", "judged"], default="dev",
+            selection_mode="single", label_visibility="collapsed",
             help=(
                 "dev uses ALPACA_DEV_* keys. judged uses ALPACA_* - the account "
                 "the submission points at. The active key is printed to the "
                 "terminal every time a page renders."
             ),
-        )
-        config_path = st.text_input("Config", "config/default.yaml")
-        if st.button("Reload config", width="stretch",
-                     help="Re-read the YAML and .env without restarting. Note "
-                          "this does NOT reload changed Python - Streamlit keeps "
-                          "already-imported modules, so after a code change you "
-                          "must restart the process."):
-            st.cache_resource.clear()
-            st.session_state.pop("_announced", None)
-            st.rerun()
+        ) or "dev"
 
-    st.session_state["_config_path"] = config_path or None
+    config_path = DEFAULT_CONFIG
+    st.session_state["_config_path"] = config_path
     try:
-        settings = _settings(profile, config_path or None)
+        settings = _settings(profile, config_path)
     except Exception as exc:  # noqa: BLE001
         _stale_server(exc, profile)
         return
@@ -1454,11 +1481,15 @@ def main() -> None:
         try:
             settings_for[candidate] = (
                 settings if candidate == profile
-                else _settings(candidate, config_path or None)
+                else _settings(candidate, config_path)
             )
         except Exception as exc:  # noqa: BLE001
             settings_for[candidate] = None
             st.session_state[f"_load_error_{candidate}"] = str(exc)
+
+    _announce(settings, "dashboard")
+    with head_col:
+        _render_masthead(settings)
 
     # Events sits between Positions and Control deliberately: it is a book you
     # READ before a print and act on from the terminal, not one you switch on.

@@ -110,6 +110,14 @@ class OptionQuote(Model):
     ask: float | None = None
     last: float | None = None
     implied_volatility: float | None = None
+    #: Where `implied_volatility` came from. None = the feed quoted it (live).
+    #: In replay `backtest/realchain.py` sets one of "recovered from the traded
+    #: price", "modelled (no bar)" or "modelled (price carries no vega)".
+    #: It used to compute all three and then discard them on the next line,
+    #: which meant nothing downstream could tell a measured surface from an
+    #: invented one - and the modelled surface's term structure is a CONSTANT
+    #: from config, so a signal read off it fires identically forever.
+    iv_source: str | None = None
     greeks: Greeks = Field(default_factory=Greeks)
     open_interest: int | None = None
     volume: int | None = None
@@ -145,6 +153,36 @@ class OptionQuote(Model):
         return True
 
 
+class TermStructure(Model):
+    """The ATM implied-vol slope between a front and a back expiry.
+
+    Computed by `oaa.data.term_structure`, which is the only thing that should
+    build one. `measured` is load-bearing: False means at least one anchor came
+    off a model, and in replay the modelled surface's term slope is a constant
+    from `backtest.chain.term_slope`. Gating on an unmeasured slope is gating
+    on a config value.
+    """
+
+    front_expiry: dt.date
+    back_expiry: dt.date
+    front_dte: int
+    back_dte: int
+    front_iv: float
+    back_iv: float
+    #: front_iv - back_iv, in vol points.
+    slope: float
+    #: (front_iv - back_iv) / back_iv. Scale-free, and the one to gate on: a
+    #: 2-point slope means different things on a 12-vol and a 45-vol name, and
+    #: this universe spans both.
+    slope_pct: float
+    measured: bool = False
+    source: str = ""
+
+    @property
+    def backwardated(self) -> bool:
+        return self.slope > 0
+
+
 class MarketContext(Model):
     """Everything a strategy is allowed to look at for one underlying.
 
@@ -169,6 +207,10 @@ class MarketContext(Model):
     realised_vol: float | None = None
     implied_vol: float | None = None
     iv_rank: float | None = None
+    #: ATM IV term structure, front vs back expiry. None means the chain could
+    #: not answer - NOT that the surface is flat. A strategy that reads None as
+    #: 0.0 has invented a measurement.
+    term_structure: TermStructure | None = None
     trend_strength: float | None = None
     adx: float | None = None
     volume_ratio: float | None = None
@@ -325,6 +367,11 @@ class RiskVerdict(Model):
     reasons: list[str] = Field(default_factory=list)
     adjusted_quantity: int | None = None
     checks: dict[str, bool] = Field(default_factory=dict)
+    #: What the engine MEASURED, not merely whether it passed. Portfolio delta,
+    #: vega, notional and the coverage of the Greek recovery land here on every
+    #: verdict including approvals - a limit that only leaves a trace when it
+    #: fires cannot be shown to have been binding, or to have been calibrated.
+    metrics: dict[str, Any] = Field(default_factory=dict)
     stamp: str | None = None   # execution refuses tickets without this
 
     @classmethod

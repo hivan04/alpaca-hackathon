@@ -1554,7 +1554,8 @@ def test_a_new_session_recovers_a_fresh_vol_anchor():
 def test_the_anchor_is_stored_deskewed_so_the_smile_is_not_applied_twice():
     """`reprice` runs `iv_at` on whatever anchor it is handed, so the anchor
     must be an ATM vol, not the leg's own skewed one."""
-    from oaa.backtest.chain import ChainModel as _CM, years_to_expiry as _yte
+    from oaa.backtest.chain import ChainModel as _CM
+    from oaa.backtest.chain import years_to_expiry as _yte
     from oaa.backtest.engine import _deskew
     model = _CM()
     spot, strike = 640.0, 680.0          # well OTM, where the skew bites hardest
@@ -1562,3 +1563,185 @@ def test_the_anchor_is_stored_deskewed_so_the_smile_is_not_applied_twice():
     leg_iv = model.iv_at(0.18, spot, strike, years)
     assert abs(leg_iv - 0.18) > 1e-4, "the fixture is not actually skewed"
     assert abs(_deskew(model, leg_iv, spot, strike, years) - 0.18) < 1e-3
+
+
+# --------------------------------------------------------------------------- #
+# management resolution
+#
+# Scanning and marking are different jobs and were sharing one cadence. A
+# position that lives 20-90 minutes was observed 2-6 times in its whole life,
+# so no exit dial - target, stop, VWAP re-cross or time stop - could fire
+# within an order of magnitude of when it became true, and MFE/MAE was built
+# from two samples. Entries stay on `session_times_et`; open positions are now
+# marked and managed every `backtest.mark_interval_minutes`.
+# --------------------------------------------------------------------------- #
+def _intraday_source(**kwargs) -> HistoricalContextSource:
+    from oaa.backtest.source import synthetic_intraday_bars
+    bars = {"SPY": _bars("SPY")}
+    return HistoricalContextSource(
+        bars,
+        start=START, end=END,
+        intraday_by_symbol={
+            "SPY": synthetic_intraday_bars("SPY", bars["SPY"], interval_minutes=1)
+        },
+        session_times_et=("10:00", "10:15"),
+        **kwargs,
+    )
+
+
+def test_open_positions_are_marked_between_scans():
+    source = _intraday_source()
+    start, contexts = next(iter(source))
+    end = start + dt.timedelta(minutes=15)
+
+    ticks = list(source.marks_between(start, end, contexts, ["SPY"]))
+
+    assert ticks, "the fine loop produced nothing between two scans"
+    moments = [m for m, _ in ticks]
+    assert all(start < m < end for m in moments), "a mark landed on or past a scan"
+    assert moments == sorted(moments)
+    # The point of the change: many observations of one position's life, not two.
+    assert len(moments) >= 10
+
+
+def test_a_fine_context_advances_the_spot_and_carries_the_chain():
+    """Marking reads spot and vol; entries read the chain. Only the first is
+    rebuilt, which is what makes a one-minute cadence affordable."""
+    source = _intraday_source()
+    start, contexts = next(iter(source))
+    base = contexts["SPY"]
+    ticks = list(source.marks_between(start, start + dt.timedelta(minutes=15), contexts, ["SPY"]))
+
+    spots = [c["SPY"].spot for _, c in ticks]
+    assert len(set(spots)) > 1, "the underlying was immobile between scans"
+    for moment, fine in ticks:
+        ctx = fine["SPY"]
+        assert ctx.asof == moment
+        assert ctx.chain is base.chain, "the chain was rebuilt on a mark"
+        assert ctx.implied_vol == base.implied_vol
+        assert len(ctx.intraday_bars) >= len(base.intraday_bars)
+
+
+def test_a_fine_context_still_contains_no_lookahead():
+    from oaa.backtest.source import _parse_ts
+    source = _intraday_source()
+    start, contexts = next(iter(source))
+    for moment, fine in source.marks_between(
+        start, start + dt.timedelta(minutes=15), contexts, ["SPY"]
+    ):
+        for bar in fine["SPY"].intraday_bars:
+            assert _parse_ts(bar["timestamp"]) <= moment
+
+
+def test_marks_never_run_across_a_session_boundary():
+    """`end` is simply the next scan the source produced, which overnight is
+    the next morning. Marking a resident condor once a minute until then is
+    both meaningless and slow."""
+    source = _intraday_source()
+    start, contexts = next(iter(source))
+    assert list(source.marks_between(
+        start, start + dt.timedelta(days=1), contexts, ["SPY"]
+    )) == []
+
+
+def test_the_fine_cadence_can_be_switched_off():
+    source = _intraday_source(mark_interval_minutes=0)
+    start, contexts = next(iter(source))
+    end = start + dt.timedelta(minutes=15)
+    assert list(source.marks_between(start, end, contexts, ["SPY"])) == []
+
+
+class _CountingSource:
+    """A source that records whether the engine asked it for fine marks."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple] = []
+
+    def __iter__(self):
+        return iter(())
+
+    def marks_between(self, start, end, contexts, symbols):
+        self.asked.append((start, end, list(symbols)))
+        return iter(())
+
+
+def _fake_position(marks_intraday: bool, symbol: str = "SPY"):
+    import types
+    return types.SimpleNamespace(
+        legs=[],
+        quantity=1,
+        entry_net=0.0,
+        marks_observed=0,
+        mfe_usd=0.0,
+        mae_usd=0.0,
+        strategy=types.SimpleNamespace(marks_intraday=marks_intraday, params={}),
+        record=types.SimpleNamespace(symbol=symbol, trade_id="T1"),
+        idea=types.SimpleNamespace(max_profit=1.0, max_loss=1.0),
+    )
+
+
+def _drive_mark_between(engine, source, positions):
+    from oaa.backtest.engine import BacktestResult
+    engine._open = list(positions)
+    start = dt.datetime(2026, 8, 20, 14, 0, tzinfo=dt.timezone.utc)
+    engine._mark_between(
+        source, start, {"SPY": _spy_context(640.0)},
+        start + dt.timedelta(minutes=15), BacktestResult(),
+    )
+
+
+def test_a_daily_marked_book_is_not_asked_for_fine_marks():
+    """`vol_carry` holds for days off a DAILY option tape. Repricing the same
+    close sixty times an hour buys nothing and costs the run."""
+    engine = BacktestEngine(load_settings())
+    source = _CountingSource()
+    _drive_mark_between(engine, source, [_fake_position(marks_intraday=False)])
+    assert source.asked == []
+    assert engine._fine_marks == 0
+
+
+def test_an_intraday_book_is_asked_for_fine_marks():
+    engine = BacktestEngine(load_settings())
+    source = _CountingSource()
+    _drive_mark_between(engine, source, [_fake_position(marks_intraday=True)])
+    assert len(source.asked) == 1
+    assert source.asked[0][2] == ["SPY"]
+
+
+def test_a_flat_book_costs_nothing():
+    engine = BacktestEngine(load_settings())
+    source = _CountingSource()
+    _drive_mark_between(engine, source, [])
+    assert source.asked == []
+
+
+def test_the_fine_loop_marks_and_manages_at_every_tick():
+    import types
+
+    from oaa.backtest.engine import BacktestResult
+    engine = BacktestEngine(load_settings())
+    moments = [
+        dt.datetime(2026, 8, 20, 14, 1, tzinfo=dt.timezone.utc),
+        dt.datetime(2026, 8, 20, 14, 2, tzinfo=dt.timezone.utc),
+    ]
+    source = types.SimpleNamespace(
+        marks_between=lambda *a, **k: iter(
+            [(m, {"SPY": _spy_context(640.0 + i)}) for i, m in enumerate(moments)]
+        )
+    )
+    engine._open = [_fake_position(marks_intraday=True)]
+    try:
+        engine._mark_between(
+            source, moments[0] - dt.timedelta(minutes=1), {"SPY": _spy_context(640.0)},
+            moments[-1] + dt.timedelta(minutes=1), BacktestResult(),
+        )
+    finally:
+        clock.unfreeze()
+    assert engine._fine_marks == len(moments)
+
+
+def test_the_run_reports_how_many_fine_marks_it_took():
+    """Zero on a run containing an intraday book means the loop never fired
+    and every exit dial is again being sampled on the scan grid."""
+    result = _run()
+    assert "fine_marks" in result.metrics()

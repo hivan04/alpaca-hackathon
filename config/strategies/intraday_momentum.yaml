@@ -147,6 +147,53 @@ momentum:
   require_prior_squeeze: false
   squeeze_percentile: 25
 
+  # --- TERM STRUCTURE -------------------------------------------------------
+  # The first confirmation in this book that does not read the price series.
+  # Every other vote - volume, persistence, band width, hourly drift - asks a
+  # different question of ONE source, so when that source is uninformative they
+  # go quiet together: 64% of intraday rejections were "no VWAP cross" and 21%
+  # the volume z. The option chain is a second source and the book was reading
+  # a single scalar out of it (ATM IV, and its rank).
+  #
+  #   slope_pct = (front_iv - back_iv) / back_iv
+  #   > 0  backwardation - the market expects THIS session to move
+  #   < 0  contango - the normal state
+  #
+  # Relative rather than absolute vol points on purpose: 2 points means
+  # different things on a 12-vol name and a 45-vol one, and this universe runs
+  # TLT to XLE.
+  #
+  # THE BAND IS A PRIOR, NOT A FIT. Nothing below was swept - these are the
+  # numbers the mechanism argues for, and the standard set in
+  # `claude/strategy-viability-arithmetic.md` is that a change be defensible
+  # BEFORE the backtest is run. Sweep them after, and treat any improvement
+  # from moving them as one sample.
+  #
+  #   slope_band_min  -0.10  Below this the surface expects nothing from the
+  #                          session. Front gamma is cheap because nothing is
+  #                          priced to happen, and continuation is the thing
+  #                          this book monetises.
+  #   slope_band_max  +0.25  Above this the move is already priced and we are
+  #                          paying up for our own forecast - the same argument
+  #                          `selection.iv_rank_no_trade_above: 0.85` makes at
+  #                          the LEVEL, made here at the SLOPE.
+  #
+  # This vote can only WIDEN the entry set. `confirmations` is a sum over votes
+  # that passed and `needed` is min(confirmations_required, possible), so this
+  # raises `possible` 6 -> 7 while `needed` stays at 3. A failing term vote
+  # costs a candidate nothing.
+  #
+  # require_measured: NON-NEGOTIABLE in replay. The modelled chain's term
+  # structure is `backtest.chain.term_slope` - a constant - so a vote read off
+  # it would fire identically on every candidate forever and look like a signal
+  # doing work. Both anchors must be recovered from real prints or the slope
+  # does not vote and does not count toward `possible`.
+  term_structure:
+    enabled: true
+    slope_band_min: -0.10
+    slope_band_max: 0.25
+    require_measured: true
+
   # RSI = a one-sided VETO only. Start at 80/20, not 70/30: strong momentum
   # runs carry elevated RSI for extended periods and a tight threshold rejects
   # exactly the trades this book exists to take. RSI at 65 blocks nothing.
@@ -230,16 +277,37 @@ structure:
   # the behaviour this book has always had; raise it only alongside sizing.
   max_option_price: 25.00
 
-sizing:
-  risk_fraction_per_trade: 0.005   # below the carry book's 1.5%: lower hit rate
-  # Raised 27 Aug with the book promoted to PRIMARY and the universe at ten
-  # names. At 0.5% risk per trade, 12 trades is 6% of equity committed across a
-  # day - and `max_daily_loss_pct` below still halts the book at 2%, which is
-  # the control that actually binds. The old 2/6 was set when this was a
-  # secondary book on two symbols.
-  max_concurrent: 6
-  max_trades_per_day: 12           # hard cap against a signal-storm spread bleed
-  max_daily_loss_pct: 0.02         # on breach the book is disabled for the day
+# --- sizing: THERE IS NO PER-STRATEGY SIZING ---------------------------------
+# This block used to read:
+#
+#   sizing:
+#     risk_fraction_per_trade: 0.005
+#     max_concurrent: 6
+#     max_trades_per_day: 12
+#     max_daily_loss_pct: 0.02
+#
+# Not one of those keys was read by any code path - `grep -rn max_concurrent
+# src/` returns nothing. They were removed on 30 Aug rather than left in place,
+# because a config that states a control which does not exist is worse than one
+# that states nothing: it is the file a judge reads to find out what the risk
+# posture is.
+#
+# What ACTUALLY sizes and bounds this book, all in `risk:` in default.yaml and
+# judged.yaml, applied globally rather than per strategy:
+#
+#   risk.max_risk_per_trade_pct        1.5% judged  <- NOT the 0.5% claimed here
+#   risk.max_positions                 25 structures
+#   risk.max_new_positions_per_day     20 judged
+#   risk.max_positions_per_underlying  1
+#   risk.daily_loss_limit_pct          3% judged, whole account not this book
+#   risk.max_net_delta / max_net_vega  the correlation caps, added 30 Aug
+#
+# NOTE THE FIRST LINE. This book has been sized at 1.5% of equity per trade,
+# three times the 0.5% its own config claimed, for as long as the claim has
+# been there. If 0.5% is the intended risk for a lower-hit-rate directional
+# book, that is a real change to make - but it belongs in `risk:` or in a
+# per-strategy sizing mechanism that would have to be built, not in a key
+# nothing reads.
 
 # --- exits ---------------------------------------------------------------------
 # The stop is WIDER than the target (15% vs 10%) on purpose: option premium is

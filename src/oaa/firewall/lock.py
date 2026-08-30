@@ -55,6 +55,20 @@ class Book(str, Enum):
     #: transient tenant and closing it is exactly the behaviour wanted; a
     #: resident label would leave it sitting there.
     WEEKEND = "weekend"
+    #: The earnings events book. Listed for the same reason WEEKEND is: the
+    #: runtime switchboard and `config.strategies` key off this set, and
+    #: `Book.parse` silently relabelling it INTRADAY would be worse than any
+    #: honest error. It is a scheduled cycle inside `oaa run` (events_arm
+    #: 15:50, events_flatten 09:45) but it is NOT a firewall tenant - its
+    #: cycles build their own RiskEngine with firewall=None, because it arms
+    #: after the 15:15 cutoff and holds one night, which no phase permits.
+    #:
+    #: Deliberately NOT resident, exactly as WEEKEND is not. Should an events
+    #: leg somehow still be open at a later 15:15 cutoff - the 09:45 flatten
+    #: having failed - the cutoff treating it as a transient tenant and closing
+    #: it is the conservative error. A resident label would leave it sitting
+    #: there, unowned, into the close.
+    EVENTS = "events"
 
     @property
     def is_transient(self) -> bool:

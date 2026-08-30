@@ -1,5 +1,5 @@
 # =============================================================================
-# Options Alpha Agents - master configuration
+# Eventus Algorithm - master configuration
 # -----------------------------------------------------------------------------
 # Everything the system does is driven from this file. Nothing here is a secret;
 # credentials live in .env and are referenced by name only.
@@ -9,7 +9,9 @@
 # =============================================================================
 
 meta:
-  project: "Options Alpha Agents"
+  project: "Eventus Algorithm"
+  # The hackathon track, submitted verbatim. NOT the project name - renaming
+  # this would mis-file the entry.
   track: "Options Alpha Agents"
   version: "0.1.0"
 
@@ -309,13 +311,64 @@ risk:
   max_risk_per_trade_pct: 0.02
   # Total defined-risk exposure across all open structures.
   max_portfolio_risk_pct: 0.20
-  max_notional_per_trade_pct: 0.10
+  # Delta-equivalent notional ONE structure may control, as a multiple of
+  # equity. 0.10 sat here for weeks and was read by nothing; measured over 44
+  # approvals the median structure controls 1.12x equity, so 0.10 would have
+  # refused literally every trade the book has ever made. Set just above the
+  # observed max of 4.89x, so it bounds a pathological single structure and
+  # cannot fire on anything the book has actually done.
+  max_notional_per_trade_pct: 5.5
   min_cash_buffer_pct: 0.15
   # Naked/undefined-risk structures are refused outright. Judged on a one-week
   # P&L window, a single uncapped loss ends the run.
   allow_undefined_risk: false
-  max_net_delta: 0.35              # portfolio delta per $1k equity
-  max_net_vega: 50.0
+  # --- aggregate GREEK caps, enforced from 30 Aug --------------------------
+  # These bound CORRELATION, which no other limit here can see: max_positions,
+  # max_new_positions_per_day and max_positions_per_underlying all count
+  # structures, and twenty-five structures that are one bet pass all three.
+  # Measured 28 Aug, the intraday universe behaves like 2.4 independent bets.
+  #
+  # Both numbers below are set from a measure-only calibration run (44
+  # approvals), NOT carried over - the previous values had never been enforced,
+  # so nothing had ever been calibrated against them, and both were wrong in
+  # opposite directions:
+  #
+  #                       measured median   p90     max    old (unenforced)
+  #   delta / equity           1.47x       3.55x   5.24x       0.35
+  #   vega $/pt per $10k        $7          $14     $27         $50
+  #
+  # 0.35 would have refused essentially every trade the book makes; $50 would
+  # never once have fired. That is what an uncalibrated limit looks like from
+  # both sides.
+  #
+  # SET JUST ABOVE THE OBSERVED MAXIMUM, not at p90, and the difference was
+  # measured rather than argued. Same window, same seed, caps the only change:
+  #
+  #                        trades   net P&L   win rate   PF    caps fired
+  #   measure only            44    +$960.15    52.3%   1.30      -
+  #   p90 (delta 3.5, v 15)   39      -$3.02    46.2%   1.00   7 delta, 2 vega
+  #
+  # The nine refusals removed five trades that happened to be worth ~$960 on
+  # this sample. That is a real cost and it is not evidence the cap is wrong -
+  # a tail control is not supposed to pay for itself on a window where the tail
+  # did not occur, and this window contains no stress day. But it is also not
+  # evidence the cap is RIGHT, and paying a known cost for an unmeasured
+  # benefit two days before the entry cutoff is a bad trade.
+  #
+  # So these sit just above the highest reading the book has ever produced
+  # (delta 5.24x, vega $27). They cannot fire on behaviour that has been
+  # observed, and they DO stop it creeping past it - which is the actual
+  # request. Going from unbounded to bounded-at-the-observed-max is most of the
+  # protection for none of the measured cost.
+  #
+  # To tighten to p90 later, set 3.5 / 15.0 and expect the table above.
+  # <= 0 means MEASURE ONLY - computed and journalled, nothing refused.
+
+  #: |net dollar delta| / equity. 5.5 = a 1% move in the underlyings moves the
+  #: book by 5.5% of equity. Observed max 5.24.
+  max_net_delta: 5.5
+  #: |net vega| in dollars per vol POINT, per $10k of equity. Observed max 27.
+  max_net_vega: 30.0
   daily_loss_limit_pct: 0.04       # halt trading for the day past this
   max_drawdown_halt_pct: 0.15      # halt entirely past this
   # Refuse to trade in the first/last N minutes - spreads are widest there.
@@ -369,6 +422,28 @@ strategies:
     weight: 0.5
     book: opportunistic
     params_file: "config/strategies/event_premium.yaml"
+
+  # --- EVENTS BOOK (armed on a date, not a signal) ---------------------------
+  # Wired into `oaa run` on 30 Aug. Until then it was `oaa events arm` in its
+  # own process, which meant the book only traded if a human remembered to
+  # start it - the exact failure mode a "fully autonomous" submission cannot
+  # have.
+  #
+  # It is listed here so the runtime switchboard can stand it down mid-week,
+  # and so `oaa strategies` reports it honestly. It is NOT a firewall tenant:
+  # `book: events` is excluded from the carry/intraday/opportunistic lists the
+  # scan cycles iterate, and its cycles build their own RiskEngine with
+  # firewall=None. See Orchestrator._events_engine for why.
+  #
+  # The model's role here differs from every other book: elsewhere it scores
+  # what the rules proposed, here it JUDGES direction from the sentiment
+  # circulating before a print. An abstention is a valid answer and the
+  # abstention rate is warned on when it hits zero.
+  - name: earnings_event_directional
+    enabled: true
+    weight: 1.0
+    book: events
+    params_file: "config/strategies/earnings_event.yaml"
 
 # -----------------------------------------------------------------------------
 # The agent layer. Specialist proposers run in parallel, a critic scores them,
@@ -442,6 +517,35 @@ schedule:
     - name: intraday_1000
       at: "10:00"
       action: intraday_scan           # transient books lease the headroom
+    # The events book closes what reported overnight BEFORE the day books do
+    # anything, and before the 10:00 scans compete for the same buying power.
+    # 09:45 is also where the IV crush is - the whole reason the structure is a
+    # debit vertical rather than a long call.
+    - name: events_flatten
+      at: "09:45"
+      action: events_flatten
+    # The watch. Three reads a day on every name whose print is within
+    # `watch.lookahead_days`, and none at all on a name that has reported -
+    # once NVDA has printed there is nothing left to learn that can inform the
+    # trade, and post-print commentary sitting in a dossier would be read by a
+    # later cycle as pre-print evidence.
+    #
+    # Three rather than the 15-minute grid because the feeds are daily-ish in
+    # character: press releases, analyst actions and a retail stream that turns
+    # over in hours, not minutes. Each poll costs one model call per name and
+    # only when something NEW arrived, so a quiet day is nearly free. Morning
+    # catches the overnight wire and the pre-market notes; midday catches the
+    # US session's own headlines; the 15:30 read is the last one before the
+    # 15:50 arm, so the arm always sees the day it is arming into.
+    - name: events_watch_morning
+      at: "09:55"
+      action: events_watch
+    - name: events_watch_midday
+      at: "13:00"
+      action: events_watch
+    - name: events_watch_close
+      at: "15:30"
+      action: events_watch
     - name: carry_scan
       at: "10:00"
       action: carry_scan              # resident book looks for rich premium
@@ -525,6 +629,16 @@ schedule:
     - name: carry_verify
       at: "15:45"                     # THE SIGN-OFF
       action: carry_verify
+    # The events arm. Deliberately AFTER carry_verify: the sign-off proves the
+    # transient books are flat and the carry book's margin is covered, and it
+    # should not be racing an order-routing cycle for the same account
+    # snapshot. Ten minutes to the close is enough for the direction call and
+    # a limit fill, and is late enough that the day's tape is fully formed.
+    # The LLM call lives inside this cycle - if FEATHERLESS_API_KEY is unset
+    # the direction model abstains and the book opens nothing, by design.
+    - name: events_arm
+      at: "15:50"
+      action: events_arm
     - name: eod_report
       at: "16:10"
       action: report
@@ -593,7 +707,7 @@ app:
   enabled: true
   host: "0.0.0.0"
   port: 8080
-  title: "Options Alpha Agents"
+  title: "Eventus Algorithm"
   # Public read-only dashboard: equity curve, open positions, decision log.
   # This is the "Application URL" submission field.
   public: true
@@ -636,6 +750,18 @@ backtest:
     # close, and anything opened at 14:45 ran to expiry.
     "15:10",
   ]
+  # Marking an open position is NOT the same job as scanning for entries. A
+  # scan builds a chain, reads news and breadth and runs every gate over the
+  # universe; a mark is a spot and a repricing. Running both on the 15-minute
+  # grid above meant a position that lives 20-90 minutes was observed 2-6
+  # times in its entire life, so the exit dials were sampled far too coarsely
+  # to mean what they say - trades that did trip one overshot it ~4x, and
+  # MFE/MAE was computed from two samples. Open positions are now re-marked
+  # and their exits evaluated every minute; ENTRIES stay on the grid above.
+  # Costs almost nothing: the loop is skipped when the book is flat and when
+  # the only open positions belong to a daily-marked book (vol_carry).
+  # 0 restores scan-grid-only management.
+  mark_interval_minutes: 1
   news_lookback_hours: 18.0
   fetch_news: true
   min_history_days: 40

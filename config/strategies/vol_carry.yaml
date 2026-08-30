@@ -172,7 +172,8 @@ structures:
 # at 1.5% behave very differently from one at 7.5% when one is tested.
 sizing:
   risk_fraction_per_position: 0.015
-  max_concurrent_positions: 5
+  # REMOVED 30 Aug - `max_concurrent_positions` was read by no code path.
+  # `risk.max_positions` (25 structures) is the control that binds.
   max_aggregate_risk: 0.08
 
 # --- 6. exits -----------------------------------------------------------------

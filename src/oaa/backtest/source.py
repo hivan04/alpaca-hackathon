@@ -34,6 +34,7 @@ from oaa.backtest.realchain import RealChainBuilder
 from oaa.core.logging import get_logger
 from oaa.core.types import MarketContext
 from oaa.data.indicators import adx, trend_strength, volume_ratio
+from oaa.data.term_structure import term_structure
 
 log = get_logger("backtest.source")
 
@@ -182,6 +183,7 @@ class HistoricalContextSource(ContextSource):
         news_lookback_hours: float = 18.0,
         intraday_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
         session_times_et: tuple[str, ...] = ("10:00",),
+        mark_interval_minutes: int = 1,
         market_symbol: str = "SPY",
         earnings_dates: dict[str, dt.date] | None = None,
         min_history: int = 40,
@@ -189,12 +191,18 @@ class HistoricalContextSource(ContextSource):
         real_chain: RealChainBuilder | None = None,
         min_iv_observations: int = 20,
         options_dte: tuple[int, int] = (3, 45),
+        term_anchors: tuple[int, int, int] = (1, 30, 7),
+        term_max_abs_slope_pct: float = 1.0,
     ) -> None:
         self.start = start
         self.end = end
         self.chain_model = chain_model or ChainModel()
         self.iv_model = iv_model or IVModel()
         self.session_times = session_times_et
+        #: Cadence, in minutes, at which OPEN positions are re-marked between
+        #: scans. Entries stay on `session_times`; see `marks_between`.
+        #: 0 disables the fine loop and restores scan-grid-only management.
+        self.mark_interval_minutes = int(mark_interval_minutes)
         self.news_lookback = dt.timedelta(hours=news_lookback_hours)
         self.earnings_dates = {k.upper(): v for k, v in (earnings_dates or {}).items()}
         self.min_history = min_history
@@ -208,6 +216,13 @@ class HistoricalContextSource(ContextSource):
         self.real_chain = real_chain
         self.min_iv_observations = min_iv_observations
         self.options_dte = options_dte
+        #: (front_dte, back_dte, min_separation_days) for the ATM IV term
+        #: structure. Handed down from `data.term_*` so replay and the live
+        #: providers anchor the slope at the same points on the ladder - the
+        #: failure in `claude/iv-rank-divergence.md` was two paths computing
+        #: different numbers under one name.
+        self.term_anchors = term_anchors
+        self.term_max_abs_slope_pct = term_max_abs_slope_pct
         self.iv_provenance: dict[str, str] = {}
         #: sessions where the real chain had nothing to offer. If this equals
         #: the session count the run measured NOTHING, which is a failure to
@@ -334,6 +349,78 @@ class HistoricalContextSource(ContextSource):
                     yield moment, contexts
 
     # ------------------------------------------------------------------ #
+    def marks_between(
+        self,
+        start: dt.datetime,
+        end: dt.datetime,
+        contexts: dict[str, MarketContext],
+        symbols: list[str],
+    ) -> Iterator[tuple[dt.datetime, dict[str, MarketContext]]]:
+        """Contexts at the mark cadence, strictly between two scan moments.
+
+        Built by EXTENDING the last scan's context rather than rebuilding it:
+        the intraday bars published since `start` are appended, the spot is
+        taken from the newest of them, and `asof` moves. Everything else - the
+        chain, the news, the term structure, the daily indicators - is carried
+        across unchanged.
+
+        That division is the whole reason this is cheap. The carried fields are
+        what an ENTRY reads, and this loop opens nothing; the replaced fields
+        are what a MARK reads (`_leg_marks` prices off `spot` and
+        `implied_vol`) and what an EXIT reads (`exit_on_vwap_recross` walks
+        `intraday_bars`). Rebuilding the chain sixty times an hour would cost
+        the run the same as sixty extra scans and change no mark by a cent.
+
+        No-lookahead still holds structurally: a bar is appended only once its
+        timestamp is at or before the moment being priced, which is the same
+        rule `_context` applies.
+
+        Bounded to one session on purpose. `end` is simply the next scan the
+        source produced, and over a night or a weekend that is the next
+        morning - marking a resident condor once a minute until then would be
+        both meaningless and slow.
+        """
+        step = self.mark_interval_minutes
+        if step <= 0 or not symbols or end <= start:
+            return
+        day = start.astimezone(dt.timezone.utc).date()
+        if end.astimezone(dt.timezone.utc).date() != day:
+            return
+
+        # Today's bars after the last scan, per symbol, sliced once.
+        pending: dict[str, list[dict[str, Any]]] = {}
+        for symbol in symbols:
+            history = self.histories.get(symbol)
+            if history is None or contexts.get(symbol) is None:
+                continue
+            rows = [
+                row for row in history.intraday.get(day, [])
+                if start < _parse_ts(row["timestamp"]) <= end
+            ]
+            if rows:
+                pending[symbol] = rows
+        if not pending:
+            return
+
+        moment = start + dt.timedelta(minutes=step)
+        while moment < end:
+            refined: dict[str, MarketContext] = {}
+            for symbol, rows in pending.items():
+                base = contexts[symbol]
+                fresh = [r for r in rows if _parse_ts(r["timestamp"]) <= moment]
+                if not fresh:
+                    continue
+                spot = float(fresh[-1]["close"])
+                refined[symbol] = base.model_copy(update={
+                    "asof": moment,
+                    "spot": round(spot, 4) if spot > 0 else base.spot,
+                    "intraday_bars": base.intraday_bars + fresh,
+                })
+            if refined:
+                yield moment, refined
+            moment += dt.timedelta(minutes=step)
+
+    # ------------------------------------------------------------------ #
     def _attention(
         self, contexts: dict[str, MarketContext], moment: dt.datetime
     ) -> ReplayAttention:
@@ -409,6 +496,9 @@ class HistoricalContextSource(ContextSource):
         for earlier in prior_days[-self.intraday_history_sessions:]:
             intraday = history.intraday[earlier] + intraday
         articles = self._news_for(history.symbol, moment)
+        # Built once and read twice: the term structure must be measured on the
+        # chain the strategy is handed, not on a second one built beside it.
+        chain = self._chain(history.symbol, spot, moment, atm_iv)
 
         return MarketContext(
             symbol=history.symbol,
@@ -417,10 +507,17 @@ class HistoricalContextSource(ContextSource):
             prev_close=float(history.bars[prior]["close"]),
             bars=history.bars[:index],      # complete sessions only
             intraday_bars=intraday,
-            chain=self._chain(history.symbol, spot, moment, atm_iv),
+            chain=chain,
             realised_vol=history.rv[prior],
             implied_vol=atm_iv,
             iv_rank=history.iv_rank[prior],
+            term_structure=term_structure(
+                chain, spot, moment.date(),
+                front_dte=self.term_anchors[0],
+                back_dte=self.term_anchors[1],
+                min_separation_days=self.term_anchors[2],
+                max_abs_slope_pct=self.term_max_abs_slope_pct,
+            ),
             trend_strength=history.trend[prior],
             adx=history.adx[prior],
             volume_ratio=history.vol_ratio[prior],
@@ -475,6 +572,7 @@ class HistoricalContextSource(ContextSource):
             "symbols": sorted(self.histories),
             "sessions": len(self.sessions()),
             "session_times_et": list(self.session_times),
+            "mark_interval_minutes": self.mark_interval_minutes,
             "start": self.start.isoformat(),
             "end": self.end.isoformat(),
             "news_articles": sum(len(v) for v in self.news_by_symbol.values()),

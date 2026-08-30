@@ -267,4 +267,11 @@ def _deterministic_action(cycle: str) -> str:
         "intraday_cutoff": "intraday_cutoff",
         "submission_flatten": "submission_flatten",
         "scan_and_trade": "scan_and_trade",
+        # The events cycles have no agent tool-loop of their own: the model
+        # call that matters is INSIDE the cycle (direction.predict), not
+        # wrapped around it. Mapping them here is what stops them falling
+        # through the .get default and silently running an intraday scan.
+        "events_arm": "events_arm",
+        "events_flatten": "events_flatten",
+        "events_watch": "events_watch",
     }.get(cycle, "scan_and_trade")

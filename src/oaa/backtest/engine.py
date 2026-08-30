@@ -77,6 +77,30 @@ class ContextSource(abc.ABC):
     @abc.abstractmethod
     def __iter__(self) -> Iterator[tuple[dt.datetime, dict[str, MarketContext]]]: ...
 
+    def marks_between(
+        self,
+        start: dt.datetime,
+        end: dt.datetime,
+        contexts: dict[str, MarketContext],
+        symbols: list[str],
+    ) -> Iterator[tuple[dt.datetime, dict[str, MarketContext]]]:
+        """Cheap contexts BETWEEN two scans, for marking open positions only.
+
+        Scanning and marking are not the same job. A scan builds a chain,
+        reads news, scores breadth and runs every entry gate over the whole
+        universe; marking an open structure is a spot and a repricing. Tying
+        them to one cadence meant a position that lives 20-90 minutes was
+        observed 2-6 times in its entire life, so `exits.target_pct_of_premium`
+        and `exits.stop_pct_of_premium` were sampled far too coarsely to mean
+        what the config says - measured, trades that did trip a dial overshot
+        it by roughly 4x, and MFE/MAE was computed from two observations.
+
+        The default is an empty iterator: a source that cannot produce
+        intra-scan contexts simply keeps the old behaviour rather than
+        pretending to a resolution it does not have.
+        """
+        return iter(())
+
 
 # --------------------------------------------------------------------------- #
 # records
@@ -169,6 +193,10 @@ class BacktestResult:
     #: Marks that broke the structure's own arithmetic bound and were
     #: clamped. Should be zero; non-zero is a bug to chase.
     risk_bound_clamps: int = 0
+    #: Mark/manage passes run BETWEEN scan moments. Zero on a run containing
+    #: an intraday book means the fine loop never fired and every exit dial
+    #: is again being sampled on the scan grid.
+    fine_marks: int = 0
     ideas_generated: int = 0
     ideas_approved: int = 0
     start_equity: float = 0.0
@@ -256,6 +284,7 @@ class BacktestResult:
             "mixed_surface_marks": self.mixed_surface_marks,
             "intraday_model_marks": self.intraday_model_marks,
             "risk_bound_clamps": self.risk_bound_clamps,
+            "fine_marks": self.fine_marks,
         }
 
     def rejection_funnel(self) -> dict[str, int]:
@@ -367,6 +396,8 @@ class BacktestEngine:
         #: Times the mark-to-market loss exceeded the structure's own
         #: arithmetic bound and had to be clamped. Should be ZERO.
         self._risk_bound_clamps = 0
+        #: Mark/manage passes between scan moments. See `_mark_between`.
+        self._fine_marks = 0
         #: The vol a contract's real daily print implies, recovered ONCE per
         #: contract per session and then held. See `_leg_marks`: re-deriving
         #: it at every later spot is an algebraic fixed point that pins the
@@ -383,6 +414,14 @@ class BacktestEngine:
 
         try:
             for step, (moment, contexts) in enumerate(source):
+                # 0. mark and manage what is open at the FINE cadence, over the
+                #    interval that has just elapsed. Done here rather than
+                #    after the scan because the next scan moment is not known
+                #    until the source produces it, and bounding the fine loop
+                #    is what keeps it from running overnight.
+                if last_moment is not None:
+                    self._mark_between(source, last_moment, last_contexts, moment, result)
+
                 clock.freeze(moment)          # the replayed session IS "now"
                 last_moment, last_contexts = moment, contexts
                 self.broker.now = moment
@@ -438,6 +477,7 @@ class BacktestEngine:
         result.mixed_surface_marks = self._mixed_surface_marks
         result.intraday_model_marks = self._intraday_model_marks
         result.risk_bound_clamps = self._risk_bound_clamps
+        result.fine_marks = self._fine_marks
         return result
 
     # ------------------------------------------------------------------ #
@@ -768,7 +808,8 @@ class BacktestEngine:
                     # 2. the deterministic risk engine - the only thing that
                     #    can approve. The critic cannot.
                     verdict = self.risk.evaluate(
-                        idea, account, now=moment, market_open=True
+                        idea, account, now=moment, market_open=True,
+                        contexts=contexts,
                     )
                     if not verdict.approved:
                         rule = next(
@@ -780,10 +821,16 @@ class BacktestEngine:
                                 ts=moment.isoformat(), symbol=symbol,
                                 strategy=strategy.name, stage="risk", vetoed_by=rule,
                                 reason=verdict.reasons[0] if verdict.reasons else "",
-                                metrics={"checks": verdict.checks},
+                                metrics={"checks": verdict.checks, **verdict.metrics},
                             )
                         )
                         continue
+
+                    # What the risk engine MEASURED, carried onto the trade so
+                    # the portfolio Greek caps can be shown to have been
+                    # calibrated against runs rather than picked.
+                    if verdict.metrics:
+                        idea.meta["risk_metrics"] = dict(verdict.metrics)
 
                     # 3. partner adapters at the risk stage may veto
                     if self.partners is not None:
@@ -894,6 +941,54 @@ class BacktestEngine:
     # ------------------------------------------------------------------ #
     # management
     # ------------------------------------------------------------------ #
+    def _mark_between(
+        self,
+        source: ContextSource,
+        start: dt.datetime,
+        contexts: dict[str, MarketContext],
+        end: dt.datetime,
+        result: BacktestResult,
+    ) -> None:
+        """Run the mark/exit loop at `backtest.mark_interval_minutes` between scans.
+
+        Three deliberate limits, because the point of this loop is that it is
+        cheap enough to leave on:
+
+        1. **Nothing runs when nothing is open.** The fine loop is a no-op on a
+           flat book, which is most of the grid.
+        2. **Only intraday-marked books.** `vol_carry` holds for days and its
+           marks come from a DAILY option tape, so a one-minute cadence would
+           reprice the same close sixty times an hour and buy nothing. The
+           daily grid is the correct granularity for that book and it keeps it.
+        3. **No entries.** This loop never calls `_scan`. The chain, the news
+           and the breadth read in each context are carried unchanged from the
+           last scan - correct for marking, which reads spot and vol, and NOT
+           good enough to open new risk on, which is why it may not.
+
+        What it buys: an open structure is observed every minute instead of
+        every fifteen, so a target, a stop, a VWAP re-cross or a time stop
+        fires within a minute of being true rather than overshooting to the
+        next grid point, and MFE/MAE is built from 30-90 samples instead of 2.
+        The excursion distribution only becomes readable at this resolution,
+        and every question after it - trailing stop, wider target, shorter
+        hold - is downstream of being able to read it.
+        """
+        if int(getattr(self.cfg.backtest, "mark_interval_minutes", 0)) <= 0:
+            return
+        symbols = sorted(
+            {p.record.symbol for p in self._open if _marks_intraday(p.strategy)}
+        )
+        if not symbols or not contexts:
+            return
+        for fine, fine_contexts in source.marks_between(start, end, contexts, symbols):
+            if not self._open:
+                break
+            clock.freeze(fine)
+            self.broker.now = fine
+            self._mark(fine_contexts, fine)
+            self._manage(fine_contexts, fine, result)
+            self._fine_marks += 1
+
     def _manage(
         self, contexts: dict[str, MarketContext], moment: dt.datetime, result: BacktestResult
     ) -> None:

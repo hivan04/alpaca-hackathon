@@ -87,24 +87,35 @@ def create_app(settings: Settings) -> Any:
         )
         recent = journal.decisions(25)
         if recent:
+            def _approved(v: Any) -> str:
+                if v:
+                    return '<span class="pill yes"><span class="d"></span>yes</span>'
+                if v == 0:
+                    return '<span class="pill no"><span class="d"></span>no</span>'
+                return '<span class="pill"><span class="d"></span>pending</span>'
+
             body = "".join(
                 "<tr>"
                 f"<td>{str(r['ts'])[5:19].replace('T', ' ')}</td>"
                 f"<td>{r.get('symbol') or ''}</td>"
                 f"<td>{r.get('strategy') or ''}</td>"
                 f"<td>{r.get('action') or ''}</td>"
-                f"<td>{'yes' if r.get('approved') else ('no' if r.get('approved') == 0 else '-')}</td>"
+                f"<td>{_approved(r.get('approved'))}</td>"
                 f"<td>{(r.get('reason') or r.get('thesis') or '')[:110]}</td>"
                 "</tr>"
                 for r in recent
             )
             table = (
-                '<div class="section"><h2>Decision log</h2><table><thead><tr>'
+                '<div class="section"><h2>Decision log</h2><div class="table-wrap">'
+                "<table><thead><tr>"
                 "<th>Time</th><th>Symbol</th><th>Strategy</th><th>Action</th>"
                 "<th>Approved</th><th>Reasoning</th></tr></thead>"
-                f"<tbody>{body}</tbody></table></div>"
+                f"<tbody>{body}</tbody></table></div></div>"
             )
-            page = page.replace("</body>", table + "</body>")
+            # The template closes with the footer inside .wrap, so the log has to
+            # land before that wrapper - appending at </body> would put it
+            # outside the max-width column and it would run the full viewport.
+            page = page.replace('<footer>', table + '<footer>', 1)
         refresh = (
             f'<meta http-equiv="refresh" content="{cfg.app.refresh_seconds}">'
             if cfg.app.refresh_seconds else ""

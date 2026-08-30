@@ -11,47 +11,53 @@ from __future__ import annotations
 from typing import Any
 
 LIGHT: dict[str, Any] = {
-    "surface": "#fcfcfb",
-    "plane": "#f9f9f7",
-    "text": "#0b0b0b",
-    "text_secondary": "#52514e",
-    "muted": "#898781",
-    "grid": "#e1e0d9",
-    "axis": "#c3c2b7",
+    "surface": "#f6f7f9",
+    "plane": "#ffffff",
+    "raised": "#f0f2f5",
+    "text": "#12161f",
+    "text_secondary": "#6b7280",
+    "muted": "#9aa1ac",
+    "grid": "#e3e6eb",
+    "axis": "#c9ced6",
     "series": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4",
                "#008300", "#4a3aa7", "#e34948"],
-    "good": "#0ca30c",
-    "warning": "#fab219",
+    "good": "#178a5c",
+    "warning": "#c97f0e",
     "serious": "#ec835a",
-    "critical": "#d03b3b",
-    "up_text": "#006300",
+    "critical": "#d1373c",
+    "up_text": "#178a5c",
     "accent": "#1388a8",
 }
 
 DARK: dict[str, Any] = {
-    "surface": "#1a1a19",
-    "plane": "#0d0d0d",
-    "text": "#ffffff",
-    "text_secondary": "#c3c2b7",
-    "muted": "#898781",
-    "grid": "#2c2c2a",
-    "axis": "#383835",
+    "surface": "#0a0e14",
+    "plane": "#10151f",
+    "raised": "#141b28",
+    "text": "#e8edf4",
+    "text_secondary": "#6b7688",
+    "muted": "#414c5e",
+    "grid": "#1c2430",
+    "axis": "#2a3442",
     "series": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181",
-               "#008300", "#9085e9", "#e66767"],
-    "good": "#0ca30c",
-    "warning": "#fab219",
+               "#2f9e2f", "#9085e9", "#e66767"],
+    "good": "#3ddc97",
+    "warning": "#f5a623",
     "serious": "#ec835a",
-    "critical": "#d03b3b",
-    "up_text": "#0ca30c",
+    "critical": "#ff5c5c",
+    "up_text": "#3ddc97",
     "accent": "#4cc4de",
 }
 
 
-# The one highlight colour, in the two modes. The dark value is the same hue
-# lifted in lightness and chroma - a teal that is legible on #1a1a19 the way
-# #1388a8 is on #fcfcfb. Both are also written into .streamlit/config.toml as
-# theme.light/dark primaryColor, which is what Streamlit's own chrome (selected
-# tabs, focus rings, sliders, links) uses; keep the two in step.
+
+# The one highlight colour, in the two modes. A teal - the dark value is the
+# same hue lifted in lightness and chroma, so #4cc4de reads on #0a0e14 the way
+# #1388a8 reads on #f6f7f9. It is chrome and "look here" ONLY. Direction is
+# never carried by the accent: profit is `good`, loss is `critical`, caution is
+# `warning` (amber), and those are the only colours allowed to mean anything.
+# Both accents are also written into .streamlit/config.toml as theme.light/dark
+# primaryColor, which is what Streamlit's own chrome (selected tabs, focus
+# rings, sliders, links) uses; keep the two in step.
 ACCENT_LIGHT = LIGHT["accent"]
 ACCENT_DARK = DARK["accent"]
 
@@ -172,8 +178,8 @@ def style(fig: Any, colours: dict[str, Any], height: int = 320, ytitle: str = ""
         margin={"l": 8, "r": 8, "t": 28, "b": 8},
         paper_bgcolor=colours["surface"],
         plot_bgcolor=colours["surface"],
-        font={"color": colours["text_secondary"], "size": 12,
-              "family": "system-ui, -apple-system, Segoe UI, sans-serif"},
+        font={"color": colours["text_secondary"], "size": 11,
+              "family": "'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace"},
         hovermode="x unified",
         legend={"orientation": "h", "y": 1.12, "x": 0, "font": {"size": 11}},
     )

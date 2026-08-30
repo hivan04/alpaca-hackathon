@@ -231,9 +231,10 @@ class RealChainBuilder:
                     open_interest=ref.open_interest,
                     volume=volume,
                     asof=asof,
+                    iv_source=iv_source,
                 )
             )
-            _ = (source, iv_source)   # kept for the mark log below
+            _ = source   # kept for the mark log below
 
         if not quotes and symbol.upper() not in self._explained:
             # Say WHICH filter emptied the chain. "Nothing was priced" with no

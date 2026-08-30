@@ -6,9 +6,10 @@
 # (which decides how often the book trades at all) and max_relative_spread
 # (which decides whether what it trades can clear its costs).
 #
-# This file is NOT referenced from config/default.yaml's `strategies:` list, and
-# that is deliberate - the options runner must never load this book. Its entry
-# point is `oaa events arm`.
+# Referenced from config/default.yaml's `strategies:` list since 30 Aug. The
+# book is driven by `oaa run` (events_flatten 09:45, events_watch 09:55/13:00/
+# 15:30, events_arm 15:50) and `oaa events screen | watch | arm | flatten`
+# remain for manual and dry runs. It is still NOT a firewall tenant.
 # =============================================================================
 
 book: events
@@ -65,6 +66,52 @@ sentiment:
   # cheaper AND a smaller injection target.
   max_chars: 12000
 
+# The watch: read each name for days before it reports, not once at 15:50 on
+# arm day. `oaa run` polls this three times a session (09:55, 13:00, 15:30) and
+# the notes it retains are handed to the direction call at arm time.
+watch:
+  enabled: true
+  # Calendar days before the report to start reading. Three covers the window
+  # in which revisions and pre-print positioning actually land. There is no
+  # matching "stop" dial: the watch always stops the day the print is behind
+  # us, because after that nothing it reads can inform the trade and the notes
+  # would be post-print commentary sitting where a later cycle reads pre-print
+  # evidence.
+  lookahead_days: 3
+  # One wire storm on one name must not spend the whole day's budget.
+  max_new_items_per_poll: 40
+  # Below this a batch is counted but not kept. Strict on purpose: ten
+  # low-salience notes dilute the two that matter. Raise it if the dossiers
+  # fill with price commentary.
+  min_salience: 0.35
+  max_notes: 40
+  note_ttl_days: 10
+  max_seen_keys: 2000
+  # Retired dossiers move to runs/events/watch/reported/ when the print is
+  # past - kept, because they are the evidence trail behind a recorded trade.
+  store_dir: runs/events/watch
+
+  # -- the model that does the triage ---------------------------------------
+  # This role answers a narrow, schema-bound question dozens of times a day and
+  # is usually right to say "immaterial". Spending the 32B model on it spends
+  # the direction call's budget on noise, so it runs a small one.
+  #
+  # Verified on featherless.ai/models?families=qwen3. Alternatives, cheapest
+  # first: Qwen/Qwen3-4B-Instruct-2507, Qwen/Qwen3-8B, Qwen/Qwen3-14B.
+  # null inherits agents.llm from config/default.yaml.
+  model: Qwen/Qwen3-8B
+  # A KEY IS AUTHENTICATION, NOT MODEL SELECTION. A second Featherless key
+  # reaches the same catalogue on the same account, so it buys nothing
+  # functional - what makes this role a different agent is the `model` above.
+  # Set this only if you want the watch metered or revocable separately from
+  # the arm; then put the second key in .env under that name. null uses
+  # whatever agents.llm uses, which is FEATHERLESS_API_KEY.
+  api_key_env: null
+  # Triage should be boring and repeatable, not creative.
+  temperature: 0.0
+  max_tokens: 600
+  seed: 11
+
 direction:
   # The single most important number in this file. At 0.55 the book trades
   # marginal calls at minimum size; at 0.70 it trades rarely and only on
@@ -76,8 +123,17 @@ direction:
   require_evidence: true
   max_tokens: 1200
   temperature: 0.1
-  # null inherits agents.llm from config/default.yaml. Pin a model and a seed
-  # here to make a run repeatable.
+  # As with the watch: only set api_key_env if you want this role metered or
+  # revocable separately. null uses whatever agents.llm uses.
+  api_key_env: null
+  # The call the money rides on: once per name, on the whole accumulated week,
+  # and its confidence sets the position size. This is where the heavier model
+  # earns its keep - Qwen/Qwen3-32B is the default, moonshotai/Kimi-K2-Instruct
+  # is the step up. null inherits agents.llm from config/default.yaml.
+  #
+  # NOTE: until 30 Aug `model` and `seed` were read by nothing. The comment
+  # here promised a pinned model and the call ran on agents.llm regardless.
+  # They are wired now (see strategies/events/llm_roles.py).
   model: null
   seed: 11
   # Replay only. Live, the engine always supplies a direction call, so a

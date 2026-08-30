@@ -47,10 +47,15 @@ def test_an_unconfirmed_print_is_called_out_on_the_page():
     assert "not armed" in warnings.lower()
 
 
-def test_the_control_tab_offers_no_switch_for_the_events_book():
-    """The events book runs in its own process and never leases firewall
-    capital, so `oaa run` cannot open a position for it. A toggle here would
-    imply control the page does not have - it must render as a read-only row.
+def test_the_control_tab_switches_the_events_book_like_any_other():
+    """Inverted on 30 Aug, deliberately.
+
+    Until then the events book ran in its own process, `oaa run` could not open
+    a position for it, and a toggle here would have implied control the page
+    did not have - so it rendered read-only. The book is now two scheduled
+    cycles inside `oaa run`, so the switch controls something real and the
+    read-only row would be the lie. It is still not a firewall tenant, and the
+    row says so.
     """
     def app():
         from oaa.app.control import render_control
@@ -63,15 +68,21 @@ def test_the_control_tab_offers_no_switch_for_the_events_book():
     assert not at.exception
     text = " ".join(str(m.value) for m in at.markdown)
     assert "Earnings events" in text, "the events book must still be listed"
-    assert "separate process" in text
-    assert "own process" in text
-    # Three switchable books across two accounts: vol_carry, intraday_momentum,
-    # event_premium. Was five until 29 Aug, when momentum_debit_spread and
-    # earnings_calendar were deleted - both were multi-day strategies homed in
-    # the intraday book, which the firewall liquidates at 15:15, so neither
-    # could reach its own exit rules. If this number changes again, a book was
-    # added or removed and this page needs to say so deliberately.
-    assert len(at.toggle) == 6
+    assert "separate process" not in text
+    assert "own process" not in text
+    # The row must keep saying the one thing that is still true and surprising:
+    # this book holds overnight and leases no firewall capital.
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert "not a firewall tenant" in captions
+    # Four switchable books across two accounts: vol_carry, intraday_momentum,
+    # event_premium, earnings_event_directional. Was three until 30 Aug, when
+    # the events book moved into `oaa run` and earned a real toggle; five until
+    # 29 Aug, when momentum_debit_spread and earnings_calendar were deleted -
+    # both were multi-day strategies homed in the intraday book, which the
+    # firewall liquidates at 15:15, so neither could reach its own exit rules.
+    # If this number changes again, a book was added or removed and this page
+    # needs to say so deliberately.
+    assert len(at.toggle) == 8
 
 
 def test_every_configured_strategy_appears_on_the_control_tab():

@@ -395,6 +395,13 @@ class ChainModel:
                             ask=ask,
                             last=round(mid, 2),
                             implied_volatility=round(vol, 4),
+                            # This surface's TERM structure is a constant:
+                            # `_atm_for_term` is atm_iv + term_slope * f(years),
+                            # with term_slope read from config. Anything that
+                            # measures a slope across these quotes measures
+                            # `backtest.chain.term_slope` and nothing else, so
+                            # every quote says out loud that it is modelled.
+                            iv_source="modelled (no real chain)",
                             greeks=self._greeks(spot, strike, years, vol, is_call),
                             open_interest=oi,
                             volume=volume,

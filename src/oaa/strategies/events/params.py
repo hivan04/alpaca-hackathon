@@ -81,6 +81,59 @@ class SentimentParams:
 
 
 @dataclass(frozen=True)
+class WatchParams:
+    """Reading a name for DAYS before it reports, rather than once.
+
+    A snapshot taken at 15:50 on arm day sees whatever is on the wire in that
+    minute and calls it the picture. The information that decides a print
+    arrives across the week: an estimate revision on the Tuesday, a supplier's
+    read-across on the Wednesday, the retail stream crowding one way over
+    three days. The watch reads each of those on the day it lands, judges it
+    once, and hands the arm call a dated record instead of a snapshot.
+    """
+
+    enabled: bool = True
+    #: Start watching this many CALENDAR days before the report. Three covers
+    #: the window in which pre-print positioning and revisions actually land
+    #: without paying for a fortnight of noise. The watch always stops the day
+    #: the print is behind us - that bound is not tunable, it is the point.
+    lookahead_days: int = 3
+    #: Cap on new items handed to the model in one poll. A wire storm on one
+    #: name must not spend the whole day's budget.
+    max_new_items_per_poll: int = 40
+    #: Below this a batch is counted but not retained. Strict on purpose: ten
+    #: low-salience notes dilute the two that matter.
+    min_salience: float = 0.35
+    #: Rolling caps. A dossier is evidence for one print, not a news archive.
+    max_notes: int = 40
+    note_ttl_days: int = 10
+    #: Hashes of items already read, so a poll that finds nothing new spends
+    #: nothing. Comfortably more than lookahead_days of both feeds.
+    max_seen_keys: int = 2000
+    #: Where dossiers live. Retired ones move to `<store_dir>/reported/` when
+    #: the print is past - kept, because they are the evidence trail behind a
+    #: trade the journal already recorded.
+    store_dir: str = "runs/events/watch"
+
+    # -- the model that does the triage --------------------------------- #
+    #: This role runs many times a day on a narrow, schema-bound question, and
+    #: the right answer is usually "immaterial". That is a small model's job,
+    #: and spending a 32B model on it is spending the direction call's budget
+    #: on noise. null inherits `agents.llm`, which is what a deployment that
+    #: sets nothing here gets.
+    model: str | None = None
+    #: A key is authentication, not model selection: a second Featherless key
+    #: reaches the same catalogue on the same account. Set this only if you
+    #: want the watch metered or revocable separately from the arm. null uses
+    #: whatever `agents.llm` uses.
+    api_key_env: str | None = None
+    #: Triage wants to be boring and repeatable, not creative.
+    temperature: float = 0.0
+    max_tokens: int = 600
+    seed: int | None = 11
+
+
+@dataclass(frozen=True)
 class DirectionParams:
     """The LLM call that predicts post-print direction."""
 
@@ -110,7 +163,16 @@ class DirectionParams:
     derived_confidence: float = 0.55
     #: Featherless serves open-weight models; pin one and a seed so a run can
     #: be repeated. None inherits `agents.llm` from the main config.
+    #:
+    #: Read by `llm_roles.role_llm` since 30 Aug. Before that both fields were
+    #: declared here, documented in the YAML, and never loaded - the call ran
+    #: on `agents.llm` whatever this said. Config that looks configured and is
+    #: not is the same failure as the unnoticed Anthropic key, so it is worth
+    #: naming rather than quietly fixing.
     model: str | None = None
+    #: As with the watch: only set this if you want the direction call metered
+    #: or revocable separately. null uses whatever `agents.llm` uses.
+    api_key_env: str | None = None
     seed: int | None = 11
 
 
@@ -277,6 +339,7 @@ class EventsParams:
     universe_hint: list[str] = field(default_factory=list)
     screen: ScreenParams = field(default_factory=ScreenParams)
     sentiment: SentimentParams = field(default_factory=SentimentParams)
+    watch: WatchParams = field(default_factory=WatchParams)
     direction: DirectionParams = field(default_factory=DirectionParams)
     technicals: TechnicalParams = field(default_factory=TechnicalParams)
     sizing: SizingParams = field(default_factory=SizingParams)
@@ -318,6 +381,7 @@ def load_params(path: str | Path = DEFAULT_PARAMS_PATH) -> EventsParams:
         universe_hint=[s.upper() for s in (raw.get("universe_hint") or [])],
         screen=_build(ScreenParams, raw.get("screen"), "screen"),
         sentiment=_build(SentimentParams, raw.get("sentiment"), "sentiment"),
+        watch=_build(WatchParams, raw.get("watch"), "watch"),
         direction=_build(DirectionParams, raw.get("direction"), "direction"),
         technicals=_build(TechnicalParams, raw.get("technicals"), "technicals"),
         sizing=_build(SizingParams, raw.get("sizing"), "sizing"),

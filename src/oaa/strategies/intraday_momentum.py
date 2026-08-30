@@ -356,6 +356,62 @@ class IntradayMomentum(Strategy):
             else:
                 notes.append(f"htf: fewer than {need_bars + 1} x {htf_minutes}m bars yet")
 
+        # TERM STRUCTURE. The first confirmation in this book that does not
+        # read the price series.
+        #
+        # Every other vote here - volume, persistence, band width, the hourly
+        # drift - is a different question asked of ONE source, so when that
+        # source is uninformative they fall silent together. Measured over a
+        # 15-minute-cycle replay, 64% of rejections were "no VWAP cross" and
+        # 21% the volume z. The chain is a second source and the book was
+        # reading exactly one scalar out of it.
+        #
+        # The band, and why it is a band. `slope_pct = (front_iv - back_iv) /
+        # back_iv`:
+        #
+        #   below `slope_band_min` (deep contango) - the surface is saying it
+        #     expects nothing from this session. Front gamma is cheap because
+        #     nothing is priced to happen in it, and directional continuation
+        #     is what this book monetises.
+        #   above `slope_band_max` (steep backwardation) - the move is priced.
+        #     We would be paying up for the forecast we are trying to make,
+        #     which is the same argument `selection.iv_rank_no_trade_above`
+        #     makes at the level rather than at the slope.
+        #
+        # STRICTLY ADDITIVE, by the arithmetic of the tally and not by
+        # promise: `confirmations` is a sum over votes that passed and `needed`
+        # is `min(confirmations_required, possible)`, so a seventh vote raises
+        # `possible` from 6 to 7 while `needed` stays at 3. A failing term
+        # vote costs nothing; a passing one can carry a candidate over the
+        # line. This gate can only widen the entry set.
+        #
+        # An unmeasurable slope does NOT vote and does not enter `possible` -
+        # the `claude/confirmation-scoring.md` precedent. That matters more
+        # here than anywhere else in this file, because the modelled chain's
+        # term structure is `backtest.chain.term_slope`, a constant: a vote
+        # read off it would pass or fail identically on every candidate in
+        # every session and look like a signal doing work.
+        if bool(self.p("momentum.term_structure.enabled", True)):
+            term = market.term_structure
+            if term is None:
+                notes.append("term structure: chain has no two expiries to compare")
+            elif bool(self.p("momentum.term_structure.require_measured", True)) and not term.measured:
+                notes.append(f"term structure: {term.source}")
+            else:
+                low = float(self.p("momentum.term_structure.slope_band_min", -0.10))
+                high = float(self.p("momentum.term_structure.slope_band_max", 0.25))
+                metrics["term_slope_pct"] = term.slope_pct
+                metrics["term_front_dte"] = float(term.front_dte)
+                metrics["term_back_dte"] = float(term.back_dte)
+                votes["term_structure"] = low <= term.slope_pct <= high
+                if not votes["term_structure"]:
+                    shape = "backwardation" if term.slope_pct > high else "contango"
+                    notes.append(
+                        f"term slope {term.slope_pct:+.1%} ({term.front_dte}d vs "
+                        f"{term.back_dte}d) outside the "
+                        f"[{low:+.0%}, {high:+.0%}] band - {shape}"
+                    )
+
         rsi_value = rsi(px, int(self.p("momentum.rsi_period", 14)))
         metrics["rsi"] = rsi_value if rsi_value is not None else -1.0
         upper = float(self.p("momentum.rsi_veto_upper", 80))
@@ -617,6 +673,17 @@ class IntradayMomentum(Strategy):
             confirmed += int(float(catalyst.metrics.get("confirmed", 0.0)) >= 1.0)
         missed = str(momentum.metrics.get("confirmations_failed") or "").strip()
         caveat = f" Not confirming: {missed}." if missed else ""
+        # The one input here that is not the price series, so it is worth
+        # naming explicitly rather than leaving inside the vote count.
+        term = market.term_structure
+        surface = ""
+        if term is not None and term.measured:
+            shape = "backwardated" if term.slope > 0 else "in contango"
+            surface = (
+                f" The surface is {shape}: {term.front_dte}d ATM IV "
+                f"{term.front_iv:.1%} against {term.back_dte}d {term.back_iv:.1%} "
+                f"({term.slope_pct:+.1%})."
+            )
         return (
             f"{market.symbol} crossed {direction} session VWAP "
             f"({momentum.metrics.get('close', 0):.2f} vs "
@@ -626,6 +693,7 @@ class IntradayMomentum(Strategy):
             f"time-of-day bucket, RSI {momentum.metrics.get('rsi', 0):.0f}, "
             f"catalyst score {catalyst.metrics.get('score', 0):.2f} on "
             f"{int(catalyst.metrics.get('news_count', 0))} headline(s)."
+            f"{surface}"
             f"{caveat} {selection.reason}. Loss is capped at the premium paid; "
             "the position is flat by 15:10, ahead of the 15:15 cutoff."
         )

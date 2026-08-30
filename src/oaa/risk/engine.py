@@ -17,8 +17,9 @@ from typing import Any
 from oaa.config.schema import Config
 from oaa.core import clock
 from oaa.core.logging import get_logger
-from oaa.core.types import AccountSnapshot, RiskVerdict, Side, TradeIdea
+from oaa.core.types import AccountSnapshot, MarketContext, RiskVerdict, Side, TradeIdea
 from oaa.options.occ import underlying_of
+from oaa.risk.exposure import book_exposure, describe, idea_exposure, normalised
 from oaa.risk.sizing import size_by_risk
 
 log = get_logger("risk")
@@ -120,8 +121,19 @@ class RiskEngine:
         account: AccountSnapshot,
         now: dt.datetime | None = None,
         market_open: bool = True,
+        contexts: dict[str, MarketContext] | None = None,
     ) -> RiskVerdict:
+        """`contexts` is this cycle's market snapshots, keyed by symbol.
+
+        Optional, and only the aggregate-Greek gate uses it: the greeks of an
+        ALREADY OPEN position have to be recovered by matching its OCC symbol
+        back to a chain, because `PositionSnapshot` carries no greeks - the
+        broker does not send any. A caller that omits it gets every other check
+        unchanged and a Greek gate that can only see the new idea, which is
+        recorded as reduced coverage rather than passed off as a clean read.
+        """
         checks: dict[str, bool] = {}
+        metrics: dict[str, Any] = {}
         now = now or clock.utcnow()
         self.observe(account, now)
 
@@ -130,6 +142,7 @@ class RiskEngine:
             log.info("REJECT %s [%s] %s", idea.symbol, rule, reason)
             verdict = RiskVerdict.reject(reason, checks)
             verdict.reasons.append(f"rule={rule}")
+            verdict.metrics = metrics
             return verdict
 
         # 0. The temporal firewall ------------------------------------------ #
@@ -304,6 +317,100 @@ class RiskEngine:
                 )
         checks["portfolio_risk"] = True
 
+        # 5b. Aggregate GREEKS ------------------------------------------------ #
+        #
+        # Every limit above counts structures. `max_positions`,
+        # `max_new_positions_per_day`, `max_positions_per_underlying` and
+        # `duplicate_structure` are all blind to twenty-five positions that are
+        # one bet - and measured 28 Aug, this ten-symbol universe behaves like
+        # 2.4 independent bets. In the 27 Aug carry run NVDA and SPY lost $2,322
+        # between them on the SAME session; the daily halt catches the next day,
+        # not that one.
+        #
+        # `max_net_delta`, `max_net_vega` and `max_notional_per_trade_pct` were
+        # in the config, in the docs and in no code path whatsoever. This is
+        # where they start binding.
+        #
+        # Coverage is reported on every verdict, pass or fail. A cap computed
+        # over half the book passes trades a full one would refuse, silently,
+        # and that is the failure mode this repo keeps rediscovering.
+        spot = None
+        if contexts:
+            own = contexts.get(idea.symbol.upper()) or contexts.get(idea.symbol)
+            spot = getattr(own, "spot", None)
+        added = idea_exposure(idea, quantity, spot=spot)
+        if added is None:
+            # Greeks absent from the chain that priced this structure. The free
+            # indicative feed does this. Measure-nothing is recorded, not
+            # papered over - and it does NOT refuse, because a feed gap is not
+            # a risk breach and refusing on it would stand the book down for a
+            # data problem.
+            metrics["greek_gate"] = "unmeasurable - leg quotes carry no greeks"
+            checks["net_greeks"] = True
+        else:
+            open_book = book_exposure(account, contexts)
+            projected = open_book + added
+            metrics.update(describe(projected, account.equity))
+            metrics["greek_coverage"] = projected.coverage
+            ratios = normalised(projected, account.equity)
+
+            if not projected.complete:
+                log.warning(
+                    "portfolio greeks cover %.0f%% of open contracts (missing %s) - "
+                    "the delta and vega caps are measured on what could be recovered",
+                    projected.coverage * 100, ",".join(projected.missing[:4]) or "?",
+                )
+
+            # A ceiling of 0 or less means MEASURE ONLY. That is a deliberate
+            # setting, not a disabled one: these thresholds had never been
+            # enforced, so no value in the file was ever calibrated against a
+            # run, and shipping a number picked from nothing is how a risk
+            # control ends up either blocking everything or never firing.
+            max_delta = float(self.limits.max_net_delta or 0.0)
+            max_vega_cfg = float(self.limits.max_net_vega or 0.0)
+            max_notional_cfg = float(self.limits.max_notional_per_trade_pct or 0.0)
+            if max(max_delta, max_vega_cfg, max_notional_cfg) <= 0:
+                # Pure measure-only. The mode exists to CALIBRATE, so it has to
+                # emit something; a mode that refuses nothing and says nothing
+                # is indistinguishable from the unenforced state it replaced.
+                log.info(
+                    "GREEKS %s [%s] delta %+.3f of equity  vega $%+.0f/pt per $10k  "
+                    "notional %.2fx  trade %.2fx  coverage %.0f%%",
+                    idea.symbol, idea.book, ratios["delta_ratio"], ratios["vega_ratio"],
+                    ratios["notional_ratio"],
+                    normalised(added, account.equity)["notional_ratio"],
+                    projected.coverage * 100,
+                )
+
+            if max_delta > 0 and abs(ratios["delta_ratio"]) > max_delta:
+                return fail(
+                    "net_delta",
+                    f"portfolio delta {ratios['delta_ratio']:+.1%} of equity would "
+                    f"exceed the {max_delta:.0%} cap - the book is already this "
+                    "directional and the names move together",
+                )
+            checks["net_delta"] = True
+
+            max_vega = float(self.limits.max_net_vega or 0.0)
+            if max_vega > 0 and abs(ratios["vega_ratio"]) > max_vega:
+                return fail(
+                    "net_vega",
+                    f"portfolio vega ${ratios['vega_ratio']:,.0f} per vol point per "
+                    f"$10k equity would exceed the ${max_vega:,.0f} cap",
+                )
+            checks["net_vega"] = True
+
+            max_notional = float(self.limits.max_notional_per_trade_pct or 0.0)
+            trade_notional = normalised(added, account.equity)["notional_ratio"]
+            metrics["trade_notional_ratio"] = trade_notional
+            if max_notional > 0 and trade_notional > max_notional:
+                return fail(
+                    "trade_notional",
+                    f"this structure controls {trade_notional:.0%} of equity in "
+                    f"delta-equivalent notional, cap is {max_notional:.0%}",
+                )
+            checks["trade_notional"] = True
+
         # 6. Cash ------------------------------------------------------------- #
         # A debit costs its premium; a CREDIT structure costs collateral, which
         # for a defined-risk spread is its max loss. Charging max(0, net_price)
@@ -335,7 +442,7 @@ class RiskEngine:
             )
         checks["time_window"] = True
 
-        return self._finalise(idea, account, quantity, checks, now)
+        return self._finalise(idea, account, quantity, checks, now, metrics)
 
     def _finalise(
         self,
@@ -344,6 +451,7 @@ class RiskEngine:
         quantity: int,
         checks: dict[str, bool],
         now: dt.datetime,
+        metrics: dict[str, Any] | None = None,
     ) -> RiskVerdict:
         """Approve, log the size and the risk taken, and stamp the verdict."""
         trade_risk = (idea.max_loss or 0.0) * quantity
@@ -352,7 +460,11 @@ class RiskEngine:
             idea.book, idea.describe(), quantity, trade_risk,
             100 * trade_risk / account.equity if account.equity else 0, idea.strategy,
         )
-        return RiskVerdict.approve(quantity, checks)
+        verdict = RiskVerdict.approve(quantity, checks)
+        # Carried on APPROVALS too. A limit that only leaves a trace when it
+        # fires cannot be shown to have been calibrated, or to be binding.
+        verdict.metrics = metrics or {}
+        return verdict
 
     # -- helpers ------------------------------------------------------------- #
     def _within_trading_window(self, now: dt.datetime) -> bool:

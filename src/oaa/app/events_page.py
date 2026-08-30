@@ -1,10 +1,12 @@
 """The Events tab: the earnings book, from calendar to filled spread.
 
 This book is different from the other three and the page says so at the top.
-It runs as its own process (`oaa events arm`), it never leases capital from the
-firewall, and `oaa run` will not open a position for it - so a toggle on the
-Control tab would be a lie. What this page shows instead is the four things an
-operator actually needs before a print:
+Since 30 Aug it is driven by `oaa run` like everything else - events_flatten at
+09:45, events_arm at 15:50 - but it is still not a firewall tenant: it arms
+after the 15:15 transient cutoff and holds one night, so its cycles build their
+own RiskEngine with firewall=None. It has a real toggle on the Control tab now;
+what this page adds is the four things an operator actually needs before a
+print:
 
   1. which events are CONFIRMED this week, and which are only proposed;
   2. what the market is charging for each, against what the stock has done;
@@ -124,6 +126,46 @@ def _screen_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
+def _watcher(settings: Any, params: Any):
+    """A read-only watcher: no LLM, so nothing this page does can spend a call."""
+    from oaa.strategies.events.watch import EventWatcher
+
+    return EventWatcher(
+        llm=None,
+        params=params.watch,
+        sentiment=params.sentiment,
+        calendar={},
+        news_fn=None,
+        store_dir=settings.path(params.watch.store_dir),
+    )
+
+
+def _dossiers(settings: Any, params: Any, events: list[Any]) -> list[dict[str, Any]]:
+    """One row per name currently being watched, newest activity first."""
+    watcher = _watcher(settings, params)
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        dossier = watcher.load(event.symbol)
+        if not dossier.notes and not dossier.seen:
+            continue
+        lean, score = dossier.lean()
+        last = dossier.notes[-1].asof if dossier.notes else "-"
+        rows.append({
+            "Symbol": event.symbol,
+            "Reports": f"{event.report_date:%a %d %b}",
+            "Notes": len(dossier.notes),
+            "Items read": len(dossier.seen),
+            "Dossier lean": lean,
+            "Weight": round(score, 2),
+            "Last note": last,
+        })
+    return rows
+
+
+def _dossier_notes(settings: Any, params: Any, symbol: str) -> list[Any]:
+    return _watcher(settings, params).load(symbol).notes
+
+
 def _journal_rows(settings: Any, limit: int = 400) -> list[dict[str, Any]]:
     from oaa.telemetry.journal import Journal
 
@@ -156,8 +198,8 @@ def _config_error(exc: Exception) -> None:
     modules, so a server started before a parameter was added is running the
     old dataclass against the new YAML. The message then reads as a broken
     config file when the config is fine and the process is stale, and the
-    sidebar's "Reload config" does not help because it clears the cache without
-    re-importing Python.
+    cache is no help either - clearing it re-reads YAML without re-importing
+    Python.
     """
     message = str(exc)
     if "unknown key" in message:
@@ -170,8 +212,8 @@ def _config_error(exc: Exception) -> None:
             f"> {message}\n\n"
             "Streamlit keeps modules it has already imported, so a server "
             "started before those settings were added is reading a new YAML "
-            "with an old parser. **Restart the dashboard** — `Reload config` "
-            "in the sidebar clears the cache but does not re-import Python."
+            "with an old parser. **Restart the dashboard** — nothing short of "
+            "that re-imports Python."
         )
         st.code("oaa dashboard", language="bash")
         return
@@ -181,10 +223,11 @@ def _config_error(exc: Exception) -> None:
 def render_events(settings: Any) -> None:
     st.subheader("Earnings events")
     st.caption(
-        "Armed on a DATE, not on a signal. This book runs as its own process - "
-        "`oaa events arm` before the close, `oaa events flatten` the next "
-        "morning - and never leases capital from the firewall, so `oaa run` "
-        "will not open anything here and the Control tab has no switch for it."
+        "Armed on a DATE, not on a signal. `oaa run` arms it at 15:50 and "
+        "flattens it at 09:45 the next morning; `oaa events arm` still works "
+        "for a manual or dry-run arm. It leases no capital from the firewall - "
+        "it holds overnight, which no firewall phase permits - so its risk is "
+        "bounded by its own three sizing caps instead."
     )
 
     try:
@@ -256,6 +299,48 @@ def render_events(settings: Any) -> None:
             st.warning(error, icon=":material/error:")
     elif confirmed:
         st.caption("not priced yet")
+
+    # --- 2b. what the book has been reading all week ---------------------- #
+    st.markdown("#### The run-up")
+    st.caption(
+        "The direction model does not meet a name for the first time at 15:50 "
+        "on arm day. From three days out, every watch cycle reads the wire and "
+        "the retail stream, judges only what is NEW, and keeps a dated note "
+        "when it is material. This is what the arm call reads alongside the "
+        "afternoon's own headlines. A name stops being read the day it reports."
+    )
+    try:
+        dossiers = _dossiers(settings, params, confirmed)
+    except Exception as exc:  # noqa: BLE001 - a missing store is not an error
+        dossiers = []
+        st.caption(f"no watch store yet ({exc})")
+    if dossiers:
+        st.dataframe(
+            pd.DataFrame(dossiers), width="stretch", hide_index=True,
+        )
+        for row in dossiers:
+            if row["Notes"] == 0:
+                continue
+            with st.expander(f"{row['Symbol']} - what was logged, day by day"):
+                for note in _dossier_notes(settings, params, row["Symbol"]):
+                    st.markdown(
+                        f"**{note.asof}** · salience {note.salience:.2f} · "
+                        f"lean {note.lean} · {note.headlines} headline(s), "
+                        f"{note.messages} post(s)"
+                    )
+                    st.caption(note.summary or "-")
+                    if note.injection_noticed:
+                        st.warning(
+                            "the model reported instruction-like text in this "
+                            "batch - the note stands, but read the source",
+                            icon=":material/warning:",
+                        )
+    elif confirmed:
+        st.info(
+            "Nothing logged yet. The watch runs at 09:55, 13:00 and 15:30 ET "
+            "inside `oaa run`; `oaa events watch` forces a poll now.",
+            icon=":material/schedule:",
+        )
 
     # --- 3. what the last cycle decided ---------------------------------- #
     st.markdown("#### Last arming cycle")

@@ -57,18 +57,23 @@ from oaa.strategies.events.sizing import SizeDecision, size
 # runs and `oaa events arm` raises "unknown strategy".
 from oaa.strategies.events.strategy import EarningsEventDirectional  # noqa: E402
 from oaa.strategies.events.volscreen import VolRead, rank, screen_one
+from oaa.strategies.events.watch import Dossier, EventWatcher, WatchNote, WatchReport
 
 __all__ = [
     "ArmReport",
     "DirectionCall",
+    "Dossier",
     "EarningsEvent",
     "EarningsEventDirectional",
     "EventsEngine",
+    "EventWatcher",
     "EventsParams",
     "EvidencePack",
     "ScreenResult",
     "SizeDecision",
     "VolRead",
+    "WatchNote",
+    "WatchReport",
     "gather",
     "load_calendar",
     "load_params",

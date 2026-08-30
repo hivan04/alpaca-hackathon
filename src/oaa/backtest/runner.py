@@ -114,6 +114,15 @@ def tradable_dte_range(cfg: Any, strategies: list[Any] | None = None) -> tuple[i
         if declared:
             lows.append(int(declared[0]))
             highs.append(int(declared[1]))
+    # The BACK ANCHOR of the term structure has to be listed or the slope is
+    # unmeasurable in every replay, silently. No strategy trades that expiry -
+    # it is read, not bought - but the chain has to contain it. Without this the
+    # window stops at ~16 DTE (vol_carry's 14 plus slack) while the live chain
+    # runs to 45, so the two paths would anchor the same signal at different
+    # maturities and only the live one would match its own config.
+    if highs:
+        highs.append(int(cfg.data.term_back_dte))
+
     if not lows or not highs:
         return cfg.options.min_days_to_expiry, cfg.options.max_days_to_expiry
     return (
@@ -221,6 +230,7 @@ def build_source(
         news=news,
         news_lookback_hours=bt.news_lookback_hours,
         session_times_et=tuple(request.session_times_et or bt.session_times_et),
+        mark_interval_minutes=bt.mark_interval_minutes,
         market_symbol=market_symbol,
         min_history=bt.min_history_days,
         intraday_history_sessions=cfg.data.intraday_lookback_days,
@@ -228,6 +238,12 @@ def build_source(
         intraday_by_symbol=intraday,
         min_iv_observations=chain_cfg.min_iv_observations,
         options_dte=chain_dte,
+        term_anchors=(
+            cfg.data.term_front_dte,
+            cfg.data.term_back_dte,
+            cfg.data.term_min_separation_days,
+        ),
+        term_max_abs_slope_pct=cfg.data.term_max_abs_slope_pct,
     )
     source.chain_source_requested = chain_cfg.source
     return source

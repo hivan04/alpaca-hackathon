@@ -3,15 +3,28 @@
 # primaryColor is the accent Streamlit uses for its own chrome: selected tabs,
 # widget highlights, focus rings, links, slider tracks. The sidebar "Dark mode"
 # toggle flips theme.base at runtime, so both sections below matter - the dark
-# value is the same hue lifted for legibility on a dark surface. These must stay
-# in step with ACCENT_LIGHT / ACCENT_DARK in src/oaa/app/theme.py, which colour
-# the Plotly charts.
+# value is the same teal lifted for legibility on a dark surface. These must
+# stay in step with ACCENT_LIGHT / ACCENT_DARK in src/oaa/app/theme.py, which
+# colour the Plotly charts, and with the tokens in src/oaa/app/skin.py, which
+# style the page around them.
+#
+# The accent is chrome and "look here" only. It never carries direction: profit
+# is green, loss is red, caution is amber, and nothing else uses those three.
 [theme]
-base = "light"
-primaryColor = "#1388a8"
+base = "dark"
+primaryColor = "#4cc4de"
+backgroundColor = "#0a0e14"
+secondaryBackgroundColor = "#10151f"
+textColor = "#e8edf4"
 
 [theme.light]
 primaryColor = "#1388a8"
+backgroundColor = "#f6f7f9"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#12161f"
 
 [theme.dark]
 primaryColor = "#4cc4de"
+backgroundColor = "#0a0e14"
+secondaryBackgroundColor = "#10151f"
+textColor = "#e8edf4"

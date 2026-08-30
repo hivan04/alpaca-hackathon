@@ -47,17 +47,43 @@ class EvidencePack:
     headlines: list[dict[str, str]] = field(default_factory=list)
     messages: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: Dated notes accumulated by the watch in the days before this print, set
+    #: by `EventWatcher.attach`. Empty on a name the watch never saw - a print
+    #: added to the calendar the same afternoon, or the watch switched off.
+    notes: list[dict[str, Any]] = field(default_factory=list)
+    #: The dossier's own salience-weighted lean, carried for the journal so a
+    #: week of bearish notes ending in a bullish call is visible rather than
+    #: buried. Never enforced: the direction call reads the evidence itself.
+    watch_lean: str = "unknown"
+    watch_score: float = 0.0
 
     @property
     def is_empty(self) -> bool:
-        return not self.headlines and not self.messages
+        return not self.headlines and not self.messages and not self.notes
 
     def counts(self) -> dict[str, int]:
-        return {"headlines": len(self.headlines), "messages": len(self.messages)}
+        return {
+            "headlines": len(self.headlines),
+            "messages": len(self.messages),
+            "watch_notes": len(self.notes),
+        }
 
     def as_prompt_block(self, max_chars: int) -> str:
         """The untrusted-data block. Fenced, labelled, and budget-capped."""
         lines: list[str] = []
+        if self.notes:
+            lines.append(
+                "WHAT THE DESK LOGGED IN THE DAYS BEFORE THIS PRINT "
+                "(oldest first; salience is how material that day's batch was "
+                "judged to be, 0-1)"
+            )
+            for note in self.notes:
+                lines.append(
+                    f"- [{note.get('asof', '?')}, salience "
+                    f"{float(note.get('salience') or 0):.2f}, lean "
+                    f"{note.get('lean', 'neutral')}] {note.get('summary', '')}"
+                )
+            lines.append("")
         if self.headlines:
             lines.append("NEWS AND ANALYST HEADLINES (most recent first)")
             for item in self.headlines:

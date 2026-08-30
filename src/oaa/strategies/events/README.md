@@ -19,13 +19,96 @@ the trade is worth taking, which is what the rest of the pipeline decides.
   calendar.py    LLM proposes next week's reporters -> calendar file confirms
   volscreen.py   implied move vs the last four actual reactions -> rank top N
   sentiment.py   Alpaca news + StockTwits -> one sanitised evidence pack
+  watch.py       the same feeds, read three times a day from three days out,
+                 judged once per new batch -> a dated dossier per name
   direction.py   Featherless: direction, confidence, evidence cited
   technicals.py  Bollinger squeeze (setup), RSI (veto), ATR (size and stop)
   universe.py    the week's reporters, derived from the calendar
   sizing.py      confidence -> contracts, bounded three ways
   strategy.py    expression chosen by the sign of the divergence, three interlocks
-  engine.py      arm before the close, flatten the next morning
+  engine.py      watch through the week, arm before the close, flatten at 09:45
 ```
+
+## The watch: days, not a minute (30 Aug)
+
+Until this change the direction model met a name exactly once - at 15:50 on the
+afternoon it armed - and judged the print from whatever happened to be on the
+wire in that minute. That is the wrong shape for the job. The information that
+decides a print does not arrive in a single window: an estimate revision lands
+on the Tuesday, a supplier guides down on the Wednesday, the retail stream
+crowds one way over three days. A snapshot sees the last of those and calls it
+the picture.
+
+So from `watch.lookahead_days` (3) before a confirmed report, `oaa run` polls
+the same two feeds at 09:55, 13:00 and 15:30 ET. Each poll:
+
+1. gathers the pack, then **discards every item it has already read** - each is
+   keyed by a hash of its timestamp and text;
+2. if nothing new arrived, stops there. No model call, no note, no tokens. A
+   quiet name is a real state and is reported as one;
+3. otherwise asks the model one narrow question about the **new items only** -
+   is this material to how the stock trades on the print, and which way does it
+   point - and keeps the answer as a dated note when its salience clears
+   `min_salience`.
+
+At 15:50 the arm gathers a fresh pack as before and `EventWatcher.attach` folds
+the dossier into it. The prompt tells the model to read the log as the run-up
+rather than as a verdict. The afternoon still dominates - the last hours before
+a print are the most informative hours - but they are no longer the only hours.
+
+**It stops.** The window's upper bound is the print itself: the day after a name
+reports, its dossier is moved to `runs/events/watch/reported/` and it is never
+polled again. Two reasons, and the second is the one that bites. Reading a name
+after its print spends tokens on information that cannot inform the trade; and
+post-print commentary left in a live dossier would be read by a later cycle as
+*pre*-print evidence, which is the most expensive kind of quiet error this book
+can make.
+
+What the dossier cannot do is act. A note is evidence handed to the same
+bounded direction call as everything else: salience is clamped, notes are aged
+out at `note_ttl_days` and capped at `max_notes`, and `Dossier.lean()` is
+recorded in the journal but never enforced - a week of bearish notes ending in a
+bullish call is logged as the disagreement it is, not overruled. The injection
+surface is the one `sentiment.py` already describes, contained the same three
+ways, and the watch model is asked to flag directive-like text just as the
+direction model is.
+
+## Two roles, two models, one key (30 Aug)
+
+The book asks a model two questions that could hardly be less alike:
+
+| role | frequency | question | model |
+|---|---|---|---|
+| watch triage | ~40 calls/day | is this batch material, and which way? | `Qwen/Qwen3-8B` |
+| direction call | once per name | which way does this print go, and how sure? | `Qwen/Qwen3-32B` |
+
+The triage is narrow, schema-bound, and usually right to answer "immaterial".
+Running the 32B model on it spends the direction call's budget on noise. So
+`watch.model` and `direction.model` are separate, and `llm_roles.role_llm`
+builds a client per role.
+
+**A key is authentication, not model selection.** A second Featherless key
+reaches the same catalogue on the same account, so it changes nothing about
+which model answers - `model` does that. `api_key_env` exists per role anyway,
+because separate metering per role, and revoking one role's key without
+touching the other, are fair reasons to want a second key. Both default to
+null, meaning "whatever `agents.llm` uses".
+
+Two behaviours worth knowing:
+
+- A role naming **neither** a model nor a key returns the shared client rather
+  than building an identical second one. Temperature, token cap and seed are
+  refinements that ride along with a model; on their own they are not a new
+  agent. (Without this, injecting a client - every test, and the CLI - would
+  have it silently replaced by one built from global config.)
+- A role naming a key that resolves to nothing falls back to the shared client
+  and logs a WARNING. Left mute, the watch would retain batches unjudged and
+  the direction call would abstain, which from the outside is indistinguishable
+  from a careful model on a quiet week.
+
+`DirectionParams.model` and `.seed` were declared and documented from the
+start, and read by nothing until this change. That is the same failure as the
+unnoticed Anthropic key - config that looks configured and is not.
 
 ## The expression follows the sign of the divergence (30 Aug)
 
@@ -139,10 +222,20 @@ text, which is logged. Nothing the model returns can authorise a trade:
 
 ## Capital
 
-This book runs in its own process and never leases capital from the temporal
-firewall - the same arrangement the weekend book used, and for the same reason:
-a book whose entire life is one overnight hold does not fit the
-intraday/carry tenancy model. Sizing is bounded three ways instead:
+This book never leases capital from the temporal firewall - the same
+arrangement the weekend book used, and for the same reason: a book whose entire
+life is one overnight hold does not fit the intraday/carry tenancy model. That
+is true whether it is armed by `oaa events arm` or by `oaa run`'s 15:50
+`events_arm` cycle (added 30 Aug); both build the same engine with the same
+`RiskEngine(firewall=None)`.
+
+The trade-off is stated rather than hidden. The position ledger treats anything
+not booked to `carry` as transient, so an events leg still open at a later
+15:15 cutoff would be swept. The 09:45 flatten is what makes that unreachable
+in the normal case, and a sweep is the conservative error if it ever is
+reached.
+
+Sizing is bounded three ways instead:
 `max_risk_per_trade_pct` per name, `nightly_risk_budget_pct` shared across
 every name opened that night, and `max_contracts` as an absolute ceiling that
 does not scale with equity.

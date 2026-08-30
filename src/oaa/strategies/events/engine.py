@@ -35,10 +35,12 @@ from oaa.core.types import AccountSnapshot, Decision, DecisionAction, TradeIdea
 from oaa.strategies.base import StrategyContext
 from oaa.strategies.events import calendar as cal
 from oaa.strategies.events.direction import DirectionCall, abstention_rate, predict
+from oaa.strategies.events.llm_roles import role_llm
 from oaa.strategies.events.params import EventsParams
 from oaa.strategies.events.sentiment import alpaca_news_fetcher, gather
 from oaa.strategies.events.sizing import nightly_budget
 from oaa.strategies.events.strategy import EarningsEventDirectional
+from oaa.strategies.events.watch import EventWatcher, WatchReport
 
 log = get_logger("strategies.events.engine")
 
@@ -98,6 +100,46 @@ class EventsEngine:
         self.journal = journal
         self.news_fn = alpaca_news_fetcher(data)
 
+        # Two questions, two models. The triage runs dozens of times a day on
+        # a narrow question; the direction call runs once per name and sizes
+        # the position. Each may name its own model and its own key; naming
+        # neither returns this same client, so nothing changes for a config
+        # that sets nothing. See llm_roles.py.
+        base = getattr(getattr(settings, "config", None), "agents", None)
+        base_llm = getattr(base, "llm", None) if base else None
+        self.watch_llm = llm
+        self.direction_llm = llm
+        if base_llm is not None:
+            self.watch_llm = role_llm(
+                base_llm, role="watch",
+                model=params.watch.model,
+                api_key_env=params.watch.api_key_env,
+                temperature=params.watch.temperature,
+                max_tokens=params.watch.max_tokens,
+                seed=params.watch.seed,
+                fallback=llm,
+            )
+            self.direction_llm = role_llm(
+                base_llm, role="direction",
+                model=params.direction.model,
+                api_key_env=params.direction.api_key_env,
+                temperature=params.direction.temperature,
+                max_tokens=params.direction.max_tokens,
+                seed=params.direction.seed,
+                fallback=llm,
+            )
+        #: Reads each name for days before it reports rather than once at the
+        #: close of arm day. See `watch.py` for why a snapshot is the wrong
+        #: shape for this job.
+        self.watcher = EventWatcher(
+            llm=self.watch_llm,
+            params=params.watch,
+            sentiment=params.sentiment,
+            calendar=strategy.calendar,
+            news_fn=self.news_fn,
+            store_dir=settings.path(params.watch.store_dir) if settings else None,
+        )
+
     # ------------------------------------------------------------------ #
     def week_window(self, asof: dt.date) -> tuple[dt.date, dt.date]:
         """Monday to Friday of the week containing `asof`, or of the week ahead
@@ -144,8 +186,12 @@ class EventsEngine:
                 log.warning("%s: could not build a market context - %s", symbol, exc)
                 continue
 
+            # The fresh pack, then the week behind it. The last hours before
+            # a print are the most informative hours, so today's items still
+            # dominate; the dossier is what stops them being the ONLY items.
             pack = gather(symbol, self.params.sentiment, self.news_fn)
-            call = predict(self.llm, pack, self.params.direction)
+            pack = self.watcher.attach(pack, asof)
+            call = predict(self.direction_llm, pack, self.params.direction)
             report.calls.append(call)
             if not call.actionable:
                 report.declined[symbol] = call.skip_reason
@@ -164,7 +210,12 @@ class EventsEngine:
                 continue
 
             idea = ideas[0]
-            verdict = self.risk.evaluate(idea, account)
+            # One symbol's context is all this book has - it arms names one at
+            # a time. The Greek gate reports the resulting coverage rather than
+            # presenting a partial read as a whole-book one.
+            verdict = self.risk.evaluate(
+                idea, account, contexts={market.symbol: market} if market else None
+            )
             if not verdict.approved:
                 report.declined[symbol] = "; ".join(verdict.reasons) or "risk declined"
                 self._journal(DecisionAction.SKIP, idea, verdict=verdict,
@@ -199,6 +250,18 @@ class EventsEngine:
             )
         log.info(report.summary())
         return report
+
+    # ------------------------------------------------------------------ #
+    def watch(self, asof: dt.date | None = None) -> WatchReport:
+        """Read every name whose print is within the window, and stop at the
+        ones whose print has passed.
+
+        Called several times a day by `oaa run`. It opens nothing, closes
+        nothing and touches no capital: its entire output is a dated note on a
+        name the book may later arm, plus the retirement of the names it no
+        longer needs to read.
+        """
+        return self.watcher.poll(asof or dt.date.today())
 
     # ------------------------------------------------------------------ #
     def flatten(self, asof: dt.date | None = None) -> list[str]:

@@ -21,6 +21,7 @@
     oaa backtest          replay the strategies over Alpaca history
     oaa dashboard         the Streamlit operator dashboard (backtest + live)
     oaa events screen     which confirmed prints land this week
+    oaa events watch      read the names whose prints are coming
     oaa events arm        open tonight's earnings spreads
     oaa events flatten    close everything that has now reported
 """
@@ -678,7 +679,12 @@ def strategies(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> 
     # A book that runs in its own process is not "disabled" - `oaa run` was
     # never going to load it. Rendering it as `no` alongside a book that is
     # switched off reads as the same state, and it is not.
-    own_process = {"events", "weekend"}
+    #
+    # The events book left this set on 30 Aug: it is now a scheduled cycle
+    # inside `oaa run` (events_flatten 09:45, events_arm 15:50), so `yes` is
+    # the honest answer for it. `oaa events arm` still works and is still the
+    # way to arm off-schedule or with --dry-run.
+    own_process = {"weekend"}
     table = Table("Name", "Book", "In `oaa run`", "Weight", "Description")
     for name, cls in strategy_registry:
         ref = enabled.get(name)
@@ -697,7 +703,12 @@ def strategies(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> 
     console.print(table)
     console.print(
         "[dim]own process = armed by its own command on its own schedule; "
-        "`oaa run` cannot open a position for it. See `oaa events --help`.[/]"
+        "`oaa run` cannot open a position for it.[/]"
+    )
+    console.print(
+        "[dim]events = in `oaa run` (09:45 flatten, 15:50 arm) but NOT a "
+        "firewall tenant - it holds overnight and leases no capital. "
+        "`oaa events --help` for the manual verbs.[/]"
     )
 
 
@@ -1193,7 +1204,7 @@ def backtest(
         "max_drawdown", "volatility_annual", "win_rate", "worst_trade", "best_trade",
         "profit_factor", "avg_hold_days", "gross_pnl", "total_modelled_cost",
         "ideas_generated", "ideas_approved", "rejections",
-        "mixed_surface_marks", "risk_bound_clamps",
+        "mixed_surface_marks", "risk_bound_clamps", "fine_marks",
     ):
         table.add_row(key.replace("_", " "), str(metrics.get(key)))
     console.print(table)
@@ -1218,6 +1229,22 @@ def backtest(
             "figure: mixing surfaces breaks the width bound that makes a condor "
             "defined-risk, so one surface is chosen over more real marks.",
             title="mixed-surface marks", expand=False,
+        ))
+
+    intraday_held = any(
+        t.strategy == "intraday_momentum" for t in result.trades
+    )
+    if intraday_held and not metrics.get("fine_marks"):
+        console.print(Panel(
+            "[yellow]This run held intraday positions and took ZERO marks "
+            "between scans.[/yellow]\n"
+            "Every exit dial - target, stop, VWAP re-cross, time stop - was "
+            "therefore sampled on the scan grid, which for a position that "
+            "lives 20-90 minutes is 2-6 observations of its whole life. Trades "
+            "will appear to overshoot their own settings, and MFE/MAE is built "
+            "from too few samples to read. Check "
+            "`backtest.mark_interval_minutes`.",
+            title="management resolution", expand=False,
         ))
 
     risk = result.provenance.get("risk") or {}
@@ -1598,9 +1625,12 @@ def gates(
 # --------------------------------------------------------------------------- #
 # events book - one overnight hold across a scheduled earnings print.
 #
-# Its own sub-app because it is its own process on its own schedule. It never
-# leases capital from the temporal firewall, so it must never be reachable
-# from `oaa run`; keeping the verbs separate is what makes that visible.
+# Since 30 Aug the book is ALSO driven by `oaa run` (events_flatten 09:45,
+# events_arm 15:50) - a book that only trades when a human remembers to start
+# a second process is not an autonomous submission. These verbs remain, and
+# remain the only way to screen the week, arm off-schedule, or dry-run against
+# the live chain. Both paths build the same engine with the same firewall
+# bypass; see Orchestrator._events_engine.
 # --------------------------------------------------------------------------- #
 events_app = typer.Typer(
     no_args_is_help=True,
@@ -1681,6 +1711,77 @@ def events_screen(
             "[yellow]proposed by the model with no confirmed calendar row "
             "(not armed):[/] " + ", ".join(result.unverified)
         )
+
+
+@events_app.command("watch")
+def events_watch(
+    date: str | None = typer.Option(None, "--date", help="Override today, YYYY-MM-DD"),
+    show: str | None = typer.Option(
+        None, "--show", help="Print one name's accumulated dossier and exit"
+    ),
+    params: str = _EVENTS_PARAMS,
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+) -> None:
+    """Read the names whose prints are coming, and retire the ones that reported.
+
+    `oaa run` does this three times a session. Run it by hand to see what the
+    book has been reading, or to force a poll after adding a calendar row.
+    """
+    import datetime as dtm
+
+    _, engine, _ = _events(profile, config, params)
+    asof = dtm.date.fromisoformat(date) if date else dtm.date.today()
+
+    if show:
+        dossier = engine.watcher.load(show.upper())
+        lean, score = dossier.lean()
+        console.print(Panel.fit(
+            f"[bold]{dossier.symbol}[/] reports {dossier.report_date or '?'}\n"
+            f"notes       {len(dossier.notes)}\n"
+            f"items read  {len(dossier.seen)}\n"
+            f"dossier lean {lean} ({score:+.2f})",
+            title="watch dossier",
+        ))
+        if not dossier.notes:
+            console.print("[dim]nothing logged yet for this name[/]")
+            return
+        table = Table("Date", "Salience", "Lean", "Items", "Summary")
+        for note in dossier.notes:
+            table.add_row(
+                note.asof, f"{note.salience:.2f}", note.lean,
+                f"{note.headlines}h/{note.messages}m", note.summary[:80],
+            )
+        console.print(table)
+        return
+
+    report = engine.watch(asof)
+    console.print(Panel.fit(report.summary(), title="events watch"))
+    if report.watching:
+        table = Table("Symbol", "New items", "Outcome")
+        for symbol in report.watching:
+            new = report.new_items.get(symbol, 0)
+            if symbol in report.noted:
+                outcome = "[green]note written[/]"
+            elif symbol in report.quiet:
+                outcome = "[dim]quiet - nothing new[/]"
+            elif new:
+                outcome = "[yellow]read, judged immaterial[/]"
+            else:
+                outcome = "[red]not polled[/]"
+            table.add_row(symbol, str(new), outcome)
+        console.print(table)
+    else:
+        console.print(
+            "[dim]no confirmed print falls inside the watch window - "
+            "check the calendar and `watch.lookahead_days`[/]"
+        )
+    if report.retired:
+        console.print(
+            "[cyan]stopped watching (already reported):[/] " + ", ".join(report.retired)
+        )
+    for error in report.errors:
+        console.print(f"[red]{error}[/]")
 
 
 @events_app.command("arm")
