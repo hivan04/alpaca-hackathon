@@ -56,7 +56,7 @@ from oaa.brokers.base import Broker
 from oaa.config.loader import Settings
 from oaa.core import clock
 from oaa.core.errors import DataError, StrategyError
-from oaa.core.logging import get_logger
+from oaa.core.logging import get_logger, tape
 from oaa.core.switchboard import Switchboard
 from oaa.core.types import (
     AccountSnapshot,
@@ -606,6 +606,17 @@ class Orchestrator:
             result.notes.append(
                 "stopped watching (reported): " + ", ".join(sorted(report.retired))
             )
+        # The tape line: one per watch cycle, whatever happened. A cycle that
+        # read fourteen names and found nothing is a real and useful state -
+        # reporting only the interesting ones would make a silent feed look
+        # identical to a quiet market, which is the failure this book keeps
+        # having to design against.
+        leans = ", ".join(sorted(report.noted)) or "nothing material"
+        tape().info(
+            "WATCH %d name(s) read, %d new item(s), %d note(s): %s",
+            len(report.watching), sum(report.new_items.values()),
+            len(report.noted), leans,
+        )
         self.journal.event(
             "events_watch",
             watching=report.watching,
@@ -615,6 +626,58 @@ class Orchestrator:
             retired=report.retired,
         )
         return result
+
+    def _arm_is_too_late(self, result: CycleResult) -> bool:
+        """Refuse an arm that the clock has already left behind.
+
+        `schedule.no_entry_after` has been in the params since the book was
+        written and, until 30 Aug, was read by NOTHING - the same shape of
+        defect as the `model` and `seed` fields that a comment promised and no
+        code consumed.
+
+        It matters because of how the runner recovers. `Runner._due` fires
+        every cycle whose time has passed and has not fired today, which is
+        correct and deliberate: a crash at 15:10 must not skip the 15:15
+        cutoff. But a laptop that sleeps through the afternoon and wakes at
+        17:00 hits the same path, and an unguarded `events_arm` would then try
+        to open a debit spread into a closed market - on the judged account,
+        whose full history the judges read.
+
+        Standing down is the conservative error. A night not traded costs the
+        book one opportunity; an order sent hours after the close is on the
+        record permanently and cannot be explained away. The refusal is
+        journalled with the clock that caused it, so it reads as a decision
+        rather than as a night the agent mysteriously did nothing.
+        """
+        from zoneinfo import ZoneInfo
+
+        try:
+            params = self._events_engine().params
+            deadline = params.no_entry_after_at()
+            zone = ZoneInfo(self.cfg.schedule.timezone)
+        except Exception as exc:  # noqa: BLE001 - never let the guard be the outage
+            log.warning("could not evaluate the arm deadline (%s) - arming anyway", exc)
+            return False
+
+        local = clock.now(zone)
+        if local.time() <= deadline:
+            return False
+
+        note = (
+            f"{local:%H:%M} {self.cfg.schedule.timezone} is past the "
+            f"{deadline:%H:%M} no-entry deadline - standing down rather than "
+            "arming into a closed or closing market"
+        )
+        log.warning("events arm refused: %s", note)
+        result.notes.append(note)
+        self.journal.event(
+            "events_arm",
+            action="skip",
+            reason="past no_entry_after",
+            clock=local.isoformat(),
+            no_entry_after=params.schedule.no_entry_after,
+        )
+        return True
 
     def events_arm(self, cycle: str = "events_arm") -> CycleResult:
         """15:50 ET. Open into tonight's confirmed prints.
@@ -630,6 +693,8 @@ class Orchestrator:
             return result
         if self.risk.state.halted:
             result.notes.append(f"risk halted: {self.risk.state.halt_reason}")
+            return result
+        if self._arm_is_too_late(result):
             return result
 
         try:
@@ -762,6 +827,18 @@ class Orchestrator:
                 self.firewall.ledger.forget(position.symbol)
                 result.positions_closed += 1
                 log.info("closing %s: %s", position.symbol, reason)
+                # The P&L is on the snapshot we already hold. Logging the close
+                # without it - which is what this did until 30 Aug - asks an
+                # operator to go and look up the one number they wanted.
+                pnl = getattr(position, "unrealized_pl", None)
+                pct = getattr(position, "unrealized_plpc", None)
+                tape().info(
+                    "CLOSE %s | %s | %s | %s",
+                    position.symbol,
+                    "P&L unavailable" if pnl is None else f"P&L ${pnl:+,.2f}",
+                    "" if pct is None else f"{pct * 100:+.1f}%",
+                    reason,
+                )
                 if self.memory:
                     self.memory.record(
                         symbol=symbol, strategy=book,
@@ -1038,11 +1115,23 @@ class Orchestrator:
         self.journal.record(decision)
 
     def _record_open(self, idea: TradeIdea, strategy: Strategy) -> None:
-        """Attribute every leg to its book, so 15:15 liquidates the right ones."""
+        """Attribute every leg to its book, so 15:15 liquidates the right ones.
+
+        Also the single place both execution paths (single-leg and combo) meet
+        after a confirmed open, which is why the tape line lives here rather
+        than in either branch above.
+        """
         idea.meta.setdefault("opened_at", clock.utcnow().isoformat())
         self.risk.record_open(idea)
         self._open_ideas[idea.id] = idea
         self.firewall.ledger.register(idea, book=strategy.capital_book)
+        risk = "risk unknown" if idea.max_loss is None else f"max loss ${idea.max_loss:,.0f}"
+        tape().info(
+            "OPEN  %s %s x%d @ %.2f | %s | %s | %s",
+            idea.symbol, idea.structure.value if hasattr(idea.structure, "value")
+            else idea.structure, idea.quantity, idea.net_price, risk,
+            strategy.name, (idea.thesis or "no thesis recorded")[:90],
+        )
 
     # ------------------------------------------------------------------ #
     def _account(self) -> AccountSnapshot:

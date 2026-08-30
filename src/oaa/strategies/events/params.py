@@ -352,6 +352,9 @@ class EventsParams:
     def exit_at(self) -> dt.time:
         return _hhmm(self.schedule.exit_time)
 
+    def no_entry_after_at(self) -> dt.time:
+        return _hhmm(self.schedule.no_entry_after)
+
 
 def _hhmm(value: str) -> dt.time:
     try:

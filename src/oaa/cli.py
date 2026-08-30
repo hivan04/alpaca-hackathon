@@ -59,7 +59,8 @@ def _boot(profile: str | None, config: str | None, backend: str | None = None):
 
     settings = load_settings(config_path=config, profile=profile)
     cfg = settings.config
-    setup_logging(cfg.telemetry.log_level, cfg.telemetry.log_format)
+    setup_logging(cfg.telemetry.log_level, cfg.telemetry.log_format,
+                  console=cfg.telemetry.console)
     broker = get_broker(cfg, settings.credentials, backend=backend)
     data = get_data_provider(cfg, settings.credentials)
     return settings, broker, data
@@ -70,7 +71,11 @@ def _settings_only(profile: str | None, config: str | None):
     from oaa.core.logging import setup_logging
 
     settings = load_settings(config_path=config, profile=profile)
-    setup_logging(settings.config.telemetry.log_level, settings.config.telemetry.log_format)
+    setup_logging(
+        settings.config.telemetry.log_level,
+        settings.config.telemetry.log_format,
+        console=settings.config.telemetry.console,
+    )
     return settings
 
 

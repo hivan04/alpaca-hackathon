@@ -738,6 +738,13 @@ telemetry:
   equity_curve: "runs/equity.csv"
   log_level: INFO
   log_format: console              # console | json
+  # full | focused. What reaches the TERMINAL only. `focused` leaves on screen
+  # the three things an operator watching a live run needs - research finished
+  # on a name, a position opened, a position closed and what it made - plus
+  # every warning and error. The REJECT lines and per-symbol evidence counts
+  # still go to the journal and `oaa gates`; they stop competing for the screen
+  # with the two lines a day that carry money.
+  console: focused
   # Snapshot the account every N seconds so the equity curve is dense enough
   # to make a good chart for the deck.
   snapshot_interval_seconds: 300

@@ -124,4 +124,10 @@ def test_a_stale_dashboard_process_is_named_as_such_not_as_a_broken_config():
     assert "older code" in errors
     body = " ".join(str(m.value) for m in at.markdown)
     assert "Restart the dashboard" in body
-    assert "Reload config" in body
+    # NOT "Reload config". That sidebar button was removed on 30 Aug with the
+    # sidebar itself, and this assertion outlived it - it was pinning copy
+    # that named a control the user can no longer press, which is worse than
+    # no assertion. What the message must still say is that only a restart
+    # re-imports Python; a cache clear never could.
+    assert "Reload config" not in body
+    assert "re-imports Python" in body

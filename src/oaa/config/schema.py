@@ -457,6 +457,12 @@ class TelemetryConfig(Base):
     equity_curve: str = "runs/equity.csv"
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
+    # What reaches the TERMINAL, not what is recorded. "focused" passes the
+    # tape (research complete, position opened, position closed with P&L) plus
+    # WARNING and above; "full" passes everything, including the per-gate
+    # REJECT lines. The journal, the JSONL sink and `oaa gates` are identical
+    # either way - this cannot hide a decision, only move where you read it.
+    console: Literal["full", "focused"] = "full"
     snapshot_interval_seconds: int = 300
     capture_screenshots: bool = False
 

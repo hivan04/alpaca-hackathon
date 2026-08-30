@@ -334,7 +334,13 @@ def test_the_watch_runs_hourly_and_covers_the_arm():
         "at least one read must land before the open - the overnight wire is "
         "the half of the day the old three-cycle schedule never saw"
     )
-    gaps = [minutes(b) - minutes(a) for a, b in zip(watches, watches[1:])]
+    # strict=False is the intent, not a shrug: `watches[1:]` is one
+    # shorter than `watches` by construction - that offset IS the
+    # pairing. strict=True would raise on every well-formed schedule.
+    gaps = [
+        minutes(b) - minutes(a)
+        for a, b in zip(watches, watches[1:], strict=False)
+    ]
     assert max(gaps) <= 60, f"a hole of {max(gaps)} minutes is not an hourly watch"
     before_arm = [w for w in watches if minutes(w) <= minutes(arm.at)]
     assert before_arm and minutes(arm.at) - minutes(before_arm[-1]) <= 60, (
@@ -356,5 +362,67 @@ def test_the_engine_is_built_with_the_firewall_bypassed(settings, chain, bars, f
         assert engine.journal is orch.journal
         assert engine.router is orch.executor
         assert orch._events_engine() is engine, "the engine should be cached"
+    finally:
+        orch.close()
+
+
+# --------------------------------------------------------------------------- #
+# the late-arm guard
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("when", "refused"),
+    [
+        ("15:50", False),   # the scheduled arm
+        ("15:55", False),   # exactly on the deadline still trades
+        ("15:56", True),    # one minute past
+        ("17:00", True),    # a machine woken after the close
+        ("09:30", False),   # a morning arm for a before-open print
+    ],
+)
+def test_a_stale_arm_stands_down(settings, chain, bars, frozen_clock, monkeypatch, when, refused):
+    """`Runner._due` fires any cycle whose time has passed and has not fired
+    today. That is deliberate - a crash at 15:10 must not skip the 15:15
+    cutoff - but it means a laptop that sleeps through the afternoon and wakes
+    at 17:00 hands `events_arm` a clock hours past the close. Unguarded, it
+    would send a debit spread into a closed market on the judged account.
+    """
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    from oaa.agents.orchestrator import CycleResult
+
+    orch, _ = _orchestrator(settings, chain, bars, frozen_clock)
+    try:
+        et = ZoneInfo(orch.cfg.schedule.timezone)
+        hh, mm = (int(x) for x in when.split(":"))
+        moment = _dt.datetime.combine(_dt.date(2026, 8, 31), _dt.time(hh, mm), tzinfo=et)
+        monkeypatch.setattr("oaa.agents.orchestrator.clock.now", lambda tz=None: moment)
+        result = CycleResult(cycle="events_arm", started=moment)
+        assert orch._arm_is_too_late(result) is refused
+        if refused:
+            assert any("no-entry deadline" in n for n in result.notes), (
+                "a refusal must say why - a silent stand-down is indistinguishable "
+                "from a dead agent"
+            )
+    finally:
+        orch.close()
+
+
+def test_a_broken_deadline_does_not_become_an_outage(
+    settings, chain, bars, frozen_clock, monkeypatch
+):
+    """The guard is a safety rail, not a new single point of failure. If it
+    cannot evaluate itself it must let the arm proceed rather than silently
+    cancelling the book\'s only trade of the night."""
+    from oaa.agents.orchestrator import CycleResult
+
+    orch, _ = _orchestrator(settings, chain, bars, frozen_clock)
+    try:
+        monkeypatch.setattr(
+            type(orch), "_events_engine",
+            lambda self: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        result = CycleResult(cycle="events_arm", started=orch.firewall.clock.now())
+        assert orch._arm_is_too_late(result) is False
     finally:
         orch.close()
