@@ -305,16 +305,41 @@ def test_the_watch_cycle_dispatches_and_runs_whatever_the_switch_says(
         orch.close()
 
 
-def test_the_watch_is_scheduled_more_than_once_and_before_the_arm():
-    """One poll a day would be a snapshot with extra steps."""
+def test_the_watch_runs_hourly_and_covers_the_arm():
+    """One poll a day would be a snapshot with extra steps.
+
+    Until 30 Aug this pinned three reads inside the session and asserted that
+    none landed before the open. That guard was inverted deliberately: the
+    items this book cares about - estimate revisions, guidance, a supplier's
+    read-across - land on the overnight and pre-market wire, and a watch that
+    only opened its eyes at 09:55 read them after they were priced. The watch
+    is now an hourly grid from 04:00 ET.
+
+    What still has to hold, and is what this test defends:
+      * the grid has no hole wider than an hour, or "hourly" is a comment;
+      * something reads the pre-market, which is the point of the change;
+      * a read lands in the hour before the arm, so the arm sees the day it is
+        arming into rather than this morning's picture.
+    """
     cfg = load_settings(profile="dev").config
-    watches = [c for c in cfg.schedule.cycles if c.action == "events_watch"]
+    watches = sorted(c.at for c in cfg.schedule.cycles if c.action == "events_watch")
     arm = next(c for c in cfg.schedule.cycles if c.action == "events_arm")
-    assert len(watches) >= 2, "the watch has to see more than one moment in the day"
-    assert min(w.at for w in watches) >= "09:30", "no watch before the session opens"
-    assert max(w.at for w in watches) < arm.at, (
-        "the last watch must land before the arm, so the arm sees the day it "
-        "is arming into"
+
+    def minutes(at: str) -> int:
+        hh, mm = at.split(":")
+        return int(hh) * 60 + int(mm)
+
+    assert len(watches) >= 8, "the watch has to see more than a few moments in the day"
+    assert minutes(watches[0]) < 9 * 60 + 30, (
+        "at least one read must land before the open - the overnight wire is "
+        "the half of the day the old three-cycle schedule never saw"
+    )
+    gaps = [minutes(b) - minutes(a) for a, b in zip(watches, watches[1:])]
+    assert max(gaps) <= 60, f"a hole of {max(gaps)} minutes is not an hourly watch"
+    before_arm = [w for w in watches if minutes(w) <= minutes(arm.at)]
+    assert before_arm and minutes(arm.at) - minutes(before_arm[-1]) <= 60, (
+        "a watch must land within the hour before the arm, so the arm judges "
+        "the session it is arming into"
     )
 
 

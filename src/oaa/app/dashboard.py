@@ -68,8 +68,7 @@ import streamlit as st  # noqa: E402
 
 from oaa.app import correlation as corr  # noqa: E402
 from oaa.app import identity as ident  # noqa: E402
-from oaa.app import mode  # noqa: E402
-from oaa.app import skin  # noqa: E402
+from oaa.app import mode, skin  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
 from oaa.app.events_page import render_events  # noqa: E402
 from oaa.app.positions import render_positions  # noqa: E402
