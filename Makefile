@@ -139,6 +139,10 @@ bt-wiring: ## Synthetic smoke test - proves the plumbing, NOT a result
 dashboard: ## Streamlit operator dashboard: backtesting + live trading
 	$(BIN)/oaa dashboard
 
+.PHONY: public-dashboard
+public-dashboard: ## Streamlit PUBLIC dashboard (read-only) - preview it locally
+	OAA_PUBLIC=1 $(BIN)/streamlit run public_dashboard.py --server.port 8502
+
 .PHONY: mcp-tools
 mcp-tools: ## List the tools the Alpaca MCP server exposes
 	$(BIN)/oaa mcp-tools

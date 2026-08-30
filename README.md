@@ -278,6 +278,50 @@ Do not run the judged agent on a laptop. The design turns on 15:15 and 15:45 ET
 firing on time, and a machine that sleeps misses the cutoff — the exact failure
 the firewall exists to prevent. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
+## Two dashboards, one codebase
+
+`oaa dashboard` is the **operator** page: five tabs, including Control, which
+flips books on and off on a live account.
+
+`streamlit run public_dashboard.py` is the **public** page — the same `main()`,
+with everything that writes taken out:
+
+| removed | why |
+|---|---|
+| Control tab | flips books on and off on a real account. Not hidden — never constructed. |
+| Run a new backtest | spawns a replay on the host and burns data-API budget |
+| Price the live chain | one network round trip per confirmed event, per click |
+| Refresh from Alpaca | same, per click. The public page auto-loads once per session instead. |
+| dev/judged switch | the public build is the judged account and nothing else |
+| identity banner | masked key, key source and account id are operator-only |
+
+What it keeps is the point of publishing it: saved backtest history and the
+judged account's live positions.
+
+```bash
+make public-dashboard          # preview it locally on :8502
+```
+
+The selector is `OAA_PUBLIC`, set by `public_dashboard.py` before it imports
+anything and read at call time by `oaa.app.mode` — never cached, because a
+cached answer resolved at import is how a Run button survives onto a public
+page. `make dashboard` never sets it, so the local page cannot lose its Control
+tab by accident. `tests/test_public_mode.py` pins every one of these.
+
+**Publishing history.** `runs/` is gitignored and ~240MB, so a deployed host
+has none of it. Copy the runs you want the page to argue from into
+`public/runs/`, which is committed:
+
+```bash
+python scripts/publish_runs.py --list
+python scripts/publish_runs.py 20260830-050853__DIA
+```
+
+**Deploying.** Point the host at `public_dashboard.py`. Streamlit Community
+Cloud exposes its secrets as environment variables, so the judged credentials
+go in there under the same names `.env` uses locally. Nothing else is needed —
+`requirements.txt` is already at the repo root.
+
 ## Development
 
 ```bash

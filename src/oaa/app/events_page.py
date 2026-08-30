@@ -27,6 +27,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from oaa.app import mode
+
 CYCLE = "events_arm"
 
 
@@ -284,10 +286,14 @@ def render_events(settings: Any) -> None:
         "1.00x the options charge more than those prints paid; below, less. "
         "Four quarters is a ranking device, not an edge estimate."
     )
-    if st.button("Price the live chain", disabled=not confirmed,
-                 help="One network round trip per confirmed event."):
-        with st.spinner("reading chains…"):
-            st.session_state["_events_screen"] = _screen(settings, params, confirmed)
+    # One network round trip per confirmed event, per click. That is the
+    # operator's call to make, not a passing reader's, so the public build
+    # shows the last screen taken and offers no way to take another.
+    if mode.is_operator():
+        if st.button("Price the live chain", disabled=not confirmed,
+                     help="One network round trip per confirmed event."):
+            with st.spinner("reading chains…"):
+                st.session_state["_events_screen"] = _screen(settings, params, confirmed)
 
     screened = st.session_state.get("_events_screen")
     if screened:
@@ -298,7 +304,10 @@ def render_events(settings: Any) -> None:
         for error in screened["errors"]:
             st.warning(error, icon=":material/error:")
     elif confirmed:
-        st.caption("not priced yet")
+        st.caption(
+            "not priced yet" if mode.is_operator()
+            else "not priced - the live chain is not read from the public page"
+        )
 
     # --- 2b. what the book has been reading all week ---------------------- #
     st.markdown("#### The run-up")

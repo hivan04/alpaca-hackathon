@@ -573,7 +573,7 @@ class Orchestrator:
         return True
 
     def events_watch(self, cycle: str = "events_watch") -> CycleResult:
-        """Read the names whose prints are coming. Several times a day.
+        """Read the names whose prints are coming. Hourly, 04:00-16:00 ET.
 
         This is the half of the book that used not to exist. The direction
         model saw a name once, at 15:50 on arm day, and judged the print from

@@ -68,6 +68,7 @@ import streamlit as st  # noqa: E402
 
 from oaa.app import correlation as corr  # noqa: E402
 from oaa.app import identity as ident  # noqa: E402
+from oaa.app import mode  # noqa: E402
 from oaa.app import skin  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
 from oaa.app.events_page import render_events  # noqa: E402
@@ -116,6 +117,11 @@ def _announce(settings: Any, page: str) -> ident.Identity:
 
 
 def _identity_banner(who: ident.Identity) -> None:
+    # The public build shows no key, no key source and no account id. The
+    # terminal banner in `_announce` still prints - that is for the operator
+    # reading the logs, not for the page.
+    if mode.is_public():
+        return
     body = (
         f"**{who.page}** &nbsp; | &nbsp; profile `{who.profile}` &nbsp; | &nbsp; "
         f"API key `{who.key_masked}` from `{who.key_source}` &nbsp; | &nbsp; "
@@ -353,81 +359,87 @@ def render_backtest(settings: Any) -> None:
         ]
         picked = st.selectbox("Load a previous run", options, label_visibility="collapsed")
 
-    with st.expander("Run a new backtest", expanded=False):
-        available = sorted(set(cfg.universe.active()) | {"SPY", "QQQ", "IWM"})
-        symbols = st.multiselect(
-            "Investment universe", available,
-            default=cfg.universe.active()[:6] or ["SPY", "QQQ"],
-            help="Underlyings the replay offers to the strategies each session.",
-        )
-        extra = st.text_input("Add symbols (comma separated)", "")
-        symbols = symbols + [s.strip().upper() for s in extra.split(",") if s.strip()]
+    # The runner is the operator's, not the reader's: it spawns a real
+    # replay on whatever host is serving the page, hitting the data API
+    # for every session in the window. The public build reads saved runs
+    # and cannot start one.
+    run_clicked = False
+    if mode.is_operator():
+        with st.expander("Run a new backtest", expanded=False):
+            available = sorted(set(cfg.universe.active()) | {"SPY", "QQQ", "IWM"})
+            symbols = st.multiselect(
+                "Investment universe", available,
+                default=cfg.universe.active()[:6] or ["SPY", "QQQ"],
+                help="Underlyings the replay offers to the strategies each session.",
+            )
+            extra = st.text_input("Add symbols (comma separated)", "")
+            symbols = symbols + [s.strip().upper() for s in extra.split(",") if s.strip()]
 
-        default_end = dt.date.fromisoformat(cfg.backtest.end)
-        default_start = dt.date.fromisoformat(cfg.backtest.start)
-        start = st.date_input("Start", default_start)
-        end = st.date_input("End", default_end)
+            default_end = dt.date.fromisoformat(cfg.backtest.end)
+            default_start = dt.date.fromisoformat(cfg.backtest.start)
+            start = st.date_input("Start", default_start)
+            end = st.date_input("End", default_end)
 
-        enabled = [s.name for s in cfg.enabled_strategies()]
-        chosen = st.multiselect("Strategies", enabled, default=enabled)
+            enabled = [s.name for s in cfg.enabled_strategies()]
+            chosen = st.multiselect("Strategies", enabled, default=enabled)
 
-        capital = st.number_input(
-            "Initial capital ($)", min_value=1_000.0, value=float(cfg.backtest.initial_cash),
-            step=5_000.0,
-        )
-        slippage = st.slider(
-            "Spread crossed on each fill", 0.0, 1.0,
-            float(cfg.backtest.slippage_spread_fraction), 0.05,
-            help=(
-                "0.0 fills at mid, which is what paper trading does and what "
-                "flatters every options backtest. 1.0 pays the full quoted side. "
-                "Crossing is charged on entry AND exit."
-            ),
-        )
-        # The option list must contain whatever the config defaults to, or
-        # Streamlit refuses to render the whole page.
-        session_choices = sorted(
-            {"09:45", "10:00", "10:30", "11:00", "11:30", "13:45", "14:30", "14:45"}
-            | set(cfg.backtest.session_times_et)
-        )
-        sessions = st.multiselect(
-            "Session times (ET)", session_choices,
-            default=list(cfg.backtest.session_times_et),
-            help=(
-                "The intraday book enters 09:45-14:45 and skips 11:30-13:30, so "
-                "one scan a day can only catch one of its windows. Each extra "
-                "scan costs replay time; the gates still apply at every one."
-            ),
-        )
-        source_label = st.radio(
-            "Data source",
-            [f"Alpaca history ({SOURCE_ALPACA})", f"Synthetic demo ({SOURCE_SYNTHETIC})"],
-            help=(
-                "Alpaca history replays real daily bars and real headlines. "
-                "Synthetic invents a price path - it proves the wiring works and "
-                "nothing else."
-            ),
-        )
-        source = SOURCE_ALPACA if source_label.startswith("Alpaca") else SOURCE_SYNTHETIC
-        critic_mode = st.selectbox(
-            "AI critic",
-            ["heuristic", "off", "llm"],
-            help=(
-                "The live decision path is cost -> critic -> risk engine -> "
-                "partner veto, so the replay runs the same Critic class. "
-                "'heuristic' is the real critic with the documented null-LLM "
-                "fallback: deterministic and free. 'llm' calls the model and "
-                "caches every verdict - use it to read the reasoning, not to "
-                "produce a P&L number. 'off' measures what the critic adds."
-            ),
-        )
-        use_news = st.checkbox("Fetch Alpaca news for the catalyst read", value=True)
-        offline = st.checkbox(
-            "Offline (cache only)", value=False,
-            help="Refuse to hit the network; use only bars already cached on disk.",
-        )
-        label = st.text_input("Run label", "")
-        run_clicked = st.button("Run backtest", type="primary", width="stretch")
+            capital = st.number_input(
+                "Initial capital ($)", min_value=1_000.0, value=float(cfg.backtest.initial_cash),
+                step=5_000.0,
+            )
+            slippage = st.slider(
+                "Spread crossed on each fill", 0.0, 1.0,
+                float(cfg.backtest.slippage_spread_fraction), 0.05,
+                help=(
+                    "0.0 fills at mid, which is what paper trading does and what "
+                    "flatters every options backtest. 1.0 pays the full quoted side. "
+                    "Crossing is charged on entry AND exit."
+                ),
+            )
+            # The option list must contain whatever the config defaults to, or
+            # Streamlit refuses to render the whole page.
+            session_choices = sorted(
+                {"09:45", "10:00", "10:30", "11:00", "11:30", "13:45", "14:30", "14:45"}
+                | set(cfg.backtest.session_times_et)
+            )
+            sessions = st.multiselect(
+                "Session times (ET)", session_choices,
+                default=list(cfg.backtest.session_times_et),
+                help=(
+                    "The intraday book enters 09:45-14:45 and skips 11:30-13:30, so "
+                    "one scan a day can only catch one of its windows. Each extra "
+                    "scan costs replay time; the gates still apply at every one."
+                ),
+            )
+            source_label = st.radio(
+                "Data source",
+                [f"Alpaca history ({SOURCE_ALPACA})", f"Synthetic demo ({SOURCE_SYNTHETIC})"],
+                help=(
+                    "Alpaca history replays real daily bars and real headlines. "
+                    "Synthetic invents a price path - it proves the wiring works and "
+                    "nothing else."
+                ),
+            )
+            source = SOURCE_ALPACA if source_label.startswith("Alpaca") else SOURCE_SYNTHETIC
+            critic_mode = st.selectbox(
+                "AI critic",
+                ["heuristic", "off", "llm"],
+                help=(
+                    "The live decision path is cost -> critic -> risk engine -> "
+                    "partner veto, so the replay runs the same Critic class. "
+                    "'heuristic' is the real critic with the documented null-LLM "
+                    "fallback: deterministic and free. 'llm' calls the model and "
+                    "caches every verdict - use it to read the reasoning, not to "
+                    "produce a P&L number. 'off' measures what the critic adds."
+                ),
+            )
+            use_news = st.checkbox("Fetch Alpaca news for the catalyst read", value=True)
+            offline = st.checkbox(
+                "Offline (cache only)", value=False,
+                help="Refuse to hit the network; use only bars already cached on disk.",
+            )
+            label = st.text_input("Run label", "")
+            run_clicked = st.button("Run backtest", type="primary", width="stretch")
 
     # -- resolve which result is on screen ------------------------------ #
     if run_clicked:
@@ -1451,17 +1463,25 @@ def main() -> None:
     # It is declared BEFORE the masthead even though it renders to the right of
     # it: the masthead needs the settings this selects, and Streamlit lays
     # columns out by position, not by the order their bodies execute.
-    head_col, profile_col = st.columns([6, 1], vertical_alignment="center")
-    with profile_col:
-        profile = st.segmented_control(
-            "Account profile", ["dev", "judged"], default="dev",
-            selection_mode="single", label_visibility="collapsed",
-            help=(
-                "dev uses ALPACA_DEV_* keys. judged uses ALPACA_* - the account "
-                "the submission points at. The active key is printed to the "
-                "terminal every time a page renders."
-            ),
-        ) or "dev"
+    if mode.is_public():
+        # No switch on the public build. It is the judged account and nothing
+        # else - the dev account's runs are not part of what is published.
+        # The masthead still needs a container to render into, so it gets the
+        # full width rather than six sevenths of it.
+        head_col = st.container()
+        profile = mode.PUBLIC_PROFILE
+    else:
+        head_col, profile_col = st.columns([6, 1], vertical_alignment="center")
+        with profile_col:
+            profile = st.segmented_control(
+                "Account profile", ["dev", "judged"], default="dev",
+                selection_mode="single", label_visibility="collapsed",
+                help=(
+                    "dev uses ALPACA_DEV_* keys. judged uses ALPACA_* - the "
+                    "account the submission points at. The active key is "
+                    "printed to the terminal every time a page renders."
+                ),
+            ) or "dev"
 
     config_path = DEFAULT_CONFIG
     st.session_state["_config_path"] = config_path
@@ -1477,7 +1497,8 @@ def main() -> None:
     # A profile whose credentials are missing loads as None and renders as such
     # rather than taking the page down.
     settings_for = {}
-    for candidate in ("dev", "judged"):
+    wanted = (mode.PUBLIC_PROFILE,) if mode.is_public() else ("dev", "judged")
+    for candidate in wanted:
         try:
             settings_for[candidate] = (
                 settings if candidate == profile
@@ -1493,19 +1514,24 @@ def main() -> None:
 
     # Events sits between Positions and Control deliberately: it is a book you
     # READ before a print and act on from the terminal, not one you switch on.
-    backtest_tab, live_tab, positions_tab, events_tab, control_tab = st.tabs(
-        [PAGE_BACKTEST, PAGE_LIVE, PAGE_POSITIONS, PAGE_EVENTS, PAGE_CONTROL]
-    )
-    with backtest_tab:
+    names = [PAGE_BACKTEST, PAGE_LIVE, PAGE_POSITIONS, PAGE_EVENTS]
+    if mode.is_operator():
+        names.append(PAGE_CONTROL)
+    tabs = st.tabs(names)
+    with tabs[0]:
         render_backtest(settings)
-    with live_tab:
+    with tabs[1]:
         render_live(settings)
-    with positions_tab:
+    with tabs[2]:
         render_positions(settings_for)
-    with events_tab:
+    with tabs[3]:
         render_events(settings)
-    with control_tab:
-        render_control(settings_for)
+    if mode.is_operator():
+        # The Control tab is not merely hidden on the public build - it is
+        # never constructed, so there is no rendered widget for a crafted
+        # request to reach. It flips books on and off on a live account.
+        with tabs[4]:
+            render_control(settings_for)
 
 
 if __name__ == "__main__":

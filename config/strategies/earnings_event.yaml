@@ -7,8 +7,8 @@
 # (which decides whether what it trades can clear its costs).
 #
 # Referenced from config/default.yaml's `strategies:` list since 30 Aug. The
-# book is driven by `oaa run` (events_flatten 09:45, events_watch 09:55/13:00/
-# 15:30, events_arm 15:50) and `oaa events screen | watch | arm | flatten`
+# book is driven by `oaa run` (events_flatten 09:45, events_watch hourly
+# 04:00-16:00 ET, events_arm 15:50) and `oaa events screen | watch | arm | flatten`
 # remain for manual and dry runs. It is still NOT a firewall tenant.
 # =============================================================================
 
@@ -67,8 +67,10 @@ sentiment:
   max_chars: 12000
 
 # The watch: read each name for days before it reports, not once at 15:50 on
-# arm day. `oaa run` polls this three times a session (09:55, 13:00, 15:30) and
+# arm day. `oaa run` polls this hourly, 04:00-16:00 ET (09:00-21:00 BST), and
 # the notes it retains are handed to the direction call at arm time.
+# A poll that finds no new items makes no model call, so the extra cycles cost
+# nothing on a quiet name.
 watch:
   enabled: true
   # Calendar days before the report to start reading. Three covers the window

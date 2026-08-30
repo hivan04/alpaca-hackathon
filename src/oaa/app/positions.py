@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 
 from oaa.app import identity as ident
+from oaa.app import mode
 
 ACCOUNTS = [("dev", "Backtesting account"), ("judged", "Competition account")]
 
@@ -88,36 +89,58 @@ def render_positions(settings_for: dict[str, Any]) -> None:
         "did it or not."
     )
 
-    left, right = st.columns([1, 3])
-    if left.button("Refresh from Alpaca", width="stretch"):
+    # The operator pulls on demand; a reader gets one automatic pull per
+    # browser session and no button. Without the auto-pull the public page
+    # would say "hit Refresh" beside a button that is not there - and with a
+    # button, every visitor could hammer the broker on our key.
+    if mode.is_public():
         for profile, _ in ACCOUNTS:
             settings = settings_for.get(profile)
-            if settings is not None:
+            if settings is not None and f"pos::{profile}" not in st.session_state:
                 st.session_state[f"pos::{profile}"] = _fetch(settings)
-        st.rerun()
-    filled_only = right.toggle(
-        "Filled orders only", value=True,
-        help="Off shows everything the account submitted, including cancelled "
-             "and rejected orders - which is where a broken loop shows up first.",
-    )
+        filled_only = True
+    else:
+        left, right = st.columns([1, 3])
+        if left.button("Refresh from Alpaca", width="stretch"):
+            for profile, _ in ACCOUNTS:
+                settings = settings_for.get(profile)
+                if settings is not None:
+                    st.session_state[f"pos::{profile}"] = _fetch(settings)
+            st.rerun()
+        filled_only = right.toggle(
+            "Filled orders only", value=True,
+            help="Off shows everything the account submitted, including "
+                 "cancelled and rejected orders - which is where a broken loop "
+                 "shows up first.",
+        )
 
     for profile, label in ACCOUNTS:
         settings = settings_for.get(profile)
+        if settings is None and mode.is_public():
+            # The public build loads the judged profile only. A profile that
+            # was never asked for did not fail to load.
+            continue
         st.divider()
         if settings is None:
             st.warning(f"**{label}** - profile could not be loaded.")
             continue
 
-        who = ident.resolve(settings, f"positions:{profile}")
-        st.markdown(
-            f"### {label}\n"
-            f"`{profile}` · key `{who.key_masked}` · account "
-            f"`{who.expected_account_id or 'unset'}`"
-        )
+        if mode.is_public():
+            st.markdown(f"### {label}")
+        else:
+            who = ident.resolve(settings, f"positions:{profile}")
+            st.markdown(
+                f"### {label}\n"
+                f"`{profile}` · key `{who.key_masked}` · account "
+                f"`{who.expected_account_id or 'unset'}`"
+            )
 
         data = st.session_state.get(f"pos::{profile}")
         if data is None:
-            st.info("Not loaded yet - hit **Refresh from Alpaca**.")
+            st.info(
+                "Could not reach Alpaca." if mode.is_public()
+                else "Not loaded yet - hit **Refresh from Alpaca**."
+            )
             continue
         if data["error"]:
             st.error(f"Could not read this account: {data['error']}")

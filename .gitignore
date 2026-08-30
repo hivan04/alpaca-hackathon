@@ -20,6 +20,12 @@ dist/
 
 # runtime artifacts
 runs/
+# ...except the handful of runs chosen for the public dashboard.
+# `runs/` has no leading slash, so it matches at ANY depth - without
+# this, public/runs/ is silently ignored and the deployed page boots
+# with an empty backtest history. See scripts/publish_runs.py.
+!public/runs/
+!public/runs/**
 data/cache/
 logs/
 *.sqlite

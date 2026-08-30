@@ -524,27 +524,67 @@ schedule:
     - name: events_flatten
       at: "09:45"
       action: events_flatten
-    # The watch. Three reads a day on every name whose print is within
-    # `watch.lookahead_days`, and none at all on a name that has reported -
-    # once NVDA has printed there is nothing left to learn that can inform the
-    # trade, and post-print commentary sitting in a dossier would be read by a
-    # later cycle as pre-print evidence.
+    # The watch. HOURLY, 04:00-16:00 ET (09:00-21:00 BST), on every name whose
+    # print is within `watch.lookahead_days` - and none at all on a name that
+    # has reported: once a name has printed there is nothing left to learn that
+    # can inform the trade, and post-print commentary sitting in a dossier
+    # would be read by a later cycle as pre-print evidence.
     #
-    # Three rather than the 15-minute grid because the feeds are daily-ish in
-    # character: press releases, analyst actions and a retail stream that turns
-    # over in hours, not minutes. Each poll costs one model call per name and
-    # only when something NEW arrived, so a quiet day is nearly free. Morning
-    # catches the overnight wire and the pre-market notes; midday catches the
-    # US session's own headlines; the 15:30 read is the last one before the
-    # 15:50 arm, so the arm always sees the day it is arming into.
-    - name: events_watch_morning
-      at: "09:55"
+    # Hourly rather than three-a-day (09:55/13:00/15:30 until 30 Aug) because
+    # the material items - estimate revisions, guidance, a supplier's read-
+    # across - do not wait for a US session. The 04:00-09:00 ET reads catch the
+    # overnight and European wire and the pre-market analyst actions, which the
+    # old morning cycle saw only after they were already priced.
+    #
+    # The cost of the extra cycles is near zero by construction: `_unseen`
+    # keys every item by a hash of its timestamp and text, so a poll that finds
+    # nothing new makes NO model call and writes no note. Cost scales with how
+    # much news arrives, not with how often the loop runs.
+    #
+    # Note on restarts: `_due` fires every cycle whose time has passed today,
+    # so a process started at 15:00 ET runs the earlier hourly reads back to
+    # back. The first of them collects the day's items and the rest are quiet -
+    # correct, and one burst rather than eleven.
+    #
+    # 16:00 is the last read. The arm is at 15:50, so 16:00 informs tomorrow.
+    - name: events_watch_0400
+      at: "04:00"
       action: events_watch
-    - name: events_watch_midday
+    - name: events_watch_0500
+      at: "05:00"
+      action: events_watch
+    - name: events_watch_0600
+      at: "06:00"
+      action: events_watch
+    - name: events_watch_0700
+      at: "07:00"
+      action: events_watch
+    - name: events_watch_0800
+      at: "08:00"
+      action: events_watch
+    - name: events_watch_0900
+      at: "09:00"
+      action: events_watch
+    - name: events_watch_1000
+      at: "10:00"
+      action: events_watch
+    - name: events_watch_1100
+      at: "11:00"
+      action: events_watch
+    - name: events_watch_1200
+      at: "12:00"
+      action: events_watch
+    - name: events_watch_1300
       at: "13:00"
       action: events_watch
-    - name: events_watch_close
-      at: "15:30"
+    - name: events_watch_1400
+      at: "14:00"
+      action: events_watch
+    - name: events_watch_1500
+      at: "15:00"
+      action: events_watch
+    - name: events_watch_1600
+      at: "16:00"
       action: events_watch
     - name: carry_scan
       at: "10:00"
