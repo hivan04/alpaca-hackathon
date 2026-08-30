@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 from oaa.agents.orchestrator import Orchestrator
-from oaa.core.logging import get_logger
+from oaa.core.logging import get_logger, tape
 
 __all__ = ["Runner"]
 
@@ -34,6 +34,7 @@ class Runner:
         self._stop = False
         self._fired: set[tuple[dt.date, str]] = set()
         self._last_monitor = 0.0
+        self._last_heartbeat = 0.0
         self._session_date: dt.date | None = None
 
         # The AI assistant drives the cycles when it is available; the
@@ -105,12 +106,18 @@ class Runner:
     # -- main loop ----------------------------------------------------------- #
     def run(self, once: bool = False, poll_seconds: int = 20) -> None:
         self.install_signal_handlers()
-        log.info(
-            "runner started: %d cycles, timezone %s, monitor every %ds",
+        # TAPE, not INFO. `telemetry.console: focused` drops INFO, and on a
+        # non-trading day there are no cycles and no other tape lines - so at
+        # INFO a perfectly healthy agent presents as a blank terminal that is
+        # indistinguishable from a hang. That cost an evening on 30 Aug.
+        tape().info(
+            "READY %d cycles, timezone %s, monitor every %ds - waiting for the "
+            "next scheduled cycle",
             len(self.schedule.cycles), self.schedule.timezone,
             self.schedule.monitor_interval_seconds,
         )
         self.orch.journal.event("runner_start", cycles=[c.name for c in self.schedule.cycles])
+        self._warn_if_reasoning_is_missing()
 
         while not self._stop:
             now = self._now()
@@ -138,12 +145,39 @@ class Runner:
 
                 self._monitor()
 
+            self._heartbeat(now)
             if once:
                 break
             time.sleep(poll_seconds)
 
         log.info("runner stopped")
         self.orch.journal.event("runner_stop")
+
+    def _warn_if_reasoning_is_missing(self) -> None:
+        """Say at START-UP whether the agent can actually reason.
+
+        Waiting until the first agent cycle means the answer arrives at 10:00
+        ET, buried in a log nobody is watching yet. The question - "is this
+        about to run the whole week on rules?" - is answerable the moment the
+        process boots, so it is answered there.
+        """
+        if self.agent is None:
+            return
+        try:
+            available = self.agent.available
+            provider = getattr(self.orch.llm, "provider", "?")
+        except Exception as exc:  # noqa: BLE001 - a check must not be the outage
+            log.warning("could not determine the reasoning layer's state: %s", exc)
+            return
+        if available:
+            tape().info("READY reasoning layer: %s, tool loop available", provider)
+            return
+        log.warning(
+            "NO REASONING LAYER AT START-UP - provider '%s' cannot drive a tool "
+            "loop, so every agent cycle this session will fall back to "
+            "deterministic rules. Fix this before the open.", provider,
+        )
+        self.orch.journal.event("agent_degraded", cycle="startup", reason=str(provider))
 
     def _fire(self, cycle: Any) -> None:
         """Run one cycle, through the assistant where that makes sense."""
@@ -189,6 +223,25 @@ class Runner:
             log.info("session rollover %s -> %s", self._session_date, today)
             self.firewall.reset_day(today)
         self._session_date = today
+
+    def _heartbeat(self, now: dt.datetime) -> None:
+        """Say something every half hour, even when there is nothing to say.
+
+        A scheduler is mostly idle by design, and a focused console shows only
+        events. The two states "waiting correctly" and "wedged" then look
+        identical on screen, which is precisely the confusion `oaa status`
+        exists to resolve - but only if you think to run it. A dated line every
+        30 minutes makes the healthy state visible without making it noisy.
+        """
+        if time.monotonic() - self._last_heartbeat < 1800:
+            return
+        self._last_heartbeat = time.monotonic()
+        pending = [c.name for c in self.schedule.cycles if (now.date(), c.name) not in self._fired]
+        tape().info(
+            "ALIVE %s - %d cycle(s) still to fire today%s",
+            self.firewall.clock.describe(now), len(pending),
+            f", next: {pending[0]}" if pending else "",
+        )
 
     def _monitor(self) -> None:
         interval = self.schedule.monitor_interval_seconds

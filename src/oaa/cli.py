@@ -111,7 +111,7 @@ def status(
     from oaa.app import status as status_mod
 
     settings = _settings_only(profile, config)
-    resolved = settings.config.profile or "dev"
+    resolved = settings.config.profile or "judged"
     journal_obj = _journal(settings)
 
     def once() -> None:

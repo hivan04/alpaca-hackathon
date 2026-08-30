@@ -67,3 +67,44 @@ def test_full_is_still_reachable_and_unfiltered():
 def test_the_shipped_config_declares_a_console_mode():
     cfg = load_settings(profile="dev").config
     assert cfg.telemetry.console in {"full", "focused"}
+
+
+# --------------------------------------------------------------------------- #
+# proof of life
+# --------------------------------------------------------------------------- #
+def test_the_boot_lines_survive_the_focused_console():
+    """30 Aug, the expensive one.
+
+    `runner started` and `reasoning layer:` were logged at INFO. The focused
+    console drops INFO. On a non-trading day there are no cycles and no other
+    tape lines, so a perfectly healthy agent presented as a blank terminal -
+    indistinguishable from a hang, and duly diagnosed as one for an hour.
+
+    Whatever else changes, these two lines must reach the screen in both modes:
+    they are the only evidence at boot that the thing is alive.
+    """
+    import inspect
+
+    from oaa.agents import runner as runner_module
+
+    source = inspect.getsource(runner_module.Runner.run)
+    assert "tape()" in source, "the runner's boot line must go to the tape"
+    assert 'log.info(\n            "runner started' not in source
+
+    guard = inspect.getsource(runner_module.Runner._warn_if_reasoning_is_missing)
+    assert "tape()" in guard, "a healthy reasoning layer must say so on screen"
+
+
+def test_an_idle_runner_still_says_something():
+    """Silence must never be the only state. Two things that look identical on
+    screen - waiting correctly, and wedged - is the failure `oaa status` exists
+    to resolve, and it only helps if you think to run it."""
+    import inspect
+
+    from oaa.agents import runner as runner_module
+
+    beat = inspect.getsource(runner_module.Runner._heartbeat)
+    assert "tape()" in beat and "1800" in beat, (
+        "the heartbeat must reach the focused console, on a sane interval"
+    )
+    assert "self._heartbeat(now)" in inspect.getsource(runner_module.Runner.run)

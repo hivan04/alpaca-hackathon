@@ -1,0 +1,133 @@
+--- a/src/oaa/config/schema.py	2026-08-30 03:54:09.000000000 +0000
++++ b/src/oaa/config/schema.py	2026-08-30 14:58:54.112237640 +0000
+@@ -173,6 +173,16 @@
+     max_notional_per_trade_pct: float = 0.10
+     min_cash_buffer_pct: float = 0.15
+     allow_undefined_risk: bool = False
++    #: Ceiling on credit as a fraction of a defined-risk structure's width.
++    #: credit + max_loss == width, so this is max_profit / (max_profit +
++    #: max_loss). A 14-delta condor collects ~0.17, a 25-delta one ~0.30, so
++    #: 0.45 refuses only the impossible. It exists because a mispriced leg -
++    #: a stale or wide print whose recovered IV is out of line with the strikes
++    #: either side of it - produces a structure that appears to collect more
++    #: credit than its own width, which is an arbitrage no market offers.
++    #: 0 disables the check (measure-only is not meaningful here: the trades it
++    #: catches are unfillable, not merely unusual).
++    max_credit_to_width: float = 0.45
+     # --- aggregate GREEK caps -------------------------------------------- #
+     # Enforced from 30 Aug. Until then these two sat in the config, in the
+     # docs and in NO code path: every portfolio limit counted structures, and a
+--- a/src/oaa/risk/engine.py	2026-08-30 03:54:09.000000000 +0000
++++ b/src/oaa/risk/engine.py	2026-08-30 14:59:11.344539822 +0000
+@@ -180,6 +180,32 @@
+             return fail("unknown_risk", "structure has no computable maximum loss")
+         checks["unknown_risk"] = True
+ 
++        # A credit structure's payoff is bounded by its width: credit + max loss
++        # == width. A 14-delta condor collects ~17% of width, a 25-delta one
++        # ~30% (see config/strategies/vol_carry.yaml). A structure quoted as
++        # collecting far more than that is not a rich trade, it is a chain that
++        # has mispriced one leg - typically a stale or wide print whose recovered
++        # IV is out of line with its neighbouring strikes, so the short leg is
++        # marked above the long leg it is supposed to be cheaper than. Selling it
++        # is an arbitrage the fill model will happily book and the market will
++        # never offer. Measured on 2026-02-01..08-21: 36 such condors, +$13,353,
++        # 71% of the carry book's entire P&L, every one of them impossible.
++        # Credit structures only. On a DEBIT spread the same ratio is high by
++        # construction (a cheap spread has a small max loss and a large max
++        # profit) and means the opposite thing, so applying it there would
++        # refuse exactly the debit spreads worth buying.
++        ceiling = self.limits.max_credit_to_width
++        if ceiling and idea.is_credit and idea.max_profit is not None and idea.max_profit > 0:
++            width_value = idea.max_profit + idea.max_loss
++            ratio = idea.max_profit / width_value if width_value else None
++            if ratio is not None and ratio > ceiling:
++                return fail(
++                    "credit_to_width",
++                    f"credit is {ratio:.0%} of width, ceiling is {ceiling:.0%} - "
++                    "a leg is mispriced, not a rich premium",
++                )
++        checks["credit_to_width"] = True
++
+         if not 1 <= len(idea.legs) <= 4:
+             return fail("leg_count", f"Alpaca accepts 1-4 legs, got {len(idea.legs)}")
+         checks["leg_count"] = True
+--- a/tests/test_risk.py	2026-08-29 22:33:11.000000000 +0000
++++ b/tests/test_risk.py	2026-08-30 14:59:35.374101629 +0000
+@@ -332,3 +332,68 @@
+     (tmp_path / "switchboard.json").write_text("{not json")
+     board = Switchboard.open(tmp_path)
+     assert board.enabled("vol_carry", default=True) is True
++
++
++# --------------------------------------------------------------------------- #
++# credit-to-width ceiling
++#
++# The 2026-02-01..08-21 replay booked 36 iron condors whose credit exceeded
++# their own width - GLD collecting 5.30 on a 6.00-wide condor, EEM 0.96 on a
++# 1.00-wide one. Each is an arbitrage produced by one leg's recovered IV being
++# out of line with the strikes either side of it, and together they were 71% of
++# the carry book's P&L. The ceiling refuses them at the risk engine, so every
++# strategy inherits it rather than each builder needing its own check.
++# --------------------------------------------------------------------------- #
++def credit_idea(max_profit: float, max_loss: float) -> TradeIdea:
++    return TradeIdea(
++        symbol="GLD",
++        strategy="test",
++        structure=StructureType.IRON_CONDOR,
++        legs=[
++            Leg(symbol="GLD260402P00385000", side=Side.SELL, intent=Intent.SELL_TO_OPEN),
++            Leg(symbol="GLD260402P00383000", side=Side.BUY, intent=Intent.BUY_TO_OPEN),
++        ],
++        quantity=1,
++        net_price=-round(max_profit / 100, 2),
++        max_loss=max_loss,
++        max_profit=max_profit,
++        thesis="test",
++    )
++
++
++def test_a_normal_condor_credit_passes_the_width_ceiling(cfg, account):
++    # 14-delta shorts collect ~17% of width: 85 credit against 415 of risk.
++    verdict = RiskEngine(cfg).evaluate(credit_idea(85.0, 415.0), account, now=MIDDAY)
++    assert verdict.approved
++
++
++def test_credit_above_the_width_ceiling_is_rejected(cfg, account):
++    # The real GLD trade: 5.30 credit on a 6.00-wide condor, 88% of width.
++    verdict = RiskEngine(cfg).evaluate(credit_idea(530.0, 70.0), account, now=MIDDAY)
++    assert not verdict.approved
++    assert "rule=credit_to_width" in verdict.reasons
++
++
++def test_the_ceiling_catches_a_near_arbitrage_with_positive_max_loss(cfg, account):
++    # The real EEM trade: 0.96 credit on a 1.00-wide condor. max_loss is $4 -
++    # positive, so the existing unknown_risk check lets it through.
++    verdict = RiskEngine(cfg).evaluate(credit_idea(96.0, 4.0), account, now=MIDDAY)
++    assert not verdict.approved
++    assert "rule=credit_to_width" in verdict.reasons
++
++
++def test_a_cheap_debit_spread_is_not_caught_by_the_ceiling(cfg, account):
++    # Same ratio, opposite meaning: a 5-wide debit spread bought for 0.50 has
++    # max_profit 450 against max_loss 50. Refusing it would be the bug.
++    debit = credit_idea(450.0, 50.0).model_copy(
++        update={"net_price": 0.50, "structure": StructureType.VERTICAL_DEBIT}
++    )
++    verdict = RiskEngine(cfg).evaluate(debit, account, now=MIDDAY)
++    assert verdict.approved
++
++
++def test_the_ceiling_can_be_disabled(cfg, account):
++    relaxed = cfg.model_copy(deep=True)
++    relaxed.risk.max_credit_to_width = 0.0
++    verdict = RiskEngine(relaxed).evaluate(credit_idea(530.0, 70.0), account, now=MIDDAY)
++    assert verdict.approved
+--- a/config/strategies/intraday_momentum.yaml	2026-08-30 03:54:09.000000000 +0000
++++ b/config/strategies/intraday_momentum.yaml	2026-08-30 15:08:18.422277005 +0000
+@@ -324,4 +324,4 @@
+   # intrinsic - which is how a book designed around 30-minute holds produced
+   # twelve all-or-nothing expiry settlements in a nine-session window.
+   flat_by: "15:10"
+-  exit_on_vwap_recross: true
++  exit_on_vwap_recross: false

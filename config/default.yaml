@@ -20,7 +20,7 @@ meta:
 # submitted to the judges. Keeping these apart is the single most important
 # operational rule of the week - see docs/RUNBOOK.md.
 # -----------------------------------------------------------------------------
-profile: dev            # dev | judged   (env: OAA_PROFILE)
+profile: judged         # judged is the only profile in use (env: OAA_PROFILE)
 
 broker:
   # cli   -> alpaca CLI subprocess. THE EXECUTION PATH. Every order is a shell
@@ -48,8 +48,21 @@ broker:
     args: ["alpaca-mcp-server"]
     transport: stdio        # stdio | streamable-http
     url: "http://127.0.0.1:8000/mcp"   # used when transport=streamable-http
-    # Trim the 72-tool surface to what the agents actually need.
-    toolsets: ["account", "trading", "assets", "options-data", "stock-data", "news"]
+    # EMPTY ON PURPOSE (30 Aug). These names were passed to the server as
+    # ALPACA_TOOLSETS to trim its 72-tool surface. This server build does not
+    # recognise them, so it registered **zero** tools and started up perfectly
+    # happily - `oaa mcp-tools` printed an empty table and the live agent booted
+    # with no MCP surface at all. A filter that silently means "nothing" is
+    # worse than no filter.
+    #
+    # Nothing is lost by removing it, because the server-side list was never the
+    # safety property. `agents/tools.py:mcp_read_tools` filters to
+    # MCP_READ_ALLOWLIST - seven read-only tools - and withholds every mutating
+    # one, so the model cannot see `place_option_order` or `close_all_positions`
+    # whatever the server registers. That filter is in code and is tested.
+    #
+    # Restore a filter only with names verified against `oaa mcp-tools`.
+    toolsets: []
 
 data:
   # cli -> `alpaca data ...` subprocesses. Same binary as execution, so the
@@ -768,7 +781,20 @@ backtest:
   # 0.0 fills at mid, which is what paper trading does and what flatters every
   # options backtest ever written. Charged on entry AND exit.
   slippage_spread_fraction: 0.5
-  commission_per_contract: 0.0     # Alpaca options are commission-free
+  # Alpaca charges no COMMISSION on options, but regulatory and clearing fees
+  # are passed through per contract per side, and they are not zero. From
+  # Alpaca's published Brokerage Fee Schedule:
+  #   OCC clearing fee   $0.025  per contract, buys and sells
+  #   ORF                $0.015  per contract, buys and sells
+  #   FINRA CAT          $0.0003 per contract (100 equiv. shares), both sides
+  #   FINRA TAF          $0.00329 per contract, SELLS only
+  #   SEC fee            0.0000206 x trade value, SELLS only
+  # That is ~$0.0403 to buy and ~$0.0435 + SEC to sell, so ~$0.04 per contract
+  # per side is the honest single-number approximation this field charges.
+  # 0.0 understated the cost of every multi-leg structure: a 4-leg condor at
+  # qty 20 is 160 contract-sides on a round trip, which is ~$6.40 the replay
+  # was not charging.
+  commission_per_contract: 0.04
   output_dir: "runs/backtests"
   # Sessions the replay evaluates, Eastern time. The carry book's entry window
   # is 10:00-15:00, so one 10:00 scan is the honest minimum.

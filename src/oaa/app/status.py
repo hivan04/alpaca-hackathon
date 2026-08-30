@@ -107,7 +107,12 @@ def processes(profile: str) -> list[dict[str, Any]]:
         except Exception:  # noqa: BLE001 - a status command never raises
             pass
 
-    if not found:
+    # A pm2 entry that is STOPPED is not a running process. Gating the `ps`
+    # fallback on `found` being empty meant that once pm2 had ever been used,
+    # its dead rows suppressed the check that would have seen a hand-started
+    # loop - and the command reported NO PROCESS VISIBLE beside its own
+    # "last journal entry 34s ago". 30 Aug: that is exactly what happened.
+    if not any(str(r.get("status")) == "online" for r in found):
         try:
             out = subprocess.run(
                 ["ps", "-eo", "pid,etime,args"],
@@ -120,6 +125,8 @@ def processes(profile: str) -> list[dict[str, Any]]:
             if len(parts) < 3 or not _looks_like_agent(parts[2]):
                 continue
             pid, elapsed, args = parts
+            if any(str(r.get("pid")) == str(pid) for r in found):
+                continue    # already reported by pm2; do not double-count it
             found.append({
                 "source": "ps", "name": args[:60], "pid": pid,
                 "status": "online", "restarts": None, "uptime": elapsed,

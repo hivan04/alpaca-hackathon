@@ -560,6 +560,20 @@ def mcp_read_tools(
     mutating = sorted(
         set(available) - set(MCP_READ_ALLOWLIST) - set(MCP_READ_AVAILABLE)
     )
+    missing = [n for n in names if n not in available]
+    if missing:
+        # The 30 Aug failure: a server-side toolset filter naming toolsets the
+        # server did not recognise registered ZERO tools, and this function
+        # dutifully returned an empty list at INFO. The agent then ran with no
+        # MCP surface, which is a silent, total degradation of the read layer.
+        # WARNING, so `telemetry.console: focused` cannot hide it, and so the
+        # cause is named rather than left to be inferred from a count.
+        log.warning(
+            "MCP server is missing %d of the %d allowlisted read tools (%s). "
+            "The agent will run with a reduced read surface. Check "
+            "`oaa mcp-tools` and `broker.mcp.toolsets`.",
+            len(missing), len(names), ", ".join(missing),
+        )
     log.info(
         "MCP surface for the agent: %d read tools exposed, %d read tools available "
         "but unused, %d mutating tools withheld",

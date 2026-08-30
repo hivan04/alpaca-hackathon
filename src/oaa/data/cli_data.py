@@ -224,32 +224,57 @@ class AlpacaCliDataProvider(MarketDataProvider):
         key = f"chain:{symbol}:{min_dte}:{max_dte}:{strike_low}:{strike_high}"
         return self._cached(key, fetch)
 
-    def news(self, symbol: str, limit: int | None = None) -> list[dict[str, Any]]:
+    def news(
+        self,
+        symbol: str,
+        limit: int | None = None,
+        start: dt.date | dt.datetime | None = None,
+    ) -> list[dict[str, Any]]:
         """Recent headlines for one symbol via `alpaca data news`.
 
         Alpaca answers this itself, so there is no scraper to maintain, no ToS
         exposure, and nothing to break on day three of a seven-day window.
+
+        `start` is the beginning of the window. Callers that need a specific
+        lookback pass it; the events book wants SEVEN DAYS on the first read of
+        a name, not the six hours `data.news_lookback_hours` gives discovery.
+        Until 30 Aug this method had no such parameter, so
+        `alpaca_news_fetcher`'s call raised TypeError, its fallback re-called
+        `news(symbol)` bare, and `news_lookback_days: 7` in the events params
+        was silently replaced by the global six hours.
+
+        **This raises `DataError` when the feed fails.** It used to swallow it
+        and return `[]` at debug level, which meant a dead news CLI made every
+        name read as *quiet* on the watch report - indistinguishable from a
+        stock with genuinely no news, and the exact false reassurance the watch
+        was designed to avoid. `gather` already records a raised failure on the
+        pack; it cannot record one it is never told about.
         """
         cap = int(limit or self.cfg.data.news_limit)
-        hours = int(self.cfg.data.news_lookback_hours)
-        start = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+        if start is None:
+            hours = float(self.cfg.data.news_lookback_hours)
+            begins = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+        elif isinstance(start, dt.datetime):
+            begins = start if start.tzinfo else start.replace(tzinfo=dt.timezone.utc)
+        else:
+            begins = dt.datetime.combine(start, dt.time.min, tzinfo=dt.timezone.utc)
+        stamp = begins.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         def fetch() -> list[dict[str, Any]]:
             args = [
                 "data", "news",
                 "--symbols", symbol,
                 "--limit", str(cap),
-                "--start", start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "--start", stamp,
             ]
             payload = self.run(args)
             rows = payload.get("news", payload) if isinstance(payload, dict) else payload
             return [r for r in (rows or []) if isinstance(r, dict)]
 
-        try:
-            return self._cached(f"news:{symbol}:{cap}", fetch)
-        except DataError as exc:
-            log.debug("%s: no news (%s)", symbol, exc)
-            return []
+        # The window is part of the cache key. Without it a six-hour discovery
+        # fetch and a seven-day events fetch for the same symbol collide, and
+        # whichever ran first decides what the other one sees.
+        return self._cached(f"news:{symbol}:{cap}:{stamp}", fetch)
 
     def option_contracts(self, symbol: str, **flags: Any) -> list[dict[str, Any]]:
         """Reference data via `alpaca option contracts` (open interest, tradability)."""
@@ -296,7 +321,16 @@ class AlpacaCliDataProvider(MarketDataProvider):
             except DataError as exc:
                 log.debug("%s: no intraday bars (%s)", symbol, exc)
 
-        headlines = self.news(symbol) if self.cfg.data.fetch_news else []
+        # `context` is built for every symbol in a scan; a news outage must not
+        # take the market context down with it. The events book calls `news`
+        # directly and DOES want the exception - see the docstring.
+        headlines: list[dict[str, Any]] = []
+        if self.cfg.data.fetch_news:
+            try:
+                headlines = self.news(symbol)
+            except DataError as exc:
+                log.warning("%s: news unavailable (%s) - context built without it",
+                            symbol, exc)
 
         return MarketContext(
             symbol=symbol,

@@ -1,0 +1,180 @@
+--- a/src/oaa/backtest/engine.py	2026-08-30 03:54:09.000000000 +0000
++++ b/src/oaa/backtest/engine.py	2026-08-30 19:28:10.344376485 +0000
+@@ -885,6 +885,56 @@
+                     marks[meta["symbol"]] = modelled[meta["symbol"]]
+         net, spread = self._net_price(legs, marks, closing=False)
+ 
++        # The entry has just been re-priced onto the intraday model surface,
++        # but the RISK ENGINE sized this position from the chain quote the idea
++        # was BUILT from. On a debit structure max loss IS the debit, so when
++        # the two surfaces disagree the position was sized against a number
++        # that no longer exists — and `pnl_pct` in the exit path divides by that
++        # same stale `max_loss`, so the target and stop move with it too.
++        #
++        # Measured 2026-02-01..08-21: 15 of 243 `single_long` trades carried
++        # more than 1.5x their recorded max loss and 6 more than 3x, the worst
++        # $3,813 of premium against a $1,000 (1% of equity) cap. Both the
++        # largest win (+$700) and the largest loss (-$1,023) in the intraday
++        # book were in that tail.
++        if net > 0:
++            true_max_loss = round(net * MULTIPLIER, 2)
++            stated = idea.max_loss or 0.0
++            if true_max_loss > stated * 1.05:
++                budget = (
++                    self.broker.account().equity
++                    * self.cfg.risk.max_risk_per_trade_pct
++                )
++                allowed = int(budget // true_max_loss) if true_max_loss > 0 else 0
++                if allowed < 1:
++                    result.rejections.append(
++                        RejectionRecord(
++                            ts=moment.isoformat(),
++                            symbol=idea.symbol,
++                            strategy=idea.strategy,
++                            stage="risk",
++                            vetoed_by="reprice_risk",
++                            reason=(
++                                f"re-priced onto the entry surface at {net:.2f} "
++                                f"(${true_max_loss:,.0f} per contract) against a "
++                                f"built quote of ${stated:,.0f} - one contract now "
++                                f"breaches the "
++                                f"{self.cfg.risk.max_risk_per_trade_pct:.1%} "
++                                "per-trade cap"
++                            ),
++                            metrics={
++                                "built_max_loss": stated,
++                                "repriced_max_loss": true_max_loss,
++                                "entry_net": net,
++                            },
++                        )
++                    )
++                    return
++                quantity = min(quantity, allowed)
++            # Carry the honest number onto the idea so sizing, the trade record
++            # and the exit denominator all agree from here on.
++            idea.max_loss = true_max_loss
++
+         # Time-based exits read this. Stamped here and in the live
+         # orchestrator so a hold rule means the same thing in both paths.
+         idea.meta["opened_at"] = moment.isoformat()
+--- a/tests/test_backtest.py	2026-08-30 03:54:09.000000000 +0000
++++ b/tests/test_backtest.py	2026-08-30 19:28:00.299971068 +0000
+@@ -25,7 +25,18 @@
+ from oaa.backtest.source import HistoricalContextSource, headline_sentiment, synthetic_bars
+ from oaa.config.loader import load_config, load_settings
+ from oaa.core import clock
+-from oaa.core.types import MarketContext, Right
++from types import SimpleNamespace
++
++from oaa.backtest.engine import BacktestResult
++from oaa.core.types import (
++    Intent,
++    Leg,
++    MarketContext,
++    Right,
++    Side,
++    StructureType,
++    TradeIdea,
++)
+ 
+ START = dt.date(2026, 6, 1)
+ END = dt.date(2026, 8, 20)
+@@ -1745,3 +1756,98 @@
+     and every exit dial is again being sampled on the scan grid."""
+     result = _run()
+     assert "fine_marks" in result.metrics()
++
++
++# --------------------------------------------------------------------------- #
++# entry re-pricing vs the sizing denominator
++#
++# `_open_structure` re-prices an intraday entry onto the model surface AFTER
++# the risk engine has already sized the position from the chain quote the idea
++# was built from. On a debit structure max loss IS the debit, so the two
++# disagreeing means the position is sized against a number that no longer
++# exists - and `pnl_pct` divides by the same stale `max_loss`, so the exit
++# dials move with it.
++#
++# Measured over 2026-02-01..08-21: 15 of 243 `single_long` trades carried more
++# than 1.5x their recorded max loss, 6 more than 3x, worst $3,813 of premium
++# against a $1,000 cap. BT0038 (QQQ 0 DTE, built at 0.93, filled at 4.11, q10)
++# was +$700 on 4.4x the intended risk and was 83% of that week's headline P&L.
++# --------------------------------------------------------------------------- #
++def _debit_idea(max_loss: float) -> TradeIdea:
++    return TradeIdea(
++        symbol="QQQ",
++        strategy="intraday_momentum",
++        structure=StructureType.SINGLE_LONG,
++        legs=[Leg(symbol="QQQ260821P00714000", side=Side.BUY, intent=Intent.BUY_TO_OPEN)],
++        quantity=10,
++        net_price=round(max_loss / 100, 4),
++        max_loss=max_loss,
++        max_profit=None,
++        thesis="test",
++    )
++
++
++def _open_with_fill(engine, idea, quantity, fill_price, result):
++    """Drive _open_structure with a known fill, bypassing the chain."""
++    engine._net_price = lambda legs, marks, closing: (fill_price, 0.0)
++    strategy = SimpleNamespace(name="intraday_momentum", params={}, book="intraday")
++    market = _spy_context(600.0)
++    market.symbol = "QQQ"
++    engine._open_structure(
++        idea, strategy, market, quantity,
++        dt.datetime(2026, 8, 21, 14, 0, tzinfo=dt.timezone.utc),
++        {}, {}, result,
++    )
++
++
++def test_a_repriced_entry_resizes_to_the_true_risk():
++    engine = BacktestEngine(load_settings())
++    result = BacktestResult()
++    idea = _debit_idea(93.0)          # built at 0.93
++    _open_with_fill(engine, idea, 10, 4.1141, result)   # filled at 4.11
++
++    assert result.trades, "the trade should still open, at a smaller size"
++    opened = result.trades[0]
++    # 1% of $100k = $1,000 budget; $411.41 per contract allows 2, not 10.
++    assert opened.quantity == 2, f"expected a resize to 2, got {opened.quantity}"
++    assert opened.max_loss == pytest.approx(411.41), (
++        "the record must carry the FILLED debit, not the built quote - the exit "
++        "denominator reads it"
++    )
++
++
++def test_an_unchanged_entry_price_is_left_alone():
++    engine = BacktestEngine(load_settings())
++    result = BacktestResult()
++    idea = _debit_idea(411.41)
++    _open_with_fill(engine, idea, 2, 4.1141, result)
++    assert result.trades[0].quantity == 2, "no resize when the surfaces agree"
++
++
++def test_a_reprice_that_breaches_the_cap_on_one_contract_is_refused():
++    engine = BacktestEngine(load_settings())
++    result = BacktestResult()
++    idea = _debit_idea(93.0)
++    _open_with_fill(engine, idea, 10, 15.00, result)   # $1,500 for ONE contract
++
++    assert not result.trades, "one contract over the cap must not open"
++    assert result.rejections, "and it must be journalled, not dropped silently"
++    assert result.rejections[-1].vetoed_by == "reprice_risk"
++
++
++def test_a_credit_structure_is_untouched_by_the_guard():
++    """max_loss on a credit structure is a strike WIDTH, not the net price, so
++    it cannot go stale this way and must not be overwritten by it."""
++    engine = BacktestEngine(load_settings())
++    result = BacktestResult()
++    idea = TradeIdea(
++        symbol="SPY", strategy="vol_carry", structure=StructureType.IRON_CONDOR,
++        legs=[
++            Leg(symbol="SPY260918P00475000", side=Side.SELL, intent=Intent.SELL_TO_OPEN),
++            Leg(symbol="SPY260918P00470000", side=Side.BUY, intent=Intent.BUY_TO_OPEN),
++        ],
++        quantity=3, net_price=-2.0, max_loss=300.0, max_profit=200.0, thesis="test",
++    )
++    _open_with_fill(engine, idea, 3, -2.0, result)      # a credit: net < 0
++    assert result.trades[0].quantity == 3
++    assert result.trades[0].max_loss == pytest.approx(300.0)

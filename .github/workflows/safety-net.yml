@@ -75,12 +75,26 @@ jobs:
           ALPACA_DEV_ACCOUNT_ID: ${{ secrets.ALPACA_DEV_ACCOUNT_ID }}
           FEATHERLESS_API_KEY: ${{ secrets.FEATHERLESS_API_KEY }}
         run: |
+          set -euo pipefail
+          # A missing secret is an empty string, and `env` simply omits it -
+          # which is how the keys went absent silently. Name them here.
+          for v in ALPACA_API_KEY ALPACA_SECRET_KEY ALPACA_JUDGED_ACCOUNT_ID; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::repo secret $v is not set - add it in Settings -> Secrets and variables -> Actions"
+              exit 1
+            fi
+          done
           umask 077
           env | grep -E '^(ALPACA_|FEATHERLESS_)' > .env
 
       - name: Confirm which account these keys open
         run: |
-          oaa doctor --profile ${{ inputs.profile || 'judged' }} | tail -25
+          set -o pipefail
+          oaa doctor --profile ${{ inputs.profile || 'judged' }} | tee doctor.txt | tail -25
+          if grep -qE '^\│ credentials\s+\│ FAIL' doctor.txt; then
+            echo "::error::doctor says credentials FAIL - refusing to run the action"
+            exit 1
+          fi
 
       - name: ${{ inputs.action || 'flatten' }}
         env:

@@ -141,7 +141,23 @@ class TradingAgent:
         )
 
         if not self.available:
-            log.info("no LLM available - running the deterministic %s cycle", cycle)
+            # WARNING, not INFO, and journalled. This is the single most
+            # expensive silent failure this repo has had: on 28 Aug the live
+            # provider became Featherless, `run_tools` died on the Anthropic
+            # wire shape, and every cycle for a day ran on deterministic rules
+            # with one INFO line as the only evidence. `telemetry.console:
+            # focused` filters INFO, so at INFO it would now not even be on
+            # screen.
+            why = (
+                f"provider '{getattr(self.orch.llm, 'provider', '?')}'"
+                if getattr(self.orch.llm, "provider", None) not in ("null", None)
+                else "no provider configured"
+            )
+            log.warning(
+                "NO REASONING LAYER (%s) - '%s' is running on deterministic "
+                "rules. Check `oaa doctor`'s 'llm: live agent' row.", why, cycle,
+            )
+            self.journal.event("agent_degraded", cycle=cycle, reason=why)
             result = self.orch.run_cycle(_deterministic_action(cycle), cycle)
             run.narrative = result.summary()
             return run

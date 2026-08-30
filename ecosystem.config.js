@@ -31,15 +31,7 @@ const base = {
 
 module.exports = {
   apps: [
-    {
-      ...base,
-      name: "oaa-dev",
-      script: PY,
-      args: "run --profile dev",
-      env: { OAA_PROFILE: "dev", PYTHONUNBUFFERED: "1", TZ: "America/New_York" },
-      out_file: "logs/dev.out.log",
-      error_file: "logs/dev.err.log",
-    },
+    // oaa-dev removed 30 Aug - everything runs on the judged profile.
     {
       ...base,
       name: "oaa-judged",

@@ -31,7 +31,14 @@ risk:
   # entirely once the day book got going. The daily LOSS limit below is the
   # control that should bind, not a position count.
   max_new_positions_per_day: 20
-  max_risk_per_trade_pct: 0.015
+  # 0.01 from 30 Aug, lowered from 0.015 to MATCH config/dev.yaml. While the
+  # two differed, every backtest run on dev described a different strategy
+  # from the one the judged account trades: same code and same data gave
+  # +$846.61 on dev and -$237.18 on judged for 2026-08-17..21, because 50%
+  # larger positions burn the net_delta budget faster and the cap then
+  # refuses entries dev accepted (41 trades vs 44). This file's own header
+  # says 'tighter, slower' - 1.5% against dev's 1.0% was the opposite.
+  max_risk_per_trade_pct: 0.01
   daily_loss_limit_pct: 0.03
 
 telemetry:
