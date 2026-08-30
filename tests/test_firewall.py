@@ -207,6 +207,46 @@ def test_books_may_only_open_in_their_own_windows(tmp_path, frozen_clock):
     assert firewall.may_open(Book.CARRY)[0] is False
 
 
+def test_the_opportunistic_book_can_open_on_the_shared_transient_lease(
+    tmp_path, frozen_clock
+):
+    """`event_premium` is the only opportunistic strategy, and until 29 Aug it
+    could not open a position under ANY market condition.
+
+    `_transient_scan` acquires the lease as INTRADAY, and `may_open` compared
+    the holder against the asking book by identity - so the opportunistic book
+    failed with "the transient lease is held by the intraday book" on every
+    cycle. It read as a dormant strategy standing down; it was a strategy that
+    was structurally blocked. One lease covers the transient pool.
+    """
+    firewall, broker = build(tmp_path, frozen_clock, at="11:00")
+    firewall.acquire_transient(broker, Book.INTRADAY)
+
+    allowed, why = firewall.may_open(Book.OPPORTUNISTIC)
+    assert allowed, why
+    assert firewall.budget_for(Book.OPPORTUNISTIC) > 0
+    assert firewall.budget_for(Book.OPPORTUNISTIC) == firewall.budget_for(Book.INTRADAY)
+
+
+def test_the_shared_lease_does_not_let_the_resident_book_in(tmp_path, frozen_clock):
+    """Sharing the lease between the transient books must not weaken the wall
+    it exists to hold: carry still needs its own reservation."""
+    firewall, broker = build(tmp_path, frozen_clock, at="11:00")
+    firewall.acquire_transient(broker, Book.INTRADAY)
+
+    assert firewall.may_open(Book.CARRY)[0] is False
+    assert firewall.budget_for(Book.CARRY) == firewall.state.carry_reserved
+
+
+def test_no_transient_book_opens_before_the_lease_is_acquired(tmp_path, frozen_clock):
+    firewall, _ = build(tmp_path, frozen_clock, at="11:00")
+    for book in (Book.INTRADAY, Book.OPPORTUNISTIC):
+        allowed, why = firewall.may_open(book)
+        assert allowed is False
+        assert "lease" in why
+        assert firewall.budget_for(book) == 0.0
+
+
 def test_submission_flatten_closes_the_resident_book_too(tmp_path, frozen_clock):
     firewall, broker = build(
         tmp_path, frozen_clock, at="11:00", carry=["CARRY1"], intraday=["DAY1"]

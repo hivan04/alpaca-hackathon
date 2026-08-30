@@ -222,6 +222,13 @@ selection:
 
 structure:
   fixed_quantity: 1
+  # Per-contract premium ceiling for THIS book. Added 29 Aug when the global
+  # $25 chain-filter cap was removed: that cap was never meant as a notional
+  # limit, but this book was relying on it as one. Without a ceiling the
+  # selection can land on a deep-ITM contract at $75+, which is $7,500 of risk
+  # on a book whose sizing assumes 0.5% of equity per trade. 25.00 reproduces
+  # the behaviour this book has always had; raise it only alongside sizing.
+  max_option_price: 25.00
 
 sizing:
   risk_fraction_per_trade: 0.005   # below the carry book's 1.5%: lower hit rate

@@ -1446,3 +1446,119 @@ def test_only_an_intraday_book_declares_intraday_marks():
     assert flags, "no strategies were built"
     for name, intraday in flags.items():
         assert intraday == (name == "intraday_momentum"), name
+
+
+# --------------------------------------------------------------------------- #
+# the vol anchor
+#
+# The tests above pass on an engine with no real option tape: with no real
+# print there is nothing to recover a vol from, `_leg_marks` anchors on the
+# modelled `atm_iv`, and the mark moves with spot as it should. The defect
+# only exists on the REAL path, which is why a year-long run on real Alpaca
+# bars was still frozen while these stayed green.
+#
+# Measured on runs/backtests/20260830-012950: SPY 743C expiring 22 May had a
+# real 21 May bar closing at 2.65 after ranging 0.95-4.00, and the book marked
+# it 2.5594 at 14:15 and 2.5889 at 14:45 while spot went 742.73 -> 743.38.
+# Across 434 intraday trades the marks moved a MEDIAN of 0.0x what delta says.
+# --------------------------------------------------------------------------- #
+def _anchored_leg():
+    """A month-dated 640 call. Dated deliberately: the recovered vol only
+    exists while the print carries time value, and a 0 DTE fixture lands below
+    intrinsic on the second spot, falls back to the modelled vol, and passes
+    these tests for the wrong reason."""
+    return [{
+        "symbol": "SPY260918C00640000", "side": "buy", "ratio": 1,
+        "strike": 640.0, "expiry": dt.date(2026, 9, 18), "is_call": True,
+    }]
+
+
+def _real_pricer_with_one_print(close: float = 12.0):
+    """A real-tape pricer holding one daily print for the test contract."""
+    from oaa.backtest.realchain import RealChainBuilder
+    return RealChainBuilder.from_payload(
+        contracts_by_symbol={"SPY": [{
+            "symbol": "SPY260918C00640000", "expiry": "2026-09-18",
+            "strike": 640.0, "type": "call",
+        }]},
+        bars_by_contract={"SPY260918C00640000": [
+            {"timestamp": f"2026-08-{day}T04:00:00+00:00",
+             "open": close, "high": close, "low": close, "close": close,
+             "volume": 10_000.0}
+            for day in ("20", "21")
+        ]},
+        model=ChainModel(),
+    )
+
+
+def test_an_intraday_mark_moves_with_spot_even_against_a_real_print():
+    """The regression. Recovering the vol implied by a FIXED daily print at the
+    CURRENT spot, then re-pricing at that same spot, is an algebraic fixed
+    point: it returns the print. The anchor has to be recovered once and held,
+    or the position has no delta and can only ever lose the round trip."""
+    settings = load_settings()
+    engine = BacktestEngine(settings)
+    engine.real_chain = _real_pricer_with_one_print()
+    moment = dt.datetime(2026, 8, 20, 15, 0, tzinfo=dt.timezone.utc)
+    legs = _anchored_leg()
+
+    still = engine._leg_marks({"SPY": _spy_context(640.0)}, moment, legs, "SPY", intraday=True)
+    moved = engine._leg_marks({"SPY": _spy_context(645.0)}, moment, legs, "SPY", intraday=True)
+    a = still[legs[0]["symbol"]]["mid"]
+    b = moved[legs[0]["symbol"]]["mid"]
+
+    # A 5-point rally on an ATM call is worth ~$2.50 at delta ~0.5. Anything
+    # under a fifth of that is the frozen mark.
+    assert b - a > 0.5, (
+        f"mark moved {b - a:.4f} on a 5-point rally against a real print - "
+        "the vol anchor is being re-derived at the new spot and pinning the "
+        "mark to the daily bar"
+    )
+
+
+def test_the_vol_anchor_is_recovered_once_per_contract_per_session():
+    settings = load_settings()
+    engine = BacktestEngine(settings)
+    engine.real_chain = _real_pricer_with_one_print()
+    moment = dt.datetime(2026, 8, 20, 15, 0, tzinfo=dt.timezone.utc)
+    legs = _anchored_leg()
+
+    engine._leg_marks({"SPY": _spy_context(640.0)}, moment, legs, "SPY", intraday=True)
+    key = (legs[0]["symbol"], moment.date())
+    assert key in engine._iv_anchor, "no anchor was cached for the contract"
+    first = engine._iv_anchor[key]
+
+    engine._leg_marks({"SPY": _spy_context(651.0)}, moment, legs, "SPY", intraday=True)
+    assert engine._iv_anchor[key] == first, (
+        "the anchor moved with spot - that is the fixed point this cache exists "
+        "to break"
+    )
+
+
+def test_a_new_session_recovers_a_fresh_vol_anchor():
+    """Frozen WITHIN a session, not across them: the next day's print is new
+    information and must be allowed to reset the level."""
+    settings = load_settings()
+    engine = BacktestEngine(settings)
+    engine.real_chain = _real_pricer_with_one_print()
+    legs = _anchored_leg()
+    day_one = dt.datetime(2026, 8, 20, 15, 0, tzinfo=dt.timezone.utc)
+    day_two = dt.datetime(2026, 8, 21, 15, 0, tzinfo=dt.timezone.utc)
+
+    engine._leg_marks({"SPY": _spy_context(640.0)}, day_one, legs, "SPY", intraday=True)
+    engine._leg_marks({"SPY": _spy_context(640.0)}, day_two, legs, "SPY", intraday=True)
+    assert (legs[0]["symbol"], day_one.date()) in engine._iv_anchor
+    assert (legs[0]["symbol"], day_two.date()) in engine._iv_anchor
+
+
+def test_the_anchor_is_stored_deskewed_so_the_smile_is_not_applied_twice():
+    """`reprice` runs `iv_at` on whatever anchor it is handed, so the anchor
+    must be an ATM vol, not the leg's own skewed one."""
+    from oaa.backtest.chain import ChainModel as _CM, years_to_expiry as _yte
+    from oaa.backtest.engine import _deskew
+    model = _CM()
+    spot, strike = 640.0, 680.0          # well OTM, where the skew bites hardest
+    years = _yte(dt.date(2026, 8, 21), dt.datetime(2026, 7, 20, 15, 0, tzinfo=dt.timezone.utc))
+    leg_iv = model.iv_at(0.18, spot, strike, years)
+    assert abs(leg_iv - 0.18) > 1e-4, "the fixture is not actually skewed"
+    assert abs(_deskew(model, leg_iv, spot, strike, years) - 0.18) < 1e-3

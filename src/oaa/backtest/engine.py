@@ -52,7 +52,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from oaa.backtest.chain import ChainModel
+from oaa.backtest.chain import ChainModel, years_to_expiry
 from oaa.backtest.critic import MODE_HEURISTIC, ReplayCritic
 from oaa.brokers.sim import SimBroker
 from oaa.config.loader import Settings
@@ -367,6 +367,11 @@ class BacktestEngine:
         #: Times the mark-to-market loss exceeded the structure's own
         #: arithmetic bound and had to be clamped. Should be ZERO.
         self._risk_bound_clamps = 0
+        #: The vol a contract's real daily print implies, recovered ONCE per
+        #: contract per session and then held. See `_leg_marks`: re-deriving
+        #: it at every later spot is an algebraic fixed point that pins the
+        #: mark to the daily close and leaves the position with no delta.
+        self._iv_anchor: dict[tuple[str, dt.date], float] = {}
 
     # ------------------------------------------------------------------ #
     def run(self, source: ContextSource, progress: Any = None) -> BacktestResult:
@@ -495,12 +500,47 @@ class BacktestEngine:
         provenance = [marks[leg["symbol"]].get("real", 0.0) for leg in legs]
         mixed = len(legs) > 1 and 0.0 < sum(provenance) < len(provenance)
         if intraday or mixed:
-            observed = [
-                float(marks[leg["symbol"]].get("iv") or 0.0)
-                for leg in legs
-                if marks[leg["symbol"]].get("real", 0.0) >= 1.0
-                and marks[leg["symbol"]].get("iv")
-            ]
+            # Recover the vol the day's real print implies ONCE, and hold it.
+            #
+            # Deriving it afresh at every mark is an algebraic FIXED POINT and
+            # silently undoes this whole repricing. `reprice` inverts the
+            # contract's daily bar close against the CURRENT spot; feeding that
+            # vol straight back into Black-Scholes at that same spot returns
+            # the daily close again. As spot moves the recovered vol moves by
+            # exactly the compensating amount, so the mark never leaves the
+            # bar and the position has no delta.
+            #
+            # Measured on `20260830-012950`, SPY 743C expiring 22 May: the real
+            # 21 May bar closed at 2.65 having ranged 0.95-4.00, and the book
+            # marked it 2.5594 at 14:15 and 2.5889 at 14:45 while spot moved
+            # 742.73 -> 743.38. Across 434 intraday trades the marks moved
+            # 12% of what delta says they should (median), with the sign right
+            # only 66% of the time. That is what "the exit mark is modelled"
+            # was hiding.
+            #
+            # Freezing the anchor at first sight is also what the docstring
+            # above already claims the harness does: the real bar sets the VOL,
+            # the model sets the PRICE, and an intraday mark responds to spot
+            # and to time.
+            day = _as_utc_date(moment)
+            observed = []
+            for leg in legs:
+                mark = marks[leg["symbol"]]
+                if mark.get("real", 0.0) < 1.0 or not mark.get("iv"):
+                    continue
+                key = (leg["symbol"], day)
+                cached = self._iv_anchor.get(key)
+                if cached is None:
+                    # De-skew before storing. `reprice` applies `iv_at` on the
+                    # way back out, so keeping the leg's own skewed vol here
+                    # would apply the smile twice.
+                    cached = _deskew(
+                        getattr(pricer, "model", pricer),
+                        float(mark["iv"]), market.spot,
+                        leg["strike"], years_to_expiry(leg["expiry"], moment),
+                    )
+                    self._iv_anchor[key] = cached
+                observed.append(cached)
             anchor = sum(observed) / len(observed) if observed else atm_iv
             if mixed:
                 self._mixed_surface_marks += 1
@@ -1047,6 +1087,39 @@ class BacktestEngine:
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+def _as_utc_date(moment: dt.datetime | dt.date) -> dt.date:
+    """The session a moment belongs to, matching how option bars are keyed."""
+    return moment.date() if isinstance(moment, dt.datetime) else moment
+
+
+def _deskew(
+    model: ChainModel, leg_iv: float, spot: float, strike: float, years: float
+) -> float:
+    """Invert `ChainModel.iv_at`: the ATM vol whose surface gives `leg_iv` here.
+
+    `reprice` re-applies the smile to whatever anchor it is handed, so storing
+    a leg's own skewed vol as the anchor would apply the skew twice - a level
+    error that grows with moneyness and is largest exactly on the wings.
+
+    `iv_at` is monotone in its ATM argument over any range we care about, so a
+    bisection is both simplest and exact enough. Falls back to the input if the
+    bracket does not contain a solution (a clamped, degenerate surface).
+    """
+    if leg_iv <= 0 or years <= 0 or spot <= 0 or strike <= 0:
+        return max(leg_iv, 0.0)
+    lo, hi = 1e-4, 5.0
+    if not (model.iv_at(lo, spot, strike, years)
+            <= leg_iv <= model.iv_at(hi, spot, strike, years)):
+        return leg_iv
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if model.iv_at(mid, spot, strike, years) < leg_iv:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def _marks_intraday(strategy: Any) -> bool:
     """True when this strategy's positions have to be marked from the model.
 

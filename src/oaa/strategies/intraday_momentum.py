@@ -450,12 +450,22 @@ class IntradayMomentum(Strategy):
         # The global chain filter is built for the carry book's 7-45 DTE range
         # and its 12% spread ceiling. Neither fits here: this book buys 0-2 DTE
         # and its whole viability depends on a much tighter quote.
+        #
+        # `max_price` is explicit as of 29 Aug. The global per-contract ceiling
+        # of $25 was removed that day because it distorts rather than refuses on
+        # expensive underlyings - but THIS book was quietly relying on it as a
+        # premium cap, and without one it will happily buy a deep-ITM $75
+        # contract, which is $7,500 of risk on a book sized for 0.5% of equity
+        # per trade. The bound belongs here, in the book that needs it, where it
+        # is visible and tunable rather than inherited from a global filter
+        # written for something else.
         builder = self.builder(ctx, chain_filter=ctx.default_filter(
             min_dte=0,
             max_dte=max(selection.dte_range[1], int(self.p("selection.dte_max", 2))),
             max_spread_pct=float(self.p("spread_gate.max_relative_spread", 0.02)) * 2,
             min_open_interest=int(self.p("structure.min_open_interest", 100)),
             min_volume=0,
+            max_price=float(self.p("structure.max_option_price", 25.0)),
         ))
         thesis = self._thesis(market, selection, bullish, momentum, catalyst)
         quantity = int(self.p("structure.fixed_quantity", 1))

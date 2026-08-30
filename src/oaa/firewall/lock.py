@@ -210,9 +210,21 @@ class TemporalFirewall:
         return self.state.transient_owner
 
     def budget_for(self, book: Book) -> float:
+        """Headroom for this book.
+
+        Every transient book draws on the same pool, matching `may_open`: the
+        lease is the pool's, not one book's. This is a shared budget rather
+        than a split one, so two transient books scanning in the same cycle can
+        each size against the same headroom - the same exposure one book
+        already has making several trades in a cycle, and bounded downstream by
+        the risk engine's portfolio limits rather than here.
+        """
         if book.is_resident:
             return self.state.carry_reserved
-        return self.state.transient_budget if self.state.transient_owner is book else 0.0
+        owner = self.state.transient_owner
+        if owner is None or owner.is_resident:
+            return 0.0
+        return self.state.transient_budget
 
     def _setting(self, name: str, default: Any) -> Any:
         value = getattr(self.settings, name, None) if self.settings else None
@@ -245,11 +257,23 @@ class TemporalFirewall:
         if not phase.intraday_may_open:
             return False, f"{book.value} book may not open during phase '{phase.value}'"
 
+        # The transient lease is held for the transient POOL, not for one book.
+        # It exists to stop the day books claiming capital the resident carry
+        # book has reserved - it was never meant to arbitrate between two
+        # transient books, which are flattened together at the same 15:15
+        # cutoff and charged against the same headroom figure.
+        #
+        # Until 29 Aug this compared the lease holder against the asking book by
+        # identity. `_transient_scan` always acquires as INTRADAY, so
+        # `event_premium` - the only opportunistic strategy - failed here on
+        # every single cycle with "the transient lease is held by the intraday
+        # book". It read as a dormant strategy correctly standing down. It was
+        # a strategy that could not open a position under any market condition.
         owner = self.state.transient_owner
         if owner is None:
             return False, f"{book.value} book has not acquired the transient lease"
-        if owner is not book:
-            return False, f"the transient lease is held by the {owner.value} book"
+        if owner.is_resident:
+            return False, "the transient lease is held by the resident book"
         if self.state.transient_budget <= 0:
             return False, "no transient headroom left once the carry book is reserved"
         return True, "ok"

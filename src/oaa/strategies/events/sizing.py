@@ -62,14 +62,25 @@ def size(
     equity: float,
     params: SizingParams,
     budget_remaining: float | None = None,
+    extra_multiple: float = 1.0,
 ) -> SizeDecision:
-    """How many contracts this call is worth."""
+    """How many contracts this call is worth.
+
+    `extra_multiple` is the ATR adjustment from the technical layer: a name
+    whose daily range has already doubled is not taken in the same size as a
+    quiet one, however confident the direction call. It only ever scales DOWN -
+    a calm tape is not a reason to take more than the confidence justified.
+    """
     if max_loss_per_contract <= 0:
         return SizeDecision(0, 0.0, 0.0, "structure has no computable max loss")
     if equity <= 0:
         return SizeDecision(0, 0.0, 0.0, "no equity")
 
-    multiple = confidence_multiple(confidence, confidence_floor, params)
+    multiple = round(
+        confidence_multiple(confidence, confidence_floor, params)
+        * min(1.0, max(0.0, extra_multiple)),
+        4,
+    )
     allowance = equity * params.max_risk_per_trade_pct * multiple
     if budget_remaining is not None:
         allowance = min(allowance, budget_remaining)

@@ -204,10 +204,13 @@ class VolCarry(Strategy):
         return GateResult.ok("premium", **metrics)
 
     def _trend_gate(self, market: MarketContext) -> GateResult:
-        """Short premium is short movement. This is the SAME measurement that
-        fires `momentum_debit_spread`, which is what keeps the two strategies
-        mutually exclusive: trend present -> debit spread eligible, condor
-        vetoed; trend absent + rich IV -> condor eligible."""
+        """Short premium is short movement.
+
+        This measurement used to do double duty: it also fired
+        `momentum_debit_spread`, so the two strategies were mutually exclusive
+        by construction. That strategy was removed on 29 Aug and the gate
+        stays, because it was never a handoff - it is a statement about when
+        THIS book should not trade. Trend present -> no condor."""
         adx_value = market.adx
         trend = abs(market.trend_strength or 0.0)
         max_adx = self.p("trend_gate.adx_max", 25)

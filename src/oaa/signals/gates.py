@@ -16,7 +16,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any
 
-from oaa.core.types import TradeIdea
+from oaa.core.types import Leg, Side, TradeIdea
 
 MULTIPLIER = 100
 
@@ -44,12 +44,42 @@ class GateResult:
 # spread
 # --------------------------------------------------------------------------- #
 def relative_spread(idea: TradeIdea) -> float | None:
-    """Worst (ask-bid)/mid across the legs actually being traded."""
-    widths = [
-        leg.quote.spread_pct
-        for leg in idea.legs
-        if leg.quote is not None and leg.quote.spread_pct is not None
-    ]
+    """Worst (ask-bid)/mid across the legs whose percentage width MEANS
+    something.
+
+    On a CREDIT structure the bought legs are protective wings, and a wing is a
+    cheap option by construction - that is what makes it a hedge. A $0.05 wing
+    quoted 0.04/0.06 is 40% of mid and always will be, however deep the market:
+    a percentage test on it measures the leg's price, not its liquidity, and it
+    vetoed XLF and TLT out of the book entirely (3,878 spread declines in
+    `20260830-013506__wing-fix`, up from 1,616, as the wings recovered by the
+    `min_price` fix arrived and were failed here instead).
+
+    What the wing actually costs is bounded and small - a $0.01 half-spread is
+    $1 per contract per side - and it is already charged in full by
+    `round_trip_spread_cost` below, which every caller checks against the
+    credit. So the percentage ceiling applies to the legs being SOLD, where a
+    wide quote means selling into a bad market and the size of the mistake
+    scales with the premium collected.
+
+    On a DEBIT structure the bought leg is the thesis, not a hedge, and stays
+    gated - `intraday_momentum` buys a single long option and must keep its
+    ceiling.
+    """
+    def counted(leg: Leg) -> bool:
+        if leg.quote is None or leg.quote.spread_pct is None:
+            return False
+        return not (idea.is_credit and leg.side is Side.BUY)
+
+    widths = [leg.quote.spread_pct for leg in idea.legs if counted(leg)]
+    if not widths:
+        # Every leg exempt (or unquoted): fall back to the old behaviour rather
+        # than silently passing a structure nobody measured.
+        widths = [
+            leg.quote.spread_pct
+            for leg in idea.legs
+            if leg.quote is not None and leg.quote.spread_pct is not None
+        ]
     return max(widths) if widths else None
 
 

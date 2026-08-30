@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -674,16 +675,30 @@ def strategies(profile: str | None = _PROFILE, config: str | None = _CONFIG) -> 
     settings = _settings_only(profile, config)
     strategy_registry.autoload("oaa.strategies")
     enabled = {s.name: s for s in settings.config.strategies}
-    table = Table("Name", "Enabled", "Weight", "Description")
+    # A book that runs in its own process is not "disabled" - `oaa run` was
+    # never going to load it. Rendering it as `no` alongside a book that is
+    # switched off reads as the same state, and it is not.
+    own_process = {"events", "weekend"}
+    table = Table("Name", "Book", "In `oaa run`", "Weight", "Description")
     for name, cls in strategy_registry:
         ref = enabled.get(name)
+        book = (getattr(ref, "book", None) or getattr(cls, "book", "")) or "-"
+        if book in own_process:
+            state = "[cyan]own process[/]"
+        elif ref and ref.enabled:
+            state = "[green]yes[/]"
+        else:
+            state = "[dim]no[/]"
         table.add_row(
-            name,
-            "[green]yes[/]" if ref and ref.enabled else "[dim]no[/]",
+            name, book, state,
             f"{ref.weight:.2f}" if ref else "-",
             getattr(cls, "description", "")[:70],
         )
     console.print(table)
+    console.print(
+        "[dim]own process = armed by its own command on its own schedule; "
+        "`oaa run` cannot open a position for it. See `oaa events --help`.[/]"
+    )
 
 
 @app.command()
@@ -955,6 +970,49 @@ def runs(
     console.print("\n[dim]open one:[/dim] oaa runs --show <id> --trades")
 
 
+def _strategy_universe(
+    cfg: Any, picked: list[str], overrides: dict[str, Any] | None = None
+) -> list[str]:
+    """The universe a single named strategy asks for, or [] when it has none.
+
+    Only applied to a ONE-strategy run: with several strategies selected there
+    is no single right answer and the configured universe stays in charge.
+    """
+    if len(picked) != 1:
+        return []
+    from oaa.strategies.base import strategy_registry
+
+    strategy_registry.autoload("oaa.strategies")
+    try:
+        cls = strategy_registry.get(picked[0])
+    except Exception:  # noqa: BLE001 - run_backtest reports an unknown name
+        return []
+    ref = next(
+        (r for r in cfg.strategies if r.name == picked[0]),
+        _SyntheticRef(picked[0], getattr(cls, "book", "intraday")),
+    )
+    if overrides:
+        ref.params = {**(ref.params or {}), **overrides}
+    try:
+        return list(cls(ref, cfg).universe())
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]could not read {picked[0]}'s universe: {exc}[/yellow]")
+        return []
+
+
+class _SyntheticRef:
+    """A config entry for a strategy config does not list. Empty params, so the
+    strategy falls back to its own default params file."""
+
+    def __init__(self, name: str, book: str) -> None:
+        self.name = name
+        self.enabled = True
+        self.weight = 1.0
+        self.book = book
+        self.params: dict[str, Any] = {}
+        self.params_file = None
+
+
 @app.command()
 def backtest(
     profile: str | None = _PROFILE,
@@ -963,6 +1021,20 @@ def backtest(
     start: str | None = typer.Option(None, help="YYYY-MM-DD"),
     end: str | None = typer.Option(None, help="YYYY-MM-DD"),
     strategies: str | None = typer.Option(None, help="Comma separated; defaults to every enabled strategy"),
+    events_calendar: str | None = typer.Option(
+        None, "--events-calendar",
+        help="Point the events book at a different calendar file for this run "
+             "- how you backtest names that are not in the live universe. "
+             "Ships with config/events/earnings_calendar_2026-08-24.json "
+             "(last week's ten prints, out of sample).",
+    ),
+    strategy: str | None = typer.Option(
+        None, "--strategy", "-S",
+        help="Backtest ONE strategy in isolation, by name. Works for a "
+             "strategy config has switched off, or does not list at all - "
+             "`earnings_event_directional` is not in `strategies:` because it "
+             "runs in its own process. `oaa strategies` lists the names.",
+    ),
     cash: float | None = typer.Option(None, help="Initial capital"),
     slippage: float | None = typer.Option(None, help="0.0 fills at mid, 1.0 pays the full quoted side"),
     source: str = typer.Option("alpaca", help="alpaca | synthetic (synthetic is a wiring test, not a backtest)"),
@@ -1016,15 +1088,74 @@ def backtest(
             raise typer.Exit(1)
         cfg.backtest.critic.llm.model = critic_model
 
-    universe = (
-        [s.strip().upper() for s in symbols.split(",") if s.strip()]
-        if symbols else cfg.universe.active()
-    )
+    picked = [s.strip() for s in (strategies or "").split(",") if s.strip()]
+    if strategy:
+        if picked:
+            console.print("[red]use --strategy or --strategies, not both.[/red]")
+            raise typer.Exit(1)
+        picked = [strategy.strip()]
+
+    # `--symbols earnings-week` expands to whatever reports this week, read
+    # from the confirmed earnings calendar rather than a second hardcoded list.
+    from oaa.strategies.events.universe import ALIAS
+    from oaa.strategies.events.universe import resolve as resolve_universe
+
+    universe = resolve_universe(symbols)
+    if symbols and symbols.strip().lower() in {ALIAS, "earnings", "earnings_week"}:
+        console.print(
+            f"[dim]{ALIAS}: {len(universe)} confirmed reporter(s) - "
+            f"{', '.join(universe)}[/dim]"
+        )
+    # The replay skips any symbol outside a strategy's own universe, silently:
+    # `if symbol not in strategy.universe(): continue`. So asking one strategy
+    # for symbols it does not cover produced a clean run, zero ideas, zero
+    # rejections and no reason - which is indistinguishable from a strategy
+    # that is broken. Say it here, before the run, where it can be acted on.
+    overrides: dict[str, Any] = {}
+    if events_calendar:
+        path = settings.path(events_calendar)
+        if not path.exists():
+            console.print(f"[red]no calendar file at {path}[/red]")
+            raise typer.Exit(1)
+        overrides["calendar_path"] = str(path)
+
+    own = set(_strategy_universe(cfg, picked, overrides))
+    if universe is None:
+        # A single-strategy run uses that strategy's own universe when none is
+        # given: replaying the events book against the configured SPY/QQQ
+        # universe would measure nothing, since neither has an earnings date.
+        universe = sorted(own) or cfg.universe.active()
+    if not universe:
+        console.print("[red]empty universe - nothing to replay.[/red]")
+        raise typer.Exit(1)
+    if own:
+        outside = [s for s in universe if s not in own]
+        if outside:
+            console.print(
+                f"[yellow]{picked[0]} does not cover {', '.join(outside)}[/yellow] - "
+                "the replay skips symbols outside a strategy's own universe."
+            )
+        if not set(universe) & own:
+            console.print(
+                f"[red]None of the requested symbols are in {picked[0]}'s "
+                f"universe, so the run would produce nothing.[/red]"
+            )
+            covered = ", ".join(sorted(own)[:12]) + ("…" if len(own) > 12 else "")
+            console.print(f"[dim]it covers: {covered}[/dim]")
+            if picked[0] == "earnings_event_directional":
+                console.print(
+                    "[dim]this book only trades names with a CONFIRMED row in "
+                    "config/events/earnings_calendar.json. Use --symbols "
+                    "earnings-week, or add the names you want to that file "
+                    "with a report date, session and source.[/dim]"
+                )
+            raise typer.Exit(1)
     request = BacktestRequest(
         symbols=universe,
         start=dtm.date.fromisoformat(start or cfg.backtest.start),
         end=dtm.date.fromisoformat(end or cfg.backtest.end),
-        strategies=[s.strip() for s in (strategies or "").split(",") if s.strip()],
+        strategies=picked,
+        strategy_params=overrides,
         initial_cash=cash,
         slippage_spread_fraction=slippage,
         source=source,

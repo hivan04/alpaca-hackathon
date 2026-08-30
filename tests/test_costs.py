@@ -144,3 +144,49 @@ def test_gates_summary_names_the_first_veto():
     assert summary["passed"] is False
     assert summary["vetoed_by"] == "time_of_day"
     assert "spread.relative_spread" in summary["metrics"]
+
+
+# --------------------------------------------------------------------------- #
+# A protective wing is cheap by construction and must not veto on percentage
+# --------------------------------------------------------------------------- #
+def test_a_credit_structures_wings_are_exempt_from_the_percentage_ceiling():
+    """Third instance of one defect class, after `max_price` and `min_price`:
+    a PER-CONTRACT percentage test punishing a leg for being cheap. The wing's
+    dollar cost is bounded and is charged by round_trip_spread_cost."""
+    from oaa.core.types import Right
+    from oaa.options.structures import build_iron_condor
+    from oaa.signals.gates import relative_spread, round_trip_spread_cost
+    from tests.conftest import make_quote
+
+    idea = build_iron_condor(
+        symbol="XLF", strategy="t",
+        # Wings: $0.05 mid on a $0.02 quote = 40% of mid, and always will be.
+        long_put=make_quote(strike=48, right=Right.PUT, bid=0.04, ask=0.06),
+        short_put=make_quote(strike=50, right=Right.PUT, bid=0.38, ask=0.42),
+        short_call=make_quote(strike=55, right=Right.CALL, bid=0.38, ask=0.42),
+        long_call=make_quote(strike=57, right=Right.CALL, bid=0.04, ask=0.06),
+    )
+    assert idea.is_credit
+    worst = relative_spread(idea)
+    assert worst is not None and worst < 0.15, (
+        f"the wings still set the worst leg width ({worst:.1%})"
+    )
+    # The cost of those wings has NOT gone missing - it is charged in dollars.
+    assert round_trip_spread_cost(idea) == pytest.approx(12.0)
+
+
+def test_a_debit_structures_long_leg_is_still_gated():
+    """On a debit spread the bought leg is the thesis, not a hedge."""
+    from oaa.core.types import Right
+    from oaa.options.structures import build_vertical
+    from oaa.signals.gates import relative_spread
+    from tests.conftest import make_quote
+
+    idea = build_vertical(
+        symbol="SPY", strategy="t",
+        long_leg=make_quote(strike=500, right=Right.CALL, bid=0.80, ask=1.20),
+        short_leg=make_quote(strike=510, right=Right.CALL, bid=0.49, ask=0.51),
+    )
+    assert idea.is_credit is False
+    worst = relative_spread(idea)
+    assert worst is not None and worst > 0.30, "the long leg stopped counting"

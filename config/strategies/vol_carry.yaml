@@ -65,10 +65,28 @@
 # Measured 28 Aug: ten symbols behaved like 2.4 INDEPENDENT BETS. Re-run
 # `python scripts/universe_report.py --live` after any change - the point of the
 # rule is that the list follows the measurement, not the other way round.
+# EXPANDED 30 Aug. The six additions are chosen on RULE 2 (does this raise the
+# number of effective independent bets?), not on expected P&L, and every one of
+# them is a HYPOTHESIS until the Jan-Aug run and `universe_report.py` have been
+# read. More US equity sector ETFs were deliberately NOT added: XLI/XLY/XLP run
+# 0.85+ with SPY and would add tickers, not bets.
+#
+# Also deliberately excluded: HYG, LQD and other low-volatility instruments.
+# TLT's dominant rejection is `premium` (1,958 of 3,520, "IV rank 2% is below
+# the 35% floor"), and that is the general lesson - a short-premium book cannot
+# harvest a name with no premium. Adding more of them repeats TLT's mistake.
+#
+# XLF and TLT are KEPT for this run despite zero trades in eight months: two
+# successive defects (`min_price` deleting the wing, then the per-leg spread
+# ceiling failing it) are what excluded them, so they have never actually been
+# measured. If they still do not trade with both fixed, that is a result.
 universe: [
   "SPY", "QQQ", "IWM", "DIA",      # broad equity
   "XLF", "XLE",                    # sectors - XLE is the only NEGATIVE correlation
   "TLT", "GLD",                    # decorrelated: rates, gold
+  "XLV", "XLU",                    # defensive sectors - the two least correlated
+  "EEM", "EFA", "FXI",             # non-US equity - a different macro driver
+  "SLV",                           # metals - a second, distinct vol to GLD
 ]
 
 # --- 3.1 premium gate: is vol rich? -----------------------------------------
@@ -89,7 +107,8 @@ premium_gate:
 
 # --- 3.2 trend gate: is it going nowhere? -----------------------------------
 # Short premium is short movement. This is the SAME measurement that fires
-# momentum_debit_spread, which is what keeps the two mutually exclusive.
+# momentum_debit_spread, removed 29 Aug. The gate stays: it is a statement
+# about when THIS book should not trade, not a handoff to another one.
 trend_gate:
   adx_max: 25
   max_trend_strength: 0.60

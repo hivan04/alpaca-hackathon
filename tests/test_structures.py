@@ -143,3 +143,69 @@ def test_the_wing_is_floored_at_one_rung_of_the_listed_ladder():
     strikes = sorted(leg.quote.strike for leg in idea.legs if leg.quote)
     assert strikes[1] - strikes[0] >= 1.0, "the wing collapsed inside one rung"
     assert strikes[3] - strikes[2] >= 1.0
+
+
+# --------------------------------------------------------------------------- #
+# The wing tests above build ChainView DIRECTLY, "bypassing ChainFilter ...
+# the default liquidity filter thins the ladder to one strike". That is the
+# condition production actually runs in, so the geometry was covered and the
+# path that fails was not. These two go through the filter.
+# --------------------------------------------------------------------------- #
+def _filtered_view(spot: float, step: float = 1.0) -> ChainView:
+    import datetime as dt
+
+    from tests.conftest import option_chain_for
+
+    expiry = dt.date.today() + dt.timedelta(days=10)
+    quotes = option_chain_for("XLF", spot, expiry, step=step, days=10.0, width=0.30)
+    return ChainView.from_quotes(
+        "XLF", spot, quotes,
+        # Production defaults for the two filters that bite on a cheap name.
+        ChainFilter(min_dte=3, max_dte=45, min_price=0.10, max_spread_pct=0.12,
+                    min_open_interest=0),
+        asof=dt.date.today(),
+    )
+
+
+def test_a_cheap_underlying_can_still_build_a_condor_through_the_filter():
+    """`min_price: 0.10` removes exactly the strikes a condor buys.
+
+    A defined-risk wing is a cheap option BY CONSTRUCTION - that is what makes
+    it a hedge rather than a second short. On a $52 underlying every strike
+    beyond the 14-delta short prices under a dime, so the per-contract price
+    floor deleted the entire outer ladder and `strike_offset(must_clear=True)`
+    had nothing left to return. XLF declined 1,321 structures this way in the
+    Jan-Aug run - every one of them reported as a wing WIDTH problem, which it
+    never was.
+    """
+    view = _filtered_view(52.0)
+    assert len(view.quotes) < len(view.all_quotes), (
+        "fixture is not exercising the filter - nothing was stripped"
+    )
+    idea = StructureBuilder(view=view, strategy="t").iron_condor_by_delta(
+        dte_range=(7, 14), short_put_delta=-0.14, short_call_delta=0.14,
+        wing_pct=0.015, wing_points=5,
+    )
+    strikes = sorted(leg.quote.strike for leg in idea.legs if leg.quote)
+    assert len(idea.legs) == 4
+    assert strikes[0] < strikes[1] and strikes[2] < strikes[3], (
+        "a wing landed on or inside its short strike"
+    )
+    assert idea.max_loss is not None and idea.max_loss > 0
+    assert idea.structure.is_defined_risk
+
+
+def test_the_unfiltered_pool_is_opt_in_only():
+    """Short legs must never be chosen from the pre-filter pool - it exists so
+    the PROTECTIVE leg can be bought, not so an illiquid strike can be sold."""
+    view = _filtered_view(52.0)
+    expiry = view.expiries()[0]
+    outermost = max(q.strike for q in view.for_expiry(expiry, Right.CALL))
+    # Without the opt-in there is nothing beyond the last filtered strike, so
+    # the search falls back and cannot clear it.
+    stays = view.strike_offset(expiry, Right.CALL, outermost, 1.0, must_clear=True)
+    assert stays.strike <= outermost
+    reaches = view.strike_offset(
+        expiry, Right.CALL, outermost, 1.0, must_clear=True, allow_unfiltered=True
+    )
+    assert reaches.strike > outermost

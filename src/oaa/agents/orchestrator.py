@@ -412,6 +412,10 @@ class Orchestrator:
             return result
 
         # The transient books lease whatever the resident book is not using.
+        # One lease covers the whole transient pool - intraday and
+        # opportunistic scan together in this cycle and go flat together at
+        # 15:15, so the lease is acquired once under INTRADAY and `may_open`
+        # admits any transient book while it is held.
         if self.firewall.holder() is None:
             verdict = self.firewall.acquire_transient(self.broker, Book.INTRADAY)
             result.firewall_passed = verdict.passed

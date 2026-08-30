@@ -7,7 +7,7 @@ deterministic and testable, so a strategy never has to hand-roll strike maths.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from oaa.core import clock
 from oaa.core.errors import DataError
@@ -61,6 +61,15 @@ class ChainView:
     spot: float
     quotes: list[OptionQuote]
     asof: dt.date = field(default_factory=dt.date.today)
+    #: The same expiries and rights BEFORE the per-contract price, open
+    #: interest and spread filters. A defined-risk wing is a cheap option BY
+    #: CONSTRUCTION - that is what makes it a hedge - so `min_price` strips
+    #: exactly the strikes a condor needs to buy, and on a low-priced
+    #: underlying it strips every strike beyond the short. The structure then
+    #: cannot be built at all. Short legs are still chosen from `quotes`; only
+    #: the protective leg may reach into this pool. Empty means "same as
+    #: quotes", so a directly-constructed view behaves as before.
+    all_quotes: list[OptionQuote] = field(default_factory=list)
 
     # -- construction --------------------------------------------------- #
     @classmethod
@@ -75,7 +84,19 @@ class ChainView:
         day = asof or clock.today()
         cf = chain_filter or ChainFilter()
         kept = [q for q in quotes if cf.accepts(q, day)]
-        return cls(symbol=symbol, spot=spot, quotes=kept, asof=day)
+        # The wing pool keeps the structural filters (DTE window, rights) and
+        # drops the tradeability ones. See `all_quotes` above for why.
+        wing_cf = replace(
+            cf,
+            min_price=0.0,
+            max_price=None,
+            min_open_interest=0,
+            min_volume=0,
+            max_spread_pct=float("inf"),
+            require_greeks=False,
+        )
+        pool = [q for q in quotes if wing_cf.accepts(q, day)]
+        return cls(symbol=symbol, spot=spot, quotes=kept, asof=day, all_quotes=pool)
 
     def __len__(self) -> int:
         return len(self.quotes)
@@ -152,6 +173,7 @@ class ChainView:
         from_strike: float,
         points: float,
         must_clear: bool = False,
+        allow_unfiltered: bool = False,
     ) -> OptionQuote:
         """The listed strike nearest `from_strike + points`.
 
@@ -169,15 +191,33 @@ class ChainView:
         candidates = self.for_expiry(expiry, right)
         if not candidates:
             raise DataError(f"{self.symbol}: no {right.value}s for {expiry}")
+        beyond = (
+            (lambda strike: strike > from_strike) if points > 0
+            else (lambda strike: strike < from_strike)
+        )
         if must_clear:
-            beyond = (
-                (lambda strike: strike > from_strike) if points > 0
-                else (lambda strike: strike < from_strike)
-            )
             side = [q for q in candidates if beyond(q.strike)]
+            if not side and allow_unfiltered:
+                # Nothing listed beyond the short AFTER the tradeability
+                # filters. Before giving up, look in the pre-filter pool: on a
+                # low-priced underlying the wing is usually there and was
+                # removed by `min_price` for being cheap, which is the one
+                # property a wing is supposed to have.
+                side = [
+                    q for q in self._wing_pool(expiry, right)
+                    if beyond(q.strike)
+                ]
             if side:
                 candidates = side
         return min(candidates, key=lambda q: abs(q.strike - target))
+
+    def _wing_pool(self, expiry: dt.date, right: Right) -> list[OptionQuote]:
+        """Pre-filter quotes for this expiry and right; `quotes` if unset."""
+        pool = self.all_quotes or self.quotes
+        return sorted(
+            (q for q in pool if q.expiry == expiry and q.right is right),
+            key=lambda q: q.strike,
+        )
 
     def atm_iv(self, expiry: dt.date | None = None) -> float | None:
         exp = expiry or (self.expiries()[0] if self.expiries() else None)

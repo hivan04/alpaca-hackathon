@@ -39,7 +39,7 @@ def test_registry_autoloads_every_shipped_strategy():
     names = strategy_registry.names()
     assert {
         "vol_carry", "intraday_momentum", "event_premium",
-        "momentum_debit_spread", "earnings_calendar",
+        "earnings_event_directional",
     } <= set(names)
 
 
@@ -146,46 +146,6 @@ def test_carry_exits_leave_room_for_execution_cost(chain, bars, account):
     # Disable it and the credit-relative stop must still be the backstop.
     strat.ref.params.setdefault("exits", {})["max_loss_usd"] = 0
     assert "credit" in (strat.should_exit(ctx, idea, -(stop + 0.5)) or "")
-
-
-def test_momentum_needs_a_confirmed_trend(chain, bars, account):
-    strat, cfg = strategy("momentum_debit_spread")
-    quiet = StrategyContext(
-        market=context(chain, bars, trend_strength=0.10, adx=12.0),
-        account=account, config=cfg, params=strat.params,
-    )
-    assert strat.generate(quiet) == []
-
-
-def test_momentum_builds_a_debit_spread_when_trending(chain, bars, account):
-    strat, cfg = strategy("momentum_debit_spread")
-    strat.ref.params["universe"] = ["SPY"]
-    trending = StrategyContext(
-        market=context(chain, bars, trend_strength=0.85, adx=30.0, iv_rank=0.25),
-        account=account, config=cfg, params=strat.params,
-    )
-    ideas = strat.generate(trending)
-    if ideas:  # strike grid may reject; the invariants are what matter
-        idea = ideas[0]
-        assert not idea.is_credit
-        assert idea.max_loss and idea.max_loss > 0
-        assert len(idea.legs) == 2
-        assert "bullish" in idea.tags
-
-
-def test_the_two_strategies_do_not_fire_on_the_same_regime(chain, bars, account):
-    condor, cfg = strategy("vol_carry")
-    momentum, _ = strategy("momentum_debit_spread")
-    for s in (condor, momentum):
-        s.ref.params["universe"] = ["SPY"]
-
-    rich_and_quiet = context(chain, bars, iv_rank=0.70, trend_strength=0.10, adx=14.0)
-    ctx_a = StrategyContext(market=rich_and_quiet, account=account, config=cfg,
-                            params=condor.params)
-    ctx_b = StrategyContext(market=rich_and_quiet, account=account, config=cfg,
-                            params=momentum.params)
-    assert condor.generate(ctx_a)      # condor wants rich vol and no trend
-    assert not momentum.generate(ctx_b)  # momentum wants the opposite
 
 
 def test_every_generated_idea_is_defined_risk(chain, bars, account):

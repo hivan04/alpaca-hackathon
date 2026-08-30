@@ -46,6 +46,10 @@ class BacktestRequest:
     start: dt.date
     end: dt.date
     strategies: list[str] = field(default_factory=list)
+    #: Params merged into the ref of every strategy built for this run. Used to
+    #: point the events book at a different week's calendar without editing its
+    #: params file.
+    strategy_params: dict[str, Any] = field(default_factory=dict)
     initial_cash: float | None = None
     slippage_spread_fraction: float | None = None
     session_times_et: list[str] | None = None
@@ -229,6 +233,37 @@ def build_source(
     return source
 
 
+
+def _build_unconfigured(
+    cfg: Any, missing: set[str], params: dict[str, Any] | None = None
+) -> list[Any]:
+    """Instantiate registered strategies that `config.strategies` does not list.
+
+    They get a synthetic ref with empty params, so each falls back to its own
+    default params file - which is what a strategy that owns its config (the
+    events book) already expects.
+    """
+    if not missing:
+        return []
+    from oaa.config.schema import StrategyRef
+    from oaa.strategies.base import strategy_registry
+
+    strategy_registry.autoload("oaa.strategies")
+    built: list[Any] = []
+    for name in sorted(missing):
+        try:
+            cls = strategy_registry.get(name)
+        except Exception:  # noqa: BLE001 - an unknown name is reported below
+            log.warning("strategy '%s' is not registered - ignoring", name)
+            continue
+        ref = StrategyRef(
+            name=name, enabled=True, book=getattr(cls, "book", "intraday"),
+            params=dict(params or {}),
+        )
+        built.append(cls(ref, cfg))
+        log.info("built '%s' from the registry - not listed in config", name)
+    return built
+
 # --------------------------------------------------------------------------- #
 def run_backtest(
     settings: Settings,
@@ -246,6 +281,18 @@ def run_backtest(
     if request.strategies:
         wanted = {s.lower() for s in request.strategies}
         strategies = [s for s in strategies if s.name.lower() in wanted]
+        # Naming a strategy explicitly is a request to run THAT strategy, even
+        # when config has it switched off or does not list it at all. The
+        # events book is deliberately absent from `config.strategies` - it runs
+        # in its own process - so without this, `--strategy
+        # earnings_event_directional` failed with "no strategies selected",
+        # which reads as a config error rather than as the design.
+        strategies += _build_unconfigured(
+            cfg, wanted - {s.name.lower() for s in strategies}, request.strategy_params
+        )
+        for built in strategies:
+            if request.strategy_params:
+                built.params = {**(built.params or {}), **request.strategy_params}
     if not strategies:
         raise ValueError(
             "no strategies selected - enable one in config/default.yaml or pick "
@@ -300,6 +347,11 @@ def run_backtest(
         {
             "request": request.as_dict(),
             "universe": sorted(source.histories),
+            # Daily closes of every underlying the replay offered, so the
+            # dashboard can show pairwise correlation for a SAVED run without
+            # re-fetching - and so the correlations a reader sees are the ones
+            # that held during the replayed window, not the ones holding today.
+            "underlying_closes": _underlying_closes(source, request),
             "chain_source_requested": getattr(source, "chain_source_requested", "modelled"),
             "chain_source_used": "real" if source.real_chain is not None else "modelled",
             "data_source": _describe_source(request, source),
@@ -312,6 +364,31 @@ def run_backtest(
         }
     )
     return result
+
+
+def _underlying_closes(
+    source: Any, request: BacktestRequest
+) -> dict[str, list[tuple[str, float]]]:
+    """`{symbol: [(iso date, close), ...]}` over the replayed window.
+
+    Warmup bars are dropped: the correlation on screen should describe the
+    window the equity curve covers, not the 60 sessions of history the vol
+    model needed before it.
+    """
+    out: dict[str, list[tuple[str, float]]] = {}
+    start, end = request.start.isoformat(), request.end.isoformat()
+    for symbol, history in getattr(source, "histories", {}).items():
+        rows: list[tuple[str, float]] = []
+        for bar in getattr(history, "bars", []) or []:
+            close = bar.get("close")
+            if close is None:
+                continue
+            day = str(bar.get("timestamp"))[:10]
+            if start <= day <= end:
+                rows.append((day, float(close)))
+        if rows:
+            out[symbol.upper()] = rows
+    return out
 
 
 # --------------------------------------------------------------------------- #

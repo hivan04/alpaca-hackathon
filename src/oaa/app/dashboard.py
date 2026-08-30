@@ -66,8 +66,10 @@ import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from oaa.app import correlation as corr  # noqa: E402
 from oaa.app import identity as ident  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
+from oaa.app.events_page import render_events  # noqa: E402
 from oaa.app.positions import render_positions  # noqa: E402
 from oaa.app.theme import is_dark, mode_toggle, palette, style  # noqa: E402
 from oaa.core.errors import DataError  # noqa: E402
@@ -75,6 +77,7 @@ from oaa.core.errors import DataError  # noqa: E402
 PAGE_BACKTEST = "Backtesting"
 PAGE_LIVE = "Live Trading"
 PAGE_POSITIONS = "Positions"
+PAGE_EVENTS = "Events"
 PAGE_CONTROL = "Control"
 
 
@@ -670,6 +673,9 @@ def _render_result(payload: dict[str, Any], colours: dict[str, Any], cfg: Any) -
         st.plotly_chart(_pnl_chart(trades, colours), width="stretch")
         st.plotly_chart(_trade_bars(trades, colours), width="stretch")
 
+    # -- how alike the underlyings were ------------------------------------ #
+    _correlation_panel(payload, colours, cfg)
+
     # -- trades ------------------------------------------------------------ #
     st.subheader("Every trade, and what justified it")
     if not len(trades):
@@ -762,6 +768,153 @@ def _render_result(payload: dict[str, Any], colours: dict[str, Any], cfg: Any) -
     st.plotly_chart(_cost_chart(metrics, colours), width="stretch")
 
     _methodology(cfg, provenance)
+
+
+# --------------------------------------------------------------------------- #
+# pairwise correlation
+# --------------------------------------------------------------------------- #
+def _correlation_caption() -> None:
+    st.caption(
+        "Correlation of **daily returns**, pair by pair. This is the diversification "
+        "check: the risk in this book is not any single position, it is six "
+        "positions turning out to be one. Two names at 0.9 are one bet held twice, "
+        "and r-squared says how much of one name's daily move the other explains."
+    )
+
+
+def _render_correlation(
+    prices: pd.DataFrame, colours: dict[str, Any], key: str, allow_levels: bool = False
+) -> None:
+    """Shared body: pick the series, show the grid, rank the pairs."""
+    basis = "Daily returns"
+    if allow_levels:
+        basis = st.radio(
+            "Correlate on", ["Daily returns", "Price levels"],
+            horizontal=True, key=f"{key}_basis",
+            help=(
+                "Daily returns is the honest one. Two rising stocks correlate at "
+                "0.99 on price levels whatever they do day to day - it measures "
+                "the shared trend, not shared risk."
+            ),
+        )
+    frame = prices.dropna(how="any") if basis == "Price levels" else corr.returns_frame(prices)
+    matrix = corr.matrix(frame)
+    if matrix.empty:
+        st.info(
+            "Not enough overlapping daily bars to correlate - at least two symbols "
+            f"and {corr.MIN_OBSERVATIONS} shared sessions are needed."
+        )
+        return
+
+    stats = corr.summary(matrix)
+    if stats:
+        cells = st.columns(3)
+        cells[0].metric("Average pairwise", _num(stats["mean"], 2))
+        cells[1].metric("Most alike", _num(stats["max"], 2), stats["max_pair"])
+        cells[2].metric("Least alike", _num(stats["min"], 2), stats["min_pair"])
+
+    st.plotly_chart(corr.heatmap(matrix, colours), width="stretch")
+    table = corr.pairs_table(matrix, observations=len(frame))
+    if not table.empty:
+        st.dataframe(
+            table, width="stretch", hide_index=True,
+            column_config={
+                "pair": st.column_config.TextColumn("Pair"),
+                "correlation": st.column_config.NumberColumn("r", format="%.3f"),
+                "r_squared": st.column_config.NumberColumn("r squared", format="%.3f"),
+                "observations": st.column_config.NumberColumn("Sessions"),
+            },
+        )
+    st.caption(
+        f"{len(frame)} overlapping sessions, {matrix.shape[0]} symbols, "
+        f"{len(table)} pairs. Basis: {basis.lower()}."
+    )
+
+
+def _correlation_panel(payload: dict[str, Any], colours: dict[str, Any], cfg: Any) -> None:
+    """Backtest tab: correlation over the replayed window."""
+    st.subheader("How alike the underlyings were")
+    _correlation_caption()
+
+    provenance = payload.get("provenance") or {}
+    closes = provenance.get("underlying_closes") or {}
+    if not closes:
+        # Runs saved before this panel existed carry no closes. Rebuild them
+        # from the disk-cached historical feed rather than showing nothing.
+        request = provenance.get("request") or {}
+        symbols = [s.upper() for s in (request.get("symbols") or provenance.get("universe") or [])]
+        if not symbols or not request.get("start"):
+            st.info(
+                "This run was saved before correlations were recorded, and it does "
+                "not carry enough request detail to rebuild them. Re-run it and the "
+                "panel fills in."
+            )
+            return
+        st.caption(
+            "This run predates the panel, so the closes were refetched from the "
+            "cached historical feed for the same window."
+        )
+        try:
+            closes = corr.replay_closes(
+                cfg.profile, st.session_state.get("_config_path"),
+                tuple(symbols), str(request["start"]), str(request["end"]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not rebuild the price history for this run: {exc}")
+            return
+
+    prices = corr.closes_frame(closes)
+    if prices.empty:
+        st.info("No usable daily closes for this run's universe.")
+        return
+    if provenance.get("synthetic"):
+        st.warning(
+            "These are SYNTHETIC price paths. Each symbol is an independent random "
+            "walk, so the correlations below measure the generator, not the market."
+        )
+    _render_correlation(prices, colours, key="bt_corr")
+
+
+def _live_correlation_panel(cfg: Any, colours: dict[str, Any]) -> None:
+    """Live tab: correlation of the active universe, from live daily bars."""
+    st.subheader("How alike the universe is right now")
+    _correlation_caption()
+
+    universe = [s.upper() for s in (cfg.universe.active() or ["SPY"])]
+    controls = st.columns([3, 2, 1])
+    symbols = controls[0].multiselect(
+        "Symbols", universe, default=universe, key="live_corr_symbols"
+    )
+    lookback = controls[1].slider(
+        "Lookback (calendar days)", 30, 365, 120, 15, key="live_corr_lookback",
+        help="Daily bars. A shorter window reacts faster and is noisier.",
+    )
+    if controls[2].button("Refresh", width="stretch", key="live_corr_refresh"):
+        corr.live_closes.clear()
+
+    if len(symbols) < 2:
+        st.info("Pick at least two symbols.")
+        return
+    try:
+        closes = corr.live_closes(
+            cfg.profile, st.session_state.get("_config_path"),
+            tuple(sorted(symbols)), int(lookback),
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.error(
+            f"Could not fetch daily bars: {exc}\n\nThe data provider is "
+            f"`{cfg.data.provider}`; `oaa doctor` reports which backends are "
+            "available."
+        )
+        return
+    prices = corr.closes_frame(closes)
+    missing = sorted(set(symbols) - set(prices.columns))
+    if missing:
+        st.caption(f"No usable bars for {', '.join(missing)} - left out of the grid.")
+    if prices.empty:
+        st.info("No daily bars came back for these symbols.")
+        return
+    _render_correlation(prices, colours, key="live_corr", allow_levels=True)
 
 
 def _trade_detail(trade: pd.Series) -> None:
@@ -999,6 +1152,9 @@ def render_live(settings: Any) -> None:
                 _equity_chart(curve, colours, float(curve["equity"].iloc[0])),
                 width="stretch",
             )
+
+    # -- how alike the universe is ------------------------------------------ #
+    _live_correlation_panel(cfg, colours)
 
     # -- open positions ----------------------------------------------------- #
     if account is not None and account.positions:
@@ -1304,8 +1460,10 @@ def main() -> None:
             settings_for[candidate] = None
             st.session_state[f"_load_error_{candidate}"] = str(exc)
 
-    backtest_tab, live_tab, positions_tab, control_tab = st.tabs(
-        [PAGE_BACKTEST, PAGE_LIVE, PAGE_POSITIONS, PAGE_CONTROL]
+    # Events sits between Positions and Control deliberately: it is a book you
+    # READ before a print and act on from the terminal, not one you switch on.
+    backtest_tab, live_tab, positions_tab, events_tab, control_tab = st.tabs(
+        [PAGE_BACKTEST, PAGE_LIVE, PAGE_POSITIONS, PAGE_EVENTS, PAGE_CONTROL]
     )
     with backtest_tab:
         render_backtest(settings)
@@ -1313,6 +1471,8 @@ def main() -> None:
         render_live(settings)
     with positions_tab:
         render_positions(settings_for)
+    with events_tab:
+        render_events(settings)
     with control_tab:
         render_control(settings_for)
 

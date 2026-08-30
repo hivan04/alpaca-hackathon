@@ -167,6 +167,13 @@ DEFAULT_TIER_MAP: dict[str, str] = {
     **dict.fromkeys(("SPY", "QQQ", "IWM", "XSP"), "index_etf_daily"),
     **dict.fromkeys((
         "DIA", "EEM", "XLF", "XLE", "XLK", "SMH", "TLT", "GLD",
+        # Added 30 Aug with the universe expansion. A name missing from this
+        # map falls through `tier_for`'s default of "single_name" and is
+        # modelled with single-name quote widths - so an ETF added to the
+        # universe but not to this map is measured as if it were NVDA, fails
+        # the spread gate, and is then recorded as "a bad name". The tier is
+        # the honest one: these all quote like index ETFs.
+        "EFA", "FXI", "SLV", "XLU", "XLV", "XLP", "XLI", "XLY", "IYR", "EWZ",
     ), "index_etf"),
     **dict.fromkeys((
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AMD",

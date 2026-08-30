@@ -75,9 +75,52 @@ def _event(symbol="TEST", timing="amc", confirmed=True, history=(10.0, -8.0, 12.
     )
 
 
-def _market(spot: float = 200.0, asof: dt.date = TODAY) -> MarketContext:
+def _bars(
+    n: int = 140,
+    spot: float = 200.0,
+    quiet_tail: int = 30,
+    wide_pct: float = 0.020,
+    quiet_pct: float = 0.002,
+    seed: int = 7,
+) -> list[dict]:
+    """Daily bars that END in a volatility squeeze.
+
+    The first `n - quiet_tail` bars swing at `wide_pct`, the tail at
+    `quiet_pct`, so the current Bollinger width sits at the bottom of its own
+    range - which is exactly the setup this book screens for. Set
+    `quiet_pct == wide_pct` for a tape with no squeeze at all.
+    """
+    import random
+
+    rng = random.Random(seed)
+    price = spot
+    rows: list[dict] = []
+    for i in range(n):
+        step = quiet_pct if i >= n - quiet_tail else wide_pct
+        price *= 1 + rng.uniform(-step, step)
+        high = price * (1 + step / 2)
+        low = price * (1 - step / 2)
+        rows.append({
+            "timestamp": dt.datetime(2026, 1, 1) + dt.timedelta(days=i),
+            "open": price, "high": high, "low": low, "close": price,
+            "volume": 1_000_000,
+        })
+    # Rescale the whole series so it ENDS at spot, rather than clobbering the
+    # last close - a forced final print is a jump the band width would read as
+    # an expansion, which is the opposite of the fixture's purpose.
+    factor = spot / rows[-1]["close"]
+    for row in rows:
+        for key in ("open", "high", "low", "close"):
+            row[key] *= factor
+    return rows
+
+
+def _market(
+    spot: float = 200.0, asof: dt.date = TODAY, bars: list[dict] | None = None
+) -> MarketContext:
     return MarketContext(
-        symbol="TEST", asof=dt.datetime.combine(asof, dt.time(15, 45)), spot=spot
+        symbol="TEST", asof=dt.datetime.combine(asof, dt.time(15, 45)), spot=spot,
+        bars=_bars(spot=spot) if bars is None else bars,
     )
 
 
@@ -402,6 +445,14 @@ def _ctx(strategy, market, account, call=None, budget=None):
 
 _ROW = {"symbol": "TEST", "report_date": "2026-09-01", "timing": "amc",
         "confirmed": True, "source": "test", "history": [10.0, -8.0, 12.0, -6.0]}
+#: The synthetic chain prices an 18% implied move. _ROW's history averages 9%,
+#: so implied/realised is 2.0 - RICH, and the book sells premium.
+#: _ROW_CHEAP averages 24.5%, a ratio of 0.73 - CHEAP, and the book buys the
+#: move as a directional debit vertical. _ROW_FAIR sits at 1.0 and must not
+#: trade at all: no measured mispricing, no edge to express.
+_ROW_CHEAP = {**_ROW, "history": [25.0, -24.0, 26.0, -23.0]}
+_ROW_FAIR = {**_ROW, "history": [18.0, -18.0, 18.0, -18.0]}
+
 _CALL = DirectionCall("TEST", "bullish", 0.8, "estimates revised up", ["a raise"])
 
 
@@ -424,11 +475,32 @@ def test_the_wrong_session_produces_nothing(tmp_path, account):
     assert strategy.generate(ctx) == []
 
 
-def test_no_direction_call_means_no_trade(tmp_path, account):
-    """The strategy never calls an LLM from inside the generation loop; without
-    a call supplied by the engine there is no trade to build."""
+def test_no_direction_call_derives_one_from_the_tape_in_replay(tmp_path, account):
+    """The strategy never calls an LLM from inside the generation loop.
+
+    Live, the engine always supplies a call - an abstention is still a call -
+    so arriving with None means a backtest. Rather than reporting zero trades
+    forever (which is what it did before 29 Aug, and reads as a broken
+    strategy), the direction is derived from the Bollinger midline and the idea
+    is tagged `derived` so the journal cannot confuse it with a model's call.
+    """
+    big = account.model_copy(update={"equity": 1_000_000.0})
     strategy = _strategy(tmp_path, [_ROW])
-    assert strategy.generate(_ctx(strategy, _market(), account, None)) == []
+    ideas = strategy.generate(_ctx(strategy, _market(), big, None))
+    assert ideas, "a replay with no LLM must still be measurable"
+    assert "derived" in ideas[0].tags
+    assert ideas[0].meta["llm_degraded"] is True
+    assert ideas[0].confidence == strategy.events.direction.derived_confidence
+
+
+def test_deriving_can_be_switched_off(tmp_path, account):
+    """With it off, no call means no trade - the pre-29-Aug behaviour, kept
+    reachable so a replay can be made to depend on the LLM path only."""
+    strategy = _strategy(
+        tmp_path, [_ROW], params_extra="direction:\n  derive_from_tape_when_no_call: false\n"
+    )
+    big = account.model_copy(update={"equity": 1_000_000.0})
+    assert strategy.generate(_ctx(strategy, _market(), big, None)) == []
 
 
 def test_an_abstention_means_no_trade(tmp_path, account):
@@ -438,7 +510,8 @@ def test_an_abstention_means_no_trade(tmp_path, account):
 
 
 def test_a_good_call_builds_a_sized_defined_risk_vertical(tmp_path, account):
-    strategy = _strategy(tmp_path, [_ROW])
+    """Cheap options - and only then - are expressed directionally."""
+    strategy = _strategy(tmp_path, [_ROW_CHEAP])
     ideas = strategy.generate(_ctx(strategy, _market(), account, _CALL))
     assert len(ideas) == 1
     idea = ideas[0]
@@ -448,11 +521,12 @@ def test_a_good_call_builds_a_sized_defined_risk_vertical(tmp_path, account):
     assert "bullish" in idea.tags
     assert idea.meta["llm_confidence"] == 0.8
     assert idea.meta["exit_date"] == "2026-09-02"
+    assert idea.meta["expression"] == "buy_direction"
     assert len(idea.legs) == 2
 
 
 def test_a_bearish_call_buys_puts(tmp_path, account):
-    strategy = _strategy(tmp_path, [_ROW])
+    strategy = _strategy(tmp_path, [_ROW_CHEAP])
     bearish = DirectionCall("TEST", "bearish", 0.8, "guidance risk", ["a downgrade"])
     ideas = strategy.generate(_ctx(strategy, _market(), account, bearish))
     assert ideas and ideas[0].meta["right"] == "put"
@@ -559,3 +633,312 @@ def test_the_engine_arms_screens_and_records_a_declined_name(tmp_path, account):
     assert report.declined["SKIPME"] == "model abstained"
     assert report.abstention_rate == 0.5
     assert report.budget > 0
+
+
+# --------------------------------------------------------------------------- #
+# the technical layer
+# --------------------------------------------------------------------------- #
+from oaa.strategies.events.params import TechnicalParams  # noqa: E402
+from oaa.strategies.events.technicals import evaluate as read_tape  # noqa: E402
+from oaa.strategies.events.technicals import stop_breached  # noqa: E402
+
+
+def _trending(n: int = 140, spot: float = 200.0, daily: float = -0.02) -> list[dict]:
+    """A tape marching one way, hard - the shape that drives RSI to an extreme."""
+    rows = []
+    price = spot / ((1 + daily) ** (n - 1))
+    for i in range(n):
+        high, low = price * 1.004, price * 0.996
+        rows.append({
+            "timestamp": dt.datetime(2026, 1, 1) + dt.timedelta(days=i),
+            "open": price, "high": high, "low": low, "close": price,
+            "volume": 1_000_000,
+        })
+        price *= 1 + daily
+    return rows
+
+
+def test_a_squeeze_passes_and_records_what_it_measured():
+    tape = read_tape("TEST", _bars(), 200.0, bullish=True, params=TechnicalParams())
+    assert tape.ok, tape.veto
+    assert tape.squeeze
+    assert tape.width_percentile is not None and tape.width_percentile <= 0.25
+    assert tape.atr and tape.atr_pct
+
+
+def test_no_squeeze_is_a_veto():
+    """Bands wide open means the spring is already unwound - there is no setup,
+    whatever the model read overnight."""
+    loose = _bars(quiet_pct=0.02, wide_pct=0.02)   # same vol throughout
+    tape = read_tape("TEST", loose, 200.0, bullish=True, params=TechnicalParams())
+    assert not tape.ok
+    assert "no squeeze" in tape.veto
+
+
+def test_the_squeeze_gate_can_be_measured_without_being_enforced():
+    """`require_squeeze: false` records the reading and lets the trade through -
+    so the cost of the gate can be measured in replay before it is trusted."""
+    loose = _bars(quiet_pct=0.02, wide_pct=0.02)
+    params = TechnicalParams(require_squeeze=False)
+    tape = read_tape("TEST", loose, 200.0, bullish=True, params=params)
+    assert tape.ok
+    assert tape.squeeze is False
+    assert tape.width_percentile is not None
+
+
+def test_rsi_vetoes_a_short_into_exhaustion_but_not_a_long():
+    """One-sided by design: RSI 15 blocks selling, and says nothing about
+    buying. A two-sided RSI would be an entry signal, which it is not."""
+    falling = _trending(daily=-0.02)
+    params = TechnicalParams(require_squeeze=False)
+
+    bearish = read_tape("TEST", falling, falling[-1]["close"], bullish=False, params=params)
+    assert bearish.rsi is not None and bearish.rsi <= params.rsi_oversold
+    assert not bearish.ok
+    assert "exhaustion" in bearish.veto
+
+    bullish = read_tape("TEST", falling, falling[-1]["close"], bullish=True, params=params)
+    assert bullish.ok, "an oversold tape must not block the other side"
+
+
+def test_rsi_in_the_middle_blocks_nothing():
+    tape = read_tape("TEST", _bars(), 200.0, bullish=True, params=TechnicalParams())
+    assert tape.rsi is not None
+    assert 20 < tape.rsi < 80
+    assert tape.ok
+
+
+def test_the_atr_stop_sits_on_the_correct_side_and_is_wide():
+    params = TechnicalParams(atr_stop_multiple=2.0)
+    long_side = read_tape("TEST", _bars(), 200.0, bullish=True, params=params)
+    short_side = read_tape("TEST", _bars(), 200.0, bullish=False, params=params)
+
+    assert long_side.stop_underlying < 200.0
+    assert short_side.stop_underlying > 200.0
+    # 2x ATR, not a tight percentage - the point is to survive post-print noise.
+    assert abs(200.0 - long_side.stop_underlying) == pytest.approx(
+        2.0 * long_side.atr, abs=1e-3      # the stop is stored rounded to 4dp
+    )
+
+
+def test_atr_scales_size_down_on_a_noisy_tape_and_never_up():
+    calm = read_tape("TEST", _bars(quiet_pct=0.002), 200.0, bullish=True,
+                     params=TechnicalParams())
+    noisy = read_tape("TEST", _bars(quiet_pct=0.05, wide_pct=0.05), 200.0, bullish=True,
+                      params=TechnicalParams(require_squeeze=False))
+    assert calm.size_multiple == 1.0, "a calm tape earns full size, never a bonus"
+    assert noisy.size_multiple < 1.0
+    assert noisy.size_multiple >= TechnicalParams().atr_min_size_multiple
+
+
+def test_atr_is_never_an_entry_gate():
+    """ATR decides size and stop placement. A tape that is merely volatile is
+    not refused for being volatile - only sized smaller."""
+    noisy = read_tape("TEST", _bars(quiet_pct=0.05, wide_pct=0.05), 200.0, bullish=True,
+                      params=TechnicalParams(require_squeeze=False))
+    assert noisy.ok
+    assert "ATR" not in noisy.veto
+
+
+def test_too_few_bars_is_a_veto_not_a_silent_pass():
+    """Degrading to "no data, trade anyway" would restore exactly the
+    LLM-only behaviour this layer was added to prevent."""
+    tape = read_tape("TEST", _bars(n=15), 200.0, bullish=True, params=TechnicalParams())
+    assert not tape.ok
+    assert "bars" in tape.veto
+
+
+def test_the_layer_can_be_switched_off_entirely():
+    tape = read_tape("TEST", [], 200.0, bullish=True, params=TechnicalParams(enabled=False))
+    assert tape.ok
+    assert tape.size_multiple == 1.0
+
+
+def test_stop_breached_reads_the_correct_side():
+    assert stop_breached(190.0, 189.0, bullish=True)
+    assert not stop_breached(190.0, 191.0, bullish=True)
+    assert stop_breached(210.0, 211.0, bullish=False)
+    assert not stop_breached(None, 0.0, bullish=True)
+
+
+def test_the_technical_read_reaches_the_idea(tmp_path, account):
+    strategy = _strategy(tmp_path, [_ROW])
+    idea = strategy.generate(_ctx(strategy, _market(), account, _CALL))[0]
+    assert idea.meta["ta_squeeze"] is True
+    assert idea.meta["ta_stop_underlying"] < 200.0     # bullish -> stop below
+    assert idea.meta["ta_rsi"] is not None
+    assert idea.meta["ta_size_multiple"] == 1.0
+
+
+def test_a_name_with_no_squeeze_produces_no_position(tmp_path, account):
+    strategy = _strategy(tmp_path, [_ROW])
+    loose = _market(bars=_bars(quiet_pct=0.02, wide_pct=0.02))
+    assert strategy.generate(_ctx(strategy, loose, account, _CALL)) == []
+
+
+def test_the_morning_exit_says_when_the_stop_was_the_reason(tmp_path, account):
+    """The ATR stop is directional-only - a condor has no side to be wrong about."""
+    strategy = _strategy(tmp_path, [_ROW_CHEAP])
+    idea = strategy.generate(_ctx(strategy, _market(), account, _CALL))[0]
+    stop = float(idea.meta["ta_stop_underlying"])
+
+    through = _ctx(strategy, _market(spot=stop - 1, asof=dt.date(2026, 9, 2)), account, _CALL)
+    assert "ATR" in (strategy.should_exit(through, idea, -0.10) or "")
+
+    held = _ctx(strategy, _market(spot=stop + 5, asof=dt.date(2026, 9, 2)), account, _CALL)
+    assert "vol crush" in (strategy.should_exit(held, idea, 0.05) or "")
+
+
+def test_a_symbol_with_no_calendar_row_is_refused_out_loud(tmp_path, account):
+    """Pointing this book at a universe with no calendar rows - the natural
+    thing to try - used to be completely silent: every symbol refused at DEBUG,
+    nothing in the funnel, zero trades and no reason. That is
+    indistinguishable from a broken strategy."""
+    strategy = _strategy(tmp_path, [_ROW])
+    market = _market().model_copy(update={"symbol": "NVDA"})
+    assert strategy.generate(_ctx(strategy, market, account, _CALL)) == []
+
+
+def test_the_refusal_names_the_calendar_file(tmp_path, account, caplog):
+    import logging
+
+    strategy = _strategy(tmp_path, [_ROW])
+    market = _market().model_copy(update={"symbol": "NVDA"})
+    with caplog.at_level(logging.INFO):
+        strategy.generate(_ctx(strategy, market, account, _CALL))
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "scheduled_event" in logged
+    assert "no row in" in logged
+
+
+def test_an_unconfirmed_row_says_so_rather_than_saying_missing(tmp_path, account, caplog):
+    """A name that IS on the calendar but unconfirmed is a different problem
+    from one that is absent, and the message has to tell them apart."""
+    import logging
+
+    strategy = _strategy(tmp_path, [{**_ROW, "confirmed": False, "source": "calendar guess"}])
+    with caplog.at_level(logging.INFO):
+        strategy.generate(_ctx(strategy, _market(), account, _CALL))
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "not confirmed" in logged
+    assert "calendar guess" in logged
+
+
+def test_a_run_can_be_pointed_at_a_different_weeks_calendar(tmp_path, account):
+    """`--events-calendar` overrides the params file for one run - how a name
+    that is not in the live universe gets backtested at all."""
+    from oaa.config.schema import Config, StrategyRef
+    from oaa.strategies.events.strategy import EarningsEventDirectional
+
+    other = tmp_path / "other_week.json"
+    other.write_text(json.dumps({"events": [
+        {"symbol": "NVDA", "report_date": "2026-08-26", "timing": "amc",
+         "confirmed": True, "source": "test", "history": [1.0, -2.0]},
+    ]}))
+    params = tmp_path / "p.yaml"
+    params.write_text("book: events\ncalendar_path: config/events/earnings_calendar.json\n")
+
+    ref = StrategyRef(
+        name="earnings_event_directional", book="events",
+        params={"params_path": str(params), "calendar_path": str(other)},
+    )
+    strategy = EarningsEventDirectional(ref, Config())
+    assert strategy.universe() == ["NVDA"], "the override must win over the params file"
+
+
+def test_the_shipped_backtest_calendar_carries_no_look_ahead():
+    """`history` must hold the four prints BEFORE the one being tested.
+
+    The vol screen ranks on implied-vs-realised, so seeding it with the outcome
+    of the print under test would let the screen use a number it could not have
+    had. The outcome lives in `actual_reaction_pct`, which the loader ignores.
+    """
+    path = "config/events/earnings_calendar_2026-08-24.json"
+    payload = json.loads(open(path).read())
+    for row in payload["events"]:
+        outcome = row.get("actual_reaction_pct")
+        assert outcome is not None, f"{row['symbol']} has no recorded outcome"
+        assert outcome not in row["history"], (
+            f"{row['symbol']}: the print under test appears in its own history"
+        )
+        assert len(row["history"]) == 4
+
+    # And the loader must not surface the outcome to the strategy at all.
+    calendar = load_calendar(path)
+    for event in calendar.values():
+        assert not hasattr(event, "actual_reaction_pct")
+
+
+# --------------------------------------------------------------------------- #
+# the expression follows the sign of the divergence
+# --------------------------------------------------------------------------- #
+def test_rich_options_are_sold_as_a_defined_risk_condor(tmp_path, account):
+    """The screen measures a VOL mispricing; when it is rich, the structure
+    must collect that mispricing rather than bet on a direction beside it."""
+    strategy = _strategy(tmp_path, [_ROW])
+    ideas = strategy.generate(_ctx(strategy, _market(), account, _CALL))
+
+    assert len(ideas) == 1
+    idea = ideas[0]
+    assert idea.meta["expression"] == "sell_premium"
+    assert "sell_premium" in idea.tags
+    assert len(idea.legs) == 4
+    assert idea.net_price < 0, "a premium sale is a net credit"
+    assert idea.max_loss and idea.max_loss > 0, "defined risk is not optional here"
+    # The direction call is a tilt, not the thesis - it must not put a
+    # directional tag on a structure with no side.
+    assert "bullish" not in idea.tags and "bearish" not in idea.tags
+
+
+def test_the_shorts_sit_outside_the_implied_move(tmp_path, account):
+    """The whole edge: the market has to be wrong about the SIZE of the move
+    before this position loses. Inside the implied move it is a coin flip."""
+    strategy = _strategy(tmp_path, [_ROW])
+    idea = strategy.generate(_ctx(strategy, _market(), account, _CALL))[0]
+
+    spot, move = 200.0, float(idea.meta["implied_move"])
+    assert spot - idea.meta["short_put_strike"] >= move * 0.85
+    assert idea.meta["short_call_strike"] - spot >= move * 0.85
+    assert idea.meta["shorts_clearance"] >= 0.85
+
+
+def test_the_direction_tilt_only_pushes_a_short_further_out(tmp_path, account):
+    """Collecting more premium by pulling a short INSIDE the implied move would
+    surrender the one property the structure is built on, so the tilt is
+    one-directional by construction.
+
+    The assertion is `>=`, not `>`, on purpose: the tilt asks for a strike and
+    the LISTED ladder answers. On a coarse grid - or a chain that simply does
+    not extend far enough - the tilted side snaps back onto the untilted one
+    and the two clearances come out equal. That is the tilt being absorbed,
+    which is fine. What must never happen is a short ending up NEARER than the
+    implied move, and that is what this pins.
+    """
+    strategy = _strategy(tmp_path, [_ROW])
+    up = strategy.generate(_ctx(strategy, _market(), account, _CALL))[0]
+    bearish_call = DirectionCall("TEST", "bearish", 0.8, "guidance risk", ["a cut"])
+    down = strategy.generate(_ctx(strategy, _market(), account, bearish_call))[0]
+
+    assert up.meta["call_clearance"] >= up.meta["put_clearance"]
+    assert down.meta["put_clearance"] >= down.meta["call_clearance"]
+    for idea in (up, down):
+        assert idea.meta["put_clearance"] >= 0.85
+        assert idea.meta["call_clearance"] >= 0.85
+
+
+def test_a_fairly_priced_event_is_not_traded_at_all(tmp_path, account):
+    """The band between the thresholds is where this book used to do ALL of its
+    trading: a directional structure bought at a fair implied move, paid for
+    with four half-spreads. Declining it is the change."""
+    strategy = _strategy(tmp_path, [_ROW_FAIR])
+    assert strategy.generate(_ctx(strategy, _market(), account, _CALL)) == []
+
+
+def test_the_old_always_directional_behaviour_can_be_restored(tmp_path, account):
+    """So the two can be measured against each other rather than asserted."""
+    strategy = _strategy(
+        tmp_path, [_ROW], params_extra="  expression_follows_divergence: false\n"
+    )
+    idea = strategy.generate(_ctx(strategy, _market(), account, _CALL))[0]
+    assert idea.meta["expression"] == "buy_direction"
+    assert len(idea.legs) == 2

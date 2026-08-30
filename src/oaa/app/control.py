@@ -13,6 +13,12 @@ at the top of its next cycle, so nothing here needs a restart.
 Switching a book OFF stops it OPENING. Positions it already holds keep being
 managed and closed by their own strategy's exit rules - an off switch that
 abandoned open risk would be worse than the mistake it prevents.
+
+One book has no toggle. The events book runs in its own process
+(`oaa events arm`) and never leases capital from the firewall, so `oaa run`
+cannot open a position for it and a switch here would imply control this page
+does not have. It is listed anyway, because "which books exist" is a question
+this page should answer completely; the Events tab is where it is operated.
 """
 
 from __future__ import annotations
@@ -46,6 +52,19 @@ STRATEGIES: list[dict[str, Any]] = [
         "title": "Event premium",
         "blurb": "Dormant unless a scheduled print prices above its realised "
                  "distribution. Standing down is the expected outcome.",
+    },
+    {
+        "name": "earnings_event_directional",
+        "title": "Earnings events",
+        "blurb": "Buys a vertical debit spread into a CONFIRMED print, sized on "
+                 "an LLM's confidence in the direction, closed the next "
+                 "morning. Armed on a date rather than a signal.",
+        # No toggle: this book runs in its own process and never leases capital
+        # from the firewall, so `oaa run` cannot open a position for it. A
+        # switch here would read as control it does not have.
+        "separate_process": True,
+        "how": "`oaa events arm` before the close · "
+               "`oaa events flatten` the next morning · see the Events tab",
     },
 ]
 
@@ -135,9 +154,19 @@ def render_control(settings_for: dict[str, Any]) -> None:
     for spec in STRATEGIES:
         name = spec["name"]
         row = st.columns([3, 2, 2])
-        title = spec["title"] if name in wired else f"{spec['title']}  ·  not wired"
+        if spec.get("separate_process"):
+            title = f"{spec['title']}  ·  separate process"
+        else:
+            title = spec["title"] if name in wired else f"{spec['title']}  ·  not wired"
         row[0].markdown(f"**{title}**")
         row[0].caption(spec["blurb"])
+
+        if spec.get("separate_process"):
+            row[0].caption(f":grey[{spec['how']}]")
+            for col in row[1:]:
+                col.markdown(":grey[own process]")
+                col.caption("not switchable here")
+            continue
 
         for col, (profile, label, _) in zip(row[1:], ACCOUNTS, strict=False):
             board = boards.get(profile)

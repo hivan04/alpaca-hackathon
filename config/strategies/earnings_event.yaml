@@ -80,6 +80,57 @@ direction:
   # here to make a run repeatable.
   model: null
   seed: 11
+  # Replay only. Live, the engine always supplies a direction call, so a
+  # context without one means a backtest - and there is no LLM in the replay
+  # loop. Deriving direction from the Bollinger midline is what makes the
+  # technical layer measurable on its own: "does the setup have any edge before
+  # the model is added". Derived ideas are tagged `derived` and sized at the
+  # floor, because a mechanical read is not a conviction read.
+  derive_from_tape_when_no_call: true
+  derived_confidence: 0.55
+
+# -----------------------------------------------------------------------------
+# The technical layer. Added 29 Aug so the book is not a pure bet on what a
+# language model read overnight. Three indicators, three jobs, and none of them
+# allowed to drift into another's - see src/oaa/strategies/events/technicals.py.
+# -----------------------------------------------------------------------------
+technicals:
+  enabled: true
+  bars_lookback: 120
+
+  # --- Bollinger: the SETUP (width, never direction) ------------------------
+  # A squeeze means realised movement has coiled while a dated catalyst
+  # approaches. Bands say nothing about which way the spring unwinds, and the
+  # moment a width reading is used to pick a side it has stopped measuring
+  # volatility.
+  bollinger_period: 20
+  bollinger_std: 2.0
+  width_lookback: 100
+  squeeze_max_percentile: 0.25
+  # false records the reading without vetoing - run a replay both ways to
+  # measure what the gate actually costs before trusting it.
+  require_squeeze: true
+
+  # --- RSI: the VETO, one-sided and only at extremes ------------------------
+  # A short into a tape already at 18 is a short into the bounce. RSI at 60
+  # blocks nothing, and should not: this is a yellow light on exhaustion, never
+  # a green one on entry.
+  rsi_period: 14
+  rsi_oversold: 20.0
+  rsi_overbought: 80.0
+
+  # --- ATR: SIZE and STOP, never entry --------------------------------------
+  # 2x ATR is wide on purpose: the job is to survive post-print noise, not to
+  # be tight. Note the honest limit - no cycle runs overnight, so the stop
+  # governs the morning exit rather than protecting against the gap. The
+  # protection against the gap is the structure: a debit spread cannot lose
+  # more than the debit.
+  atr_period: 14
+  atr_stop_multiple: 2.0
+  # ATR as a fraction of spot at which a name takes FULL size. Noisier scales
+  # down proportionally; quieter earns no bonus.
+  atr_reference_pct: 0.02
+  atr_min_size_multiple: 0.40
 
 sizing:
   # Everything opened in one night shares this. Three names do not each get a
@@ -96,15 +147,58 @@ sizing:
   max_contracts: 10
 
 structure:
+  # -----------------------------------------------------------------------
+  # THE EXPRESSION FOLLOWS THE SIGN OF THE DIVERGENCE (30 Aug).
+  #
+  # The screen measures a volatility mispricing. Expressing every one of them
+  # as a debit vertical bet the wrong variable: a directional structure bought
+  # at a fair-to-rich implied move, on a coin-flip direction call, returns
+  # minus the round trip in expectation. That is arithmetic, not a sample-size
+  # problem, and it is why the book lost on the one trade it took.
+  #
+  # Set expression_follows_divergence: false to restore the old behaviour and
+  # measure the two against each other.
+  # -----------------------------------------------------------------------
+  expression_follows_divergence: true
+  # Well clear of 1.0 in both directions: the ratio is computed off FOUR
+  # prints, so a name at 1.10 is inside its own sampling error. Names landing
+  # in the band between these two do not trade at all - which is most of them,
+  # and is the point.
+  rich_ratio_threshold: 1.35
+  cheap_ratio_threshold: 0.80
+
   # The expiry must contain the print. 1-9 days covers the front weekly for a
   # Monday-to-Thursday report; the screen refuses any expiry landing before
   # the reaction session.
   dte_window: [1, 9]
+
+  # --- buy the move (options cheap) ----------------------------------------
   long_delta: 0.45
   short_delta: 0.25
   # Above this the debit is paying for most of its own maximum profit.
   max_debit_to_width: 0.45
   min_reward_risk: 1.2
+
+  # --- sell the premium (options rich) -------------------------------------
+  # THE number for this expression, and the thesis itself: the shorts are
+  # placed at spot +/- this multiple of the event's own implied move, and the
+  # delta falls out. At 1.0 the market has to be wrong about the SIZE of the
+  # move before the position loses. Strikes are NOT picked by delta here - the
+  # front-weekly surface across a print is too deformed for a delta to stand
+  # in for distance. Drop this below 1.0 and the premium sale quietly becomes
+  # a coin flip.
+  shorts_at_implied_move: 1.0
+  # Extra multiples added to the side the direction call points AT. Only ever
+  # pushes a short further out, never pulls one in.
+  condor_direction_tilt: 0.25
+  # Wings as a fraction of SPOT, not points - the universe spans $4 to $600.
+  condor_wing_pct: 0.04
+  # Below this the structure risks most of the wing to collect very little.
+  min_credit_to_width: 0.18
+  # A coarse strike ladder can snap a short back inside the priced move. Below
+  # this the structure is no longer the trade that was reasoned about, so it is
+  # declined rather than quietly downgraded.
+  min_shorts_clearance: 0.85
 
 schedule:
   # US/Eastern. Arm into the close of the session before an after-close print.

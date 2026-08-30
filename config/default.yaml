@@ -82,12 +82,33 @@ data:
 universe:
   # Liquid, tight-spread option underlyings. Keep this short - each name costs
   # chain requests, and the free data budget is 200 req/min.
-  # Index and sector ETFs only - both books now trade the same ten names. See
-  # the rule in config/strategies/vol_carry.yaml: measured spread, effective
-  # independent bets, and no idiosyncratic event risk in a short-vol book.
-  # Each name costs chain requests against a 200/min budget.
+  # Index and sector ETFs only. See the rule in
+  # config/strategies/vol_carry.yaml: measured spread, effective independent
+  # bets, and no idiosyncratic event risk in a short-vol book.
+  #
+  # This is the SUPERSET the replay fetches, not what any one book trades.
+  # Each strategy filters it through its own `universe:` (engine.py:692), so:
+  #   vol_carry           all 14 - it wants the breadth, and it is the book
+  #                       whose failure mode is every position losing at once
+  #   intraday_momentum   8 - see config/strategies/intraday_momentum.yaml
+  #   event_premium       SPY, QQQ
+  #
+  # Widened from 8 on 30 Aug. `vol_carry.yaml` had declared these 14 since
+  # 28 Aug, but a MULTI-strategy run never read it: cli.py `_strategy_universe`
+  # returns [] unless exactly one strategy is picked, so the run fell back to
+  # this list and the carry book silently traded 8 of its 14. The extra six
+  # were never fetched and nothing in the output said so. Keep this list a
+  # superset of every strategy's own universe, or the same thing happens again.
+  #
+  # Each name costs chain requests against a 200/min budget - 14 names is a
+  # materially longer first (uncached) run.
   symbols: [
-    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "TLT", "GLD",
+    "SPY", "QQQ", "IWM", "DIA",      # broad equity
+    "XLF", "XLE",                    # sectors - XLE is the only NEGATIVE correlation
+    "TLT", "GLD",                    # decorrelated: rates, gold
+    "XLV", "XLU",                    # defensive sectors - the two least correlated
+    "EEM", "EFA", "FXI",             # non-US equity - a different macro driver
+    "SLV",                           # metals - a second, distinct vol to GLD
   ]
   min_underlying_price: 20.0
   max_underlying_price: 1500.0
@@ -348,21 +369,6 @@ strategies:
     weight: 0.5
     book: opportunistic
     params_file: "config/strategies/event_premium.yaml"
-
-  # --- opposite-regime strategy: trend present, IV cheap --------------------
-  # Shares the trend measurement with vol_carry, which is what keeps the two
-  # mutually exclusive. A test asserts they never co-fire.
-  - name: momentum_debit_spread
-    enabled: false
-    weight: 1.0
-    book: intraday
-    params_file: "config/strategies/momentum_debit_spread.yaml"
-
-  - name: earnings_calendar
-    enabled: false
-    weight: 0.5
-    book: intraday
-    params_file: "config/strategies/earnings_calendar.yaml"
 
 # -----------------------------------------------------------------------------
 # The agent layer. Specialist proposers run in parallel, a critic scores them,

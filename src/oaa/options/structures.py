@@ -340,16 +340,20 @@ class StructureBuilder:
         short_put = self.view.by_delta(exp, Right.PUT, short_put_delta)
         short_call = self.view.by_delta(exp, Right.CALL, short_call_delta)
         long_put = self.view.strike_offset(
-            exp, Right.PUT, short_put.strike, -width, must_clear=True
+            exp, Right.PUT, short_put.strike, -width,
+            must_clear=True, allow_unfiltered=True,
         )
         long_call = self.view.strike_offset(
-            exp, Right.CALL, short_call.strike, width, must_clear=True
+            exp, Right.CALL, short_call.strike, width,
+            must_clear=True, allow_unfiltered=True,
         )
 
         if long_put.strike >= short_put.strike or long_call.strike <= short_call.strike:
             raise StrategyError(
-                f"{self.view.symbol}: no listed strike sits outside the short "
-                f"strikes for a {width:.2f}-wide wing (spot {self.view.spot:.2f})"
+                f"{self.view.symbol}: nothing is listed beyond the short "
+                f"strikes to buy as a wing - not a width problem, the ladder "
+                f"ends here (wanted {width:.2f} wide, spot "
+                f"{self.view.spot:.2f})"
             )
         return build_iron_condor(
             symbol=self.view.symbol,
@@ -361,6 +365,91 @@ class StructureBuilder:
             quantity=quantity,
             thesis=thesis,
         )
+
+    def iron_condor_outside_move(
+        self,
+        *,
+        dte_range: tuple[int, int],
+        move_dollars: float,
+        put_multiple: float,
+        call_multiple: float,
+        wing_pct: float,
+        quantity: int = 1,
+        thesis: str = "",
+        expiry: dt.date | None = None,
+    ) -> TradeIdea:
+        """A condor whose SHORTS are placed by the event's own implied move.
+
+        `iron_condor_by_delta` picks strikes by delta, which is the right tool
+        for a 30-45 day carry structure on a stable surface. It is the wrong
+        one across an earnings print: the front-weekly surface is deformed by
+        the event, so a 16-delta strike can sit anywhere from well outside the
+        priced move to well inside it depending on how the market has skewed
+        the wings. On a structure whose entire thesis is "the realised move
+        will be smaller than the priced one", where the shorts sit RELATIVE TO
+        THAT PRICED MOVE is the thesis, and it must not be left to a delta
+        proxy to decide.
+
+        So the shorts go at `spot +/- multiple x move_dollars` and the delta
+        falls out. The multiples are asymmetric by direction, and a caller
+        tilting for a view should only ever push the threatened side FURTHER
+        out - pulling the other side in would collect more premium by
+        surrendering the one property the structure is built on.
+        """
+        exp = expiry or self.view.expiry_in_range(dte_range)
+        spot = abs(self.view.spot)
+        if move_dollars <= 0:
+            raise StrategyError(
+                f"{self.view.symbol}: no implied move to place shorts against"
+            )
+        short_put = self.view.by_strike(
+            exp, Right.PUT, spot - put_multiple * move_dollars
+        )
+        short_call = self.view.by_strike(
+            exp, Right.CALL, spot + call_multiple * move_dollars
+        )
+
+        width = max(spot * wing_pct, 0.01)
+        rung = _ladder_step(self.view, exp)
+        if rung > 0:
+            width = max(width, rung)
+        long_put = self.view.strike_offset(
+            exp, Right.PUT, short_put.strike, -width,
+            must_clear=True, allow_unfiltered=True,
+        )
+        long_call = self.view.strike_offset(
+            exp, Right.CALL, short_call.strike, width,
+            must_clear=True, allow_unfiltered=True,
+        )
+        if long_put.strike >= short_put.strike or long_call.strike <= short_call.strike:
+            raise StrategyError(
+                f"{self.view.symbol}: no listed strike sits outside the short "
+                f"strikes for a {width:.2f}-wide wing (spot {spot:.2f})"
+            )
+        if short_put.strike >= spot or short_call.strike <= spot:
+            raise StrategyError(
+                f"{self.view.symbol}: the listed ladder put a short strike on the "
+                f"wrong side of spot ({short_put.strike}/{short_call.strike} vs "
+                f"{spot:.2f}) - the grid is too coarse for a {move_dollars:.2f} move"
+            )
+
+        idea = build_iron_condor(
+            symbol=self.view.symbol,
+            strategy=self.strategy,
+            long_put=long_put,
+            short_put=short_put,
+            short_call=short_call,
+            long_call=long_call,
+            quantity=quantity,
+            thesis=thesis,
+        )
+        # What the LISTED strikes actually gave us, not what was asked for.
+        # Strike-grid snapping can pull a short back inside the priced move,
+        # and the caller has to be able to see that it did.
+        idea.meta["implied_move"] = round(move_dollars, 4)
+        idea.meta["put_clearance"] = round((spot - short_put.strike) / move_dollars, 4)
+        idea.meta["call_clearance"] = round((short_call.strike - spot) / move_dollars, 4)
+        return idea
 
     def calendar_atm(
         self,
