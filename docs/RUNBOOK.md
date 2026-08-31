@@ -82,6 +82,60 @@ priced and declined, the gate funnel, the fills, the day's P&L, and a
 bullet-point critique from Featherless. `oaa daily-report --date YYYY-MM-DD`
 regenerates any past session from the journal - see `docs/DAILY-REPORT.md`.
 
+## The day, in ET
+
+The live cycle grid, as `config/default.yaml` actually schedules it. The
+operating half of this runbook — three terminal tabs, what the console shows,
+what a restart replays — lives in the notebook note *Live runbook — competition
+week*.
+
+| time | what |
+|---|---|
+| 04:00-16:00 hourly | `events_watch` - the earnings sentiment read, 13 cycles |
+| 09:15 | `discover` |
+| 09:45 | `events_flatten` - close what reported overnight, into the IV crush |
+| 10:00 | `carry_scan` |
+| 10:00-14:45 every 15 min | `intraday_scan`, skipping 11:30-13:30 |
+| 11:30-15:10 every 15 min | `manage_positions` |
+| 15:15 | `intraday_cutoff` - hard, transient books flat |
+| 15:45 | `carry_verify` - the sign-off |
+| 15:50 | `events_arm` - the direction call and the order |
+| 16:10 | `eod_report` &nbsp; 16:20 `daily_report` |
+
+The live agent fired four intraday cycles a day until 30 Aug while the backtest
+scanned twelve; those now agree.
+
+**Mind what a restart replays.** `_fired` is in-process memory, so on start every
+cycle whose time has already passed today fires again. That is deliberate - a
+crash at 15:10 must not skip the 15:15 cutoff - and it is mostly harmless: the
+watch dedupes to zero model calls, `intraday_cutoff` and `events_flatten` are
+idempotent, and a stale `events_arm` is refused by `_arm_is_too_late`. What is
+not free is `carry_scan` and `intraday_scan`, which can open a position on a
+restart. **Prefer to restart outside 09:30-16:00 ET**, and check `make status`
+afterwards if you cannot.
+
+## Do not run two agents on one account
+
+There is no pidfile, lockfile or singleton guard in `src/`. A second
+`oaa run --profile judged` - a forgotten tab, or pm2 alongside the terminal - is
+two runners appending to the same journal and racing the same
+`position_ledger.json`, and the ledger has no writer arbitration. An
+unattributed leg is swept as transient at 15:15, which may be one leg of a
+multi-session condor.
+
+**This has already happened.** On the evening of 30 Aug two judged runners were
+live at once. Nothing surfaced it: `oaa status` renders both as truncated
+interpreter paths with no profile and no account, and the banner said UP either
+way. It cost nothing only because the book was flat - the exposure was the next
+day's `events_arm`, where two runners would have made two direction calls on the
+same names and sent two orders against a nightly risk budget each believed it
+alone was spending. Identifying it needed `ps -ww -o pid,command -p <pid>`; plain
+`ps` truncates one character short of the `--profile` that decides whether a
+process is harmless.
+
+Use `--profile dev` for anything experimental - a different account and a
+different run directory.
+
 ## Going live on the judged account
 
 The gate is deliberate and has three parts:
@@ -119,7 +173,7 @@ past `max_drawdown_halt_pct` it stops entirely. Both are recorded in the journal
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `chain` returns nothing | liquidity filter too tight for the feed | loosen `options.min_open_interest` / `max_bid_ask_spread_pct` |
+| `chain` returns nothing, or "no contracts survived the liquidity filter" | **usually not liquidity.** An empty `ChainView` means the requested DTE window contains no listed contract - see the 31 Aug finding in `docs/STRATEGY-INTRADAY.md`. The filter predicates never even run | `oaa chain --why` names the line of config that emptied it. Loosen `options.min_open_interest` / `max_bid_ask_spread_pct` only once you have ruled the window out |
 | Every idea rejected with `rule=sizing` | `max_loss` exceeds the per-trade cap | widen the cap, or narrow the wings so the structure is cheaper |
 | `rule=time_window` | inside the open/close no-trade window | expected; check `no_trade_open_minutes` |
 | 403 on a multi-leg order | options level below 3 | `oaa doctor`, raise the level |
