@@ -1,0 +1,52 @@
+{
+  "id": "20260827-232433__IWM-QQQ-SPY",
+  "label": "",
+  "created_at": "2026-08-27T22:24:33.708616+00:00",
+  "symbols": [
+    "IWM",
+    "QQQ",
+    "SPY"
+  ],
+  "start": "2026-06-01",
+  "end": "2026-08-22",
+  "source": "alpaca",
+  "strategies": [
+    "vol_carry",
+    "intraday_momentum",
+    "event_premium"
+  ],
+  "metrics": {
+    "start_equity": 100000.0,
+    "end_equity": 102058.96,
+    "net_pnl": 2058.96,
+    "total_return": 0.02059,
+    "cagr": 0.09619,
+    "max_drawdown": -0.02159,
+    "sharpe": 1.4605,
+    "sortino": 0.461,
+    "volatility_annual": 0.06203,
+    "sessions": 696,
+    "trades": 26,
+    "closed_trades": 26,
+    "open_at_end": 0,
+    "win_rate": 0.7308,
+    "avg_win": 264.0,
+    "avg_loss": -422.44,
+    "best_trade": 794.48,
+    "worst_trade": -919.07,
+    "profit_factor": 1.696,
+    "expectancy": 79.19,
+    "avg_hold_days": 5.81,
+    "gross_pnl": 2089.75,
+    "fees_paid": 8.84,
+    "margin_interest": 21.95,
+    "spread_cost": 850.25,
+    "total_modelled_cost": 881.04,
+    "ideas_generated": 480,
+    "ideas_approved": 26,
+    "approval_rate": 0.054,
+    "rejections": 4846,
+    "mixed_surface_marks": 0,
+    "risk_bound_clamps": 3
+  }
+}

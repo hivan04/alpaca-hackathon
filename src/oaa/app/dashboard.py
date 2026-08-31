@@ -81,6 +81,14 @@ PAGE_POSITIONS = "Positions"
 PAGE_EVENTS = "Events"
 PAGE_CONTROL = "Control"
 
+#: The public build has no Live Trading tab. That page is the operator's
+#: instrument panel - the live option chain, the skew and term charts, the
+#: decision justification for a cycle that has just run - and every one of
+#: those reads the chain endpoint on our key. What a reader wants from "is it
+#: actually trading" is the broker's own answer, which is the Positions page,
+#: so that page carries the name there.
+PAGE_PUBLIC_POSITIONS = "Live Trading Positions"
+
 #: The dashboard is a viewer; the config it reads is the one the agent runs on.
 #: `oaa dashboard --config ...` is the way to point it somewhere else.
 DEFAULT_CONFIG = "config/default.yaml"
@@ -106,8 +114,17 @@ def _settings(profile: str, config_path: str | None):
 
 
 def _announce(settings: Any, page: str) -> ident.Identity:
-    """Resolve the identity, and print it to the terminal when it changes."""
+    """Resolve the identity, and print it to the terminal when it changes.
+
+    Not on the public build. The banner carries the masked key and the account
+    id, and "the terminal" there is the deploy host's log stream - which on a
+    hosted page is a good deal more reachable than a terminal on a laptop. The
+    banner exists so the operator cannot trade the wrong account by accident;
+    a page with nothing to submit has no such mistake to prevent.
+    """
     who = ident.resolve(settings, page)
+    if mode.is_public():
+        return who
     key = (page, who.profile, who.key_masked)
     if st.session_state.get("_announced") != key:
         ident.print_banner(who)
@@ -1491,10 +1508,14 @@ def main() -> None:
         return
     _check_stale(settings)
 
-    # Both accounts are loaded here, not just the selected one: the Control tab
-    # shows and switches BOTH, and seeing them side by side is the whole point.
-    # A profile whose credentials are missing loads as None and renders as such
-    # rather than taking the page down.
+    # The operator build loads BOTH accounts, not just the selected one: the
+    # Control tab shows and switches both, and seeing them side by side is the
+    # whole point. The public build loads only the judged account - the dev
+    # account is not published, so its settings are never constructed and its
+    # credentials are never resolved.
+    #
+    # A profile whose credentials are missing loads as None and renders as
+    # such rather than taking the page down.
     settings_for = {}
     wanted = (mode.PUBLIC_PROFILE,) if mode.is_public() else ("dev", "judged")
     for candidate in wanted:
@@ -1511,26 +1532,33 @@ def main() -> None:
     with head_col:
         _render_masthead(settings)
 
-    # Events sits between Positions and Control deliberately: it is a book you
-    # READ before a print and act on from the terminal, not one you switch on.
-    names = [PAGE_BACKTEST, PAGE_LIVE, PAGE_POSITIONS, PAGE_EVENTS]
-    if mode.is_operator():
-        names.append(PAGE_CONTROL)
-    tabs = st.tabs(names)
-    with tabs[0]:
-        render_backtest(settings)
-    with tabs[1]:
-        render_live(settings)
-    with tabs[2]:
-        render_positions(settings_for)
-    with tabs[3]:
-        render_events(settings)
-    if mode.is_operator():
-        # The Control tab is not merely hidden on the public build - it is
-        # never constructed, so there is no rendered widget for a crafted
-        # request to reach. It flips books on and off on a live account.
-        with tabs[4]:
-            render_control(settings_for)
+    # Name and renderer together, so a tab cannot be built for one build and
+    # wired to the other's index. Operator order puts Events between Positions
+    # and Control deliberately: it is a book you READ before a print and act on
+    # from the terminal, not one you switch on.
+    #
+    # Nothing here is merely hidden. A Streamlit tab absent from this list is
+    # never constructed, so no rendered widget exists for a crafted request to
+    # reach - which is what makes the Control tab's absence a guarantee rather
+    # than a style rule.
+    if mode.is_public():
+        pages = [
+            (PAGE_BACKTEST, lambda: render_backtest(settings)),
+            (PAGE_PUBLIC_POSITIONS, lambda: render_positions(settings_for)),
+            (PAGE_EVENTS, lambda: render_events(settings)),
+        ]
+    else:
+        pages = [
+            (PAGE_BACKTEST, lambda: render_backtest(settings)),
+            (PAGE_LIVE, lambda: render_live(settings)),
+            (PAGE_POSITIONS, lambda: render_positions(settings_for)),
+            (PAGE_EVENTS, lambda: render_events(settings)),
+            (PAGE_CONTROL, lambda: render_control(settings_for)),
+        ]
+    for tab, (_, render) in zip(st.tabs([name for name, _ in pages]), pages,
+                                strict=True):
+        with tab:
+            render()
 
 
 if __name__ == "__main__":

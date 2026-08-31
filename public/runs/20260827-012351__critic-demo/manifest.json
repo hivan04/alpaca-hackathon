@@ -1,0 +1,48 @@
+{
+  "id": "20260827-012351__critic-demo",
+  "label": "critic-demo",
+  "created_at": "2026-08-27T01:23:51.991116+00:00",
+  "symbols": [
+    "QQQ",
+    "SPY"
+  ],
+  "start": "2026-06-01",
+  "end": "2026-08-20",
+  "source": "synthetic",
+  "strategies": [
+    "vol_carry",
+    "event_premium"
+  ],
+  "metrics": {
+    "start_equity": 100000.0,
+    "end_equity": 100265.99,
+    "net_pnl": 265.99,
+    "total_return": 0.00266,
+    "cagr": 0.01219,
+    "max_drawdown": -7e-05,
+    "sharpe": 3.8155,
+    "sortino": null,
+    "volatility_annual": 0.00303,
+    "sessions": 59,
+    "trades": 4,
+    "closed_trades": 4,
+    "open_at_end": 0,
+    "win_rate": 1.0,
+    "avg_win": 66.5,
+    "avg_loss": 0.0,
+    "best_trade": 79.26,
+    "worst_trade": 59.52,
+    "profit_factor": null,
+    "expectancy": 66.5,
+    "avg_hold_days": 3.25,
+    "gross_pnl": 269.18,
+    "fees_paid": 1.36,
+    "margin_interest": 1.84,
+    "spread_cost": 54.0,
+    "total_modelled_cost": 57.2,
+    "ideas_generated": 5,
+    "ideas_approved": 4,
+    "approval_rate": 0.8,
+    "rejections": 232
+  }
+}

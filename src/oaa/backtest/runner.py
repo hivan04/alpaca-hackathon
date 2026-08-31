@@ -10,6 +10,7 @@ which also means a judge can be handed the artefact rather than a screenshot.
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import hashlib
 import json
 import platform
@@ -464,7 +465,26 @@ def list_runs(settings: Settings) -> list[dict[str, Any]]:
 
 
 def load_run(path: str | Path) -> dict[str, Any]:
-    return json.loads((Path(path) / "result.json").read_text())
+    """Read a saved run, gzipped or not.
+
+    `result.json` is where a local run writes itself. `result.json.gz` is what
+    `scripts/publish_runs.py` writes into `public/runs/`, because the raw file
+    runs to 50MB on a wide universe and 333MB across the whole store - far too
+    much for a repo a deploy host has to clone. It compresses about 28x, which
+    is the difference between publishing every backtest and publishing three.
+
+    Plain wins if both are present: a locally re-run result should never be
+    shadowed by an older published copy.
+    """
+    directory = Path(path)
+    plain = directory / "result.json"
+    if plain.exists():
+        return json.loads(plain.read_text())
+    packed = directory / "result.json.gz"
+    if packed.exists():
+        with gzip.open(packed, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    raise FileNotFoundError(f"no result.json or result.json.gz in {directory}")
 
 
 def _real_chain(

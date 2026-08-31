@@ -1152,6 +1152,10 @@ class BacktestEngine:
         described = source.describe() if hasattr(source, "describe") else {}
         return {
             "profile": self.cfg.profile,
+            # Which strategy variant produced this run. None = baseline. Stamped
+            # so two runs can never be compared without it being visible which
+            # strategy each one was - the same reason `profile` is here.
+            "variant": self.cfg.variant,
             "initial_cash": self.cfg.backtest.initial_cash,
             "slippage_spread_fraction": self.fraction,
             "commission_per_contract": self.commission,

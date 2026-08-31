@@ -1,0 +1,320 @@
+--- a/src/oaa/config/schema.py	2026-08-30 03:54:09.000000000 +0000
++++ b/src/oaa/config/schema.py	2026-08-30 23:31:46.899243689 +0000
+@@ -308,6 +308,10 @@
+     name: str
+     enabled: bool = True
+     weight: float = 1.0
++    #: Deep-merged OVER the contents of `params_file`. This exists so a variant
++    #: (config/variants/<name>.yaml) can change three settings without cloning a
++    #: 300-line params file that would then drift from the original.
++    params_overlay: dict[str, Any] = Field(default_factory=dict)
+     #: Which capital book this strategy trades from. Gated by the firewall.
+     #: "weekend" is the odd one out and deliberately so: it runs in its own
+     #: process (`oaa weekend run`) inside a window that cannot overlap an
+@@ -726,6 +730,10 @@
+ class Config(Base):
+     meta: MetaConfig = Field(default_factory=MetaConfig)
+     profile: Literal["dev", "judged"] = "dev"
++    #: Name of the config/variants/<name>.yaml overlay applied to this run, or
++    #: None for the baseline strategy. Stamped into backtest provenance so two
++    #: runs can never be compared without it being visible which is which.
++    variant: str | None = None
+     broker: BrokerConfig = Field(default_factory=BrokerConfig)
+     data: DataConfig = Field(default_factory=DataConfig)
+     universe: UniverseConfig = Field(default_factory=UniverseConfig)
+--- a/src/oaa/config/loader.py	2026-08-29 22:33:11.000000000 +0000
++++ b/src/oaa/config/loader.py	2026-08-30 23:31:46.898307667 +0000
+@@ -88,6 +88,32 @@
+     return overlay
+ 
+ 
++def _apply_strategy_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
++    """Merge `strategy_overrides: {<name>: {...}}` into the strategies list.
++
++    A variant patches strategies BY NAME rather than restating the list,
++    because `_deep_merge` replaces a list wholesale: the first draft of
++    config/variants/v2.yaml restated three strategies and silently dropped
++    `earnings_event_directional`, which the baseline had. Naming a strategy
++    that is not in the list is an error rather than a no-op, for the same
++    reason - a typo should not look like a strategy that just does nothing.
++    """
++    overrides = cfg.pop("strategy_overrides", None) or {}
++    if not overrides:
++        return cfg
++    refs = cfg.get("strategies") or []
++    by_name = {ref.get("name"): ref for ref in refs}
++    unknown = sorted(set(overrides) - set(by_name))
++    if unknown:
++        raise ValueError(
++            f"strategy_overrides names no such strategy: {', '.join(unknown)}. "
++            f"Configured: {', '.join(sorted(n for n in by_name if n))}"
++        )
++    for name, patch in overrides.items():
++        by_name[name].update(_deep_merge(by_name[name], patch or {}))
++    return cfg
++
++
+ def _load_strategy_params(cfg: dict[str, Any], root: Path) -> dict[str, Any]:
+     """Inline each strategy's params_file so downstream code sees one object."""
+     for ref in cfg.get("strategies") or []:
+@@ -101,6 +127,10 @@
+             )
+         file_params = _read_yaml(path)
+         ref["params"] = _deep_merge(file_params, ref.get("params") or {})
++        # A variant's small diff, applied last so it beats both.
++        overlay = ref.get("params_overlay") or {}
++        if overlay:
++            ref["params"] = _deep_merge(ref["params"], overlay)
+ 
+     return cfg
+ 
+@@ -109,6 +139,7 @@
+     config_path: str | Path | None = None,
+     profile: str | None = None,
+     overrides: dict[str, Any] | None = None,
++    variant: str | None = None,
+ ) -> Config:
+     """Build the validated Config object."""
+     root = project_root()
+@@ -132,6 +163,25 @@
+     merged = _deep_merge(merged, _read_yaml(profile_path))
+     merged["profile"] = active_profile
+ 
++    # A VARIANT is a named strategy alternative - a different set of gates and
++    # exits over the same code - applied after the profile so it is orthogonal
++    # to which account is being traded, and before local.yaml so a machine
++    # override still wins. `None` is the baseline strategy and touches nothing.
++    active_variant = variant or os.getenv("OAA_VARIANT") or merged.get("variant")
++    if active_variant:
++        variant_path = base_path.parent / "variants" / f"{active_variant}.yaml"
++        if not variant_path.exists():
++            available = sorted(
++                q.stem for q in (base_path.parent / "variants").glob("*.yaml")
++            )
++            raise FileNotFoundError(
++                f"unknown variant '{active_variant}': {variant_path} does not exist. "
++                f"Available: {', '.join(available) or 'none'}"
++            )
++        merged = _deep_merge(merged, _read_yaml(variant_path))
++        merged = _apply_strategy_overrides(merged)
++    merged["variant"] = active_variant or None
++
+     merged = _deep_merge(merged, _read_yaml(base_path.parent / "local.yaml"))
+     merged = _deep_merge(merged, _env_overlay(set(Config.model_fields)))
+     if overrides:
+@@ -143,6 +193,9 @@
+     # exists to prevent, and one that leaves no trace in the output.
+     if profile:
+         merged["profile"] = profile
++    # Same reasoning for the variant: an explicit --variant beats OAA_VARIANT.
++    if variant:
++        merged["variant"] = variant
+ 
+     merged = _load_strategy_params(merged, root)
+     return Config.model_validate(merged)
+@@ -240,6 +293,7 @@
+     config_path: str | Path | None = None,
+     profile: str | None = None,
+     overrides: dict[str, Any] | None = None,
++    variant: str | None = None,
+ ) -> Settings:
+-    cfg = load_config(config_path, profile, overrides)
++    cfg = load_config(config_path, profile, overrides, variant)
+     return Settings(config=cfg, credentials=resolve_credentials(cfg), root=project_root())
+--- a/src/oaa/cli.py	2026-08-30 03:54:09.000000000 +0000
++++ b/src/oaa/cli.py	2026-08-30 23:31:46.898810537 +0000
+@@ -65,11 +65,11 @@
+     return settings, broker, data
+ 
+ 
+-def _settings_only(profile: str | None, config: str | None):
++def _settings_only(profile: str | None, config: str | None, variant: str | None = None):
+     from oaa.config.loader import load_settings
+     from oaa.core.logging import setup_logging
+ 
+-    settings = load_settings(config_path=config, profile=profile)
++    settings = load_settings(config_path=config, profile=profile, variant=variant)
+     setup_logging(settings.config.telemetry.log_level, settings.config.telemetry.log_format)
+     return settings
+ 
+@@ -1028,6 +1028,11 @@
+ def backtest(
+     profile: str | None = _PROFILE,
+     config: str | None = _CONFIG,
++    variant: str | None = typer.Option(
++        None, "--variant", "-V",
++        help="Named strategy variant from config/variants/<name>.yaml. Omit for "
++             "the baseline strategy. e.g. --variant v2",
++    ),
+     symbols: str | None = typer.Option(None, "--symbols", "-s", help="Comma separated; defaults to the configured universe"),
+     start: str | None = typer.Option(None, help="YYYY-MM-DD"),
+     end: str | None = typer.Option(None, help="YYYY-MM-DD"),
+@@ -1087,8 +1092,16 @@
+     from oaa.app.identity import print_banner, resolve
+     from oaa.backtest.runner import BacktestRequest, run_backtest, save_run
+ 
+-    settings = _settings_only(profile, config)
++    settings = _settings_only(profile, config, variant)
+     print_banner(resolve(settings, "Backtest"))
++    if settings.config.variant:
++        console.print(
++            f"[bold cyan]  variant          {settings.config.variant}[/bold cyan]"
++            "   (config/variants/"
++            f"{settings.config.variant}.yaml over the baseline)"
++        )
++    else:
++        console.print("[dim]  variant          none (baseline strategy)[/dim]")
+     cfg = settings.config
+     if critic_model:
+         if cfg.backtest.critic.llm is None:
+--- a/src/oaa/strategies/vol_carry.py	2026-08-29 23:05:11.000000000 +0000
++++ b/src/oaa/strategies/vol_carry.py	2026-08-30 23:31:46.899644510 +0000
+@@ -137,6 +137,20 @@
+         idea.book = self.capital_book
+         idea.tags = ["short_vol", "defined_risk", "carry", "resident"]
+         idea.probability_of_profit = _pop(idea)
++        # Modelled PoP is understated in level (median 0.488 against a 0.550
++        # realised win rate) but it RANKS correctly: by tertile the realised win
++        # rate was 47.2% / 52.8% / 64.8%. It was computed on every idea and gated
++        # on by nothing. None = off, which is the baseline.
++        pop_floor = self.p("structures.min_probability_of_profit", None)
++        if (
++            pop_floor is not None
++            and idea.probability_of_profit is not None
++            and idea.probability_of_profit < float(pop_floor)
++        ):
++            raise StrategyError(
++                f"modelled PoP {idea.probability_of_profit:.1%} is below the "
++                f"{float(pop_floor):.1%} floor"
++            )
+         # The reward/risk the EXIT POLICY implies, not the one expiry implies.
+         # This book never holds to expiry: it takes `profit_target_pct` of max
+         # profit or stops at `loss_multiple_of_credit`. Judging it on the
+@@ -189,6 +203,20 @@
+                 "not rich enough to be worth the gamma",
+                 **metrics,
+             )
++        # ABSOLUTE IV ceiling. `iv_rank` is relative to the name's own history,
++        # so rank 90% on a 45-vol name and rank 90% on a 14-vol name both pass -
++        # but only one of them can actually move through a short strike. Measured
++        # over 2026-02-01..08-21, carry win rate by absolute IV tertile was
++        # 62.3% / 56.6% / 46.3% (low to high), monotonic, while iv_rank was the
++        # weakest predictor scanned. None = off, which is the baseline.
++        iv_max = self.p("premium_gate.iv_max", None)
++        if iv_max is not None and iv is not None and iv > float(iv_max):
++            return GateResult.veto(
++                "premium",
++                f"absolute IV {iv:.1%} is above the {float(iv_max):.1%} ceiling - "
++                "rich for this name, but the name moves too much to sell its wings",
++                **metrics,
++            )
+         min_spread = self.p("premium_gate.iv_rv_spread_min", 0.03)
+         if spread is None:
+             return GateResult.veto(
+@@ -445,6 +473,18 @@
+             touched = self._short_strike_touched(idea, market.spot)
+             if touched:
+                 mode = self.p("exits.defensive_mode", "close_tested_side")
++                # `hold` lets a defined-risk structure ride a touch. A short
++                # strike being tested is a normal event on a 14-delta condor, and
++                # closing on it realises the loss at maximum adverse excursion,
++                # before theta has done anything: measured over
++                # 2026-02-01..08-21, 69 of 160 carry trades exited this way at a
++                # 17% win rate for -$10,801, while every other exit reason
++                # averaged an 84% win rate. `loss_multiple_of_credit` remains the
++                # real stop, so downside is still bounded when this is off.
++                # Until 30 Aug `mode` was interpolated into the message and
++                # otherwise unread, so every value behaved as close_tested_side.
++                if str(mode) == "hold":
++                    return None
+                 return f"underlying touched the short {touched} strike - {mode}"
+ 
+         if ctx.macro_flagged(idea.symbol):
+--- a/src/oaa/backtest/engine.py	2026-08-30 03:54:09.000000000 +0000
++++ b/src/oaa/backtest/engine.py	2026-08-30 23:31:46.899450615 +0000
+@@ -1152,6 +1152,10 @@
+         described = source.describe() if hasattr(source, "describe") else {}
+         return {
+             "profile": self.cfg.profile,
++            # Which strategy variant produced this run. None = baseline. Stamped
++            # so two runs can never be compared without it being visible which
++            # strategy each one was - the same reason `profile` is here.
++            "variant": self.cfg.variant,
+             "initial_cash": self.cfg.backtest.initial_cash,
+             "slippage_spread_fraction": self.fraction,
+             "commission_per_contract": self.commission,
+--- a/tests/test_config.py	2026-08-29 22:36:27.000000000 +0000
++++ b/tests/test_config.py	2026-08-30 23:31:46.899069321 +0000
+@@ -185,3 +185,72 @@
+     src = inspect.getsource(load_strategies)
+     assert "import_errors" in src
+     assert "failed to" in src
++
++
++# --------------------------------------------------------------------------- #
++# strategy variants
++#
++# `--variant v2` loads config/variants/v2.yaml over the baseline so two
++# strategies can be backtested against each other on identical code. Omitting
++# it must leave the baseline byte-identical - that is the whole contract.
++# --------------------------------------------------------------------------- #
++def _carry(cfg):
++    return next(s for s in cfg.strategies if s.name == "vol_carry")
++
++
++def test_no_variant_is_the_untouched_baseline():
++    cfg = load_config(profile="judged")
++    assert cfg.variant is None
++    carry = _carry(cfg)
++    assert carry.params["premium_gate"].get("iv_max") is None
++    assert carry.params["structures"].get("min_probability_of_profit") is None
++    assert carry.params["exits"]["defensive_mode"] == "close_tested_side"
++    assert next(s for s in cfg.strategies if s.name == "intraday_momentum").enabled
++
++
++def test_v2_applies_its_three_carry_changes():
++    cfg = load_config(profile="judged", variant="v2")
++    assert cfg.variant == "v2"
++    carry = _carry(cfg)
++    assert carry.params["premium_gate"]["iv_max"] == 0.25
++    assert carry.params["structures"]["min_probability_of_profit"] == 0.50
++    assert carry.params["exits"]["defensive_mode"] == "hold"
++
++
++def test_v2_turns_the_intraday_book_off():
++    cfg = load_config(profile="judged", variant="v2")
++    intraday = next(s for s in cfg.strategies if s.name == "intraday_momentum")
++    assert not intraday.enabled
++
++
++def test_v2_inherits_every_setting_it_does_not_name():
++    """The overlay is a diff, not a replacement - a variant that silently reset
++    the other 40 knobs would make the comparison meaningless."""
++    base, v2 = load_config(profile="judged"), load_config(profile="judged", variant="v2")
++    b, v = _carry(base).params, _carry(v2).params
++    assert v["premium_gate"]["iv_rank_min"] == b["premium_gate"]["iv_rank_min"]
++    assert v["exits"]["profit_target_pct"] == b["exits"]["profit_target_pct"]
++    assert v["exits"]["loss_multiple_of_credit"] == b["exits"]["loss_multiple_of_credit"]
++    assert v["structures"]["min_credit_to_width"] == b["structures"]["min_credit_to_width"]
++
++
++def test_a_variant_keeps_strategies_it_does_not_mention():
++    """The first draft of v2.yaml restated the strategies list and silently
++    dropped earnings_event_directional. Patching by name is why it cannot."""
++    base = {s.name for s in load_config(profile="judged").strategies}
++    v2 = {s.name for s in load_config(profile="judged", variant="v2").strategies}
++    assert base == v2
++
++
++def test_an_unknown_variant_is_an_error_not_a_silent_baseline():
++    with pytest.raises(FileNotFoundError, match="unknown variant"):
++        load_config(profile="judged", variant="does-not-exist")
++
++
++def test_a_misspelled_strategy_override_is_an_error():
++    from oaa.config.loader import _apply_strategy_overrides
++
++    with pytest.raises(ValueError, match="no such strategy"):
++        _apply_strategy_overrides(
++            {"strategies": [{"name": "vol_carry"}], "strategy_overrides": {"vol_cary": {}}}
++        )

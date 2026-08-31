@@ -280,23 +280,28 @@ the firewall exists to prevent. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Two dashboards, one codebase
 
-`oaa dashboard` is the **operator** page: five tabs, including Control, which
-flips books on and off on a live account.
+`oaa dashboard` is the **operator** page: five tabs — Backtesting, Live
+Trading, Positions, Events, Control.
 
 `streamlit run public_dashboard.py` is the **public** page — the same `main()`,
-with everything that writes taken out:
+with three tabs and nothing that writes:
+
+    Backtesting  ·  Live Trading Positions  ·  Events
 
 | removed | why |
 |---|---|
 | Control tab | flips books on and off on a real account. Not hidden — never constructed. |
+| Live Trading tab | the operator's instrument panel; every panel on it reads the live chain on our key |
 | Run a new backtest | spawns a replay on the host and burns data-API budget |
 | Price the live chain | one network round trip per confirmed event, per click |
 | Refresh from Alpaca | same, per click. The public page auto-loads once per session instead. |
 | dev/judged switch | the public build is the judged account and nothing else |
-| identity banner | masked key, key source and account id are operator-only |
+| the dev account itself | `PUBLIC_ACCOUNTS` is a shorter list, not a filtered one — no code path can put it back |
+| identity banner, on the page **and** on stdout | masked key and account id. stdout on a deploy host is a log stream, not a private terminal. |
 
-What it keeps is the point of publishing it: saved backtest history and the
-judged account's live positions.
+Positions carries the name **Live Trading Positions** there, because with the
+Live Trading tab gone it is the page that answers "is this thing actually
+trading" — and it answers it with the broker's own record rather than ours.
 
 ```bash
 make public-dashboard          # preview it locally on :8502
@@ -306,21 +311,30 @@ The selector is `OAA_PUBLIC`, set by `public_dashboard.py` before it imports
 anything and read at call time by `oaa.app.mode` — never cached, because a
 cached answer resolved at import is how a Run button survives onto a public
 page. `make dashboard` never sets it, so the local page cannot lose its Control
-tab by accident. `tests/test_public_mode.py` pins every one of these.
+tab by accident. `tests/test_public_mode.py` pins every row of that table.
 
-**Publishing history.** `runs/` is gitignored and ~240MB, so a deployed host
-has none of it. Copy the runs you want the page to argue from into
-`public/runs/`, which is committed:
+### Publishing the backtest history
+
+`runs/` is gitignored, and its `result.json` files total **333MB** — a single
+wide-universe run is 50MB. No deploy host should clone that. They compress
+about **28x**, so the entire store fits in ~12MB:
 
 ```bash
-python scripts/publish_runs.py --list
-python scripts/publish_runs.py 20260830-050853__DIA
+python scripts/publish_runs.py --all      # every run, gzipped, into public/runs/
+python scripts/publish_runs.py --list     # or choose them by hand
 ```
 
-**Deploying.** Point the host at `public_dashboard.py`. Streamlit Community
-Cloud exposes its secrets as environment variables, so the judged credentials
-go in there under the same names `.env` uses locally. Nothing else is needed —
-`requirements.txt` is already at the repo root.
+`public/runs/` **is** committed. `load_run` reads `result.json` or
+`result.json.gz`, preferring the plain file so a local re-run is never
+shadowed by an older published copy. Re-publishing an unchanged run writes a
+byte-identical file (`mtime=0` in the gzip header), so git sees no churn.
+
+### Deploying
+
+Point the host at `public_dashboard.py`. Streamlit Community Cloud exposes its
+secrets as environment variables, so the judged credentials go in there under
+the same names `.env` uses locally. Nothing else is needed — `requirements.txt`
+is already at the repo root.
 
 ## Development
 

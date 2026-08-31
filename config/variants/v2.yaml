@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# VARIANT v2 - "selective carry"
+#
+# A named alternative to the baseline strategy, applied with:
+#     oaa backtest --variant v2 ...
+# Omit --variant and NOTHING in this file is read: the baseline is untouched.
+#
+# Every change here is one finding from the 2026-02-01..08-21 replay (409
+# trades, credit/width gate and the sizing fix in place). The evidence for each
+# is in claude/exit-ab-and-the-credit-width-gate.md and the win-rate scan.
+#
+# HEALTH WARNING. These thresholds were FITTED on Feb-Aug 2026. Some of them
+# were found by scanning ~25 metrics, where a single split at z ~ 2 is not
+# significant once you correct for that many comparisons. Two of them (the IV
+# ceiling and the PoP floor) are monotonic across three buckets, which is
+# better evidence than one split, but none of it is out-of-sample yet. Fit on
+# Feb-May, confirm on Jun-Aug before trusting any of it live.
+# ---------------------------------------------------------------------------
+variant: v2
+
+# Strategies are patched BY NAME, not restated: `_deep_merge` replaces a list
+# wholesale, so restating it here would silently drop any strategy the baseline
+# adds later (the first draft of this file did exactly that to
+# `earnings_event_directional`). Everything not named below is inherited.
+strategy_overrides:
+
+  # --- CARRY BOOK - kept, and made more selective ---------------------------
+  vol_carry:
+    params_overlay:
+      premium_gate:
+        # 1. ABSOLUTE IV CEILING. The baseline gates on iv_rank, which is
+        #    relative to each name's own history. Realised carry win rate by
+        #    absolute IV tertile: 62.3% (0.129-0.176) / 56.6% (0.179-0.250) /
+        #    46.3% (0.254-0.807). A 0.25 ceiling keeps 105 of 160 trades at
+        #    60.0% win and +$4,406, and cuts 55 at 45.5% win and +$864.
+        iv_max: 0.25
+      structures:
+        # 2. PoP FLOOR. Modelled PoP ranks correctly - realised win rate by
+        #    tertile 47.2% / 52.8% / 64.8% - and nothing gated on it. 0.50 is
+        #    about the median, so this keeps the upper half.
+        #    NOTE the level is miscalibrated low (median 0.488 modelled against
+        #    0.550 realised; a true 14-delta condor should be nearer 0.72), so
+        #    this number is NOT transferable if the PoP calculation is fixed.
+        min_probability_of_profit: 0.50
+      exits:
+        # 3. STOP CLOSING ON A TOUCH. 69 of 160 carry trades exited on a short
+        #    strike being touched, at a 17% win rate for -$10,801; every other
+        #    exit reason averaged 84%. `loss_multiple_of_credit: 1.5` is still
+        #    in force, so the structure is still stopped out on real damage -
+        #    this only stops treating a normal, expected touch as an exit.
+        defensive_mode: hold
+
+  # --- INTRADAY BOOK - OFF ---------------------------------------------------
+  # 249 trades, -$2,777, 41.0% win against a ~47% breakeven, per-trade
+  # t = -2.09 over 6.5 months. No exit change tested moved it significantly,
+  # and bucketing by confirmation votes is non-monotonic (3 votes 38.8%,
+  # 4 votes 45.6%, 5 votes 35.4%) - the signal does not discriminate.
+  # Removing it takes blended win rate 46.5% -> 55.0% and weekly sd -20%.
+  #
+  # Disabled rather than deleted so the baseline and v2 run on identical code.
+  # No params_overlay: a key nothing reads is a failure this repo has been
+  # bitten by before. For the record, IF it is re-enabled, two trims measured
+  # better and neither made it positive:
+  #   spread_gate.max_relative_spread 0.04 -> 0.025  win 41.0% -> 46.8%,
+  #                                                  loss cut by $1,694
+  #   drop TLT and XLF from `universe`   21.1% and 15.0% win, -$1,433/58 trades
+  intraday_momentum:
+    enabled: false
+    weight: 0.0
+
+  # event_premium and earnings_event_directional are inherited unchanged.

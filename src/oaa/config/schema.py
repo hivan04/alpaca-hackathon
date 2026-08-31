@@ -308,6 +308,10 @@ class StrategyRef(Base):
     name: str
     enabled: bool = True
     weight: float = 1.0
+    #: Deep-merged OVER the contents of `params_file`. This exists so a variant
+    #: (config/variants/<name>.yaml) can change three settings without cloning a
+    #: 300-line params file that would then drift from the original.
+    params_overlay: dict[str, Any] = Field(default_factory=dict)
     #: Which capital book this strategy trades from. Gated by the firewall.
     #: "weekend" is the odd one out and deliberately so: it runs in its own
     #: process (`oaa weekend run`) inside a window that cannot overlap an
@@ -732,6 +736,10 @@ class PartnersConfig(Base):
 class Config(Base):
     meta: MetaConfig = Field(default_factory=MetaConfig)
     profile: Literal["dev", "judged"] = "dev"
+    #: Name of the config/variants/<name>.yaml overlay applied to this run, or
+    #: None for the baseline strategy. Stamped into backtest provenance so two
+    #: runs can never be compared without it being visible which is which.
+    variant: str | None = None
     broker: BrokerConfig = Field(default_factory=BrokerConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     universe: UniverseConfig = Field(default_factory=UniverseConfig)

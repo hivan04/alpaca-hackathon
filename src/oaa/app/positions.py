@@ -27,6 +27,16 @@ from oaa.app import mode
 
 ACCOUNTS = [("dev", "Backtesting account"), ("judged", "Competition account")]
 
+#: The public page shows the judged account and says nothing about any other.
+#: Not filtered at render time - the list itself is shorter, so there is no
+#: branch anywhere below that could reintroduce a dev row, and no "profile
+#: could not be loaded" warning naming an account that was never asked for.
+PUBLIC_ACCOUNTS = [("judged", "Competition account")]
+
+
+def _accounts() -> list[tuple[str, str]]:
+    return PUBLIC_ACCOUNTS if mode.is_public() else ACCOUNTS
+
 
 def _fetch(settings: Any) -> dict[str, Any]:
     out: dict[str, Any] = {"error": None, "fetched_at": dt.datetime.now()}
@@ -84,17 +94,19 @@ def _account_row(snapshot: Any) -> None:
 def render_positions(settings_for: dict[str, Any]) -> None:
     st.subheader("Positions and trades")
     st.caption(
-        "Straight from Alpaca - open positions and the full order history for "
-        "both accounts. Anything the account did is here, whether this agent "
-        "did it or not."
+        "Straight from Alpaca - open positions and the full order history "
+        + ("for the competition account. " if mode.is_public()
+           else "for both accounts. ")
+        + "Anything the account did is here, whether this agent did it or not."
     )
 
     # The operator pulls on demand; a reader gets one automatic pull per
     # browser session and no button. Without the auto-pull the public page
     # would say "hit Refresh" beside a button that is not there - and with a
     # button, every visitor could hammer the broker on our key.
+    accounts = _accounts()
     if mode.is_public():
-        for profile, _ in ACCOUNTS:
+        for profile, _ in accounts:
             settings = settings_for.get(profile)
             if settings is not None and f"pos::{profile}" not in st.session_state:
                 st.session_state[f"pos::{profile}"] = _fetch(settings)
@@ -102,7 +114,7 @@ def render_positions(settings_for: dict[str, Any]) -> None:
     else:
         left, right = st.columns([1, 3])
         if left.button("Refresh from Alpaca", width="stretch"):
-            for profile, _ in ACCOUNTS:
+            for profile, _ in accounts:
                 settings = settings_for.get(profile)
                 if settings is not None:
                     st.session_state[f"pos::{profile}"] = _fetch(settings)
@@ -114,12 +126,8 @@ def render_positions(settings_for: dict[str, Any]) -> None:
                  "shows up first.",
         )
 
-    for profile, label in ACCOUNTS:
+    for profile, label in accounts:
         settings = settings_for.get(profile)
-        if settings is None and mode.is_public():
-            # The public build loads the judged profile only. A profile that
-            # was never asked for did not fail to load.
-            continue
         st.divider()
         if settings is None:
             st.warning(f"**{label}** - profile could not be loaded.")

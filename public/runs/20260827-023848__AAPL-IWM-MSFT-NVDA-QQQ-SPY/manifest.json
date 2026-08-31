@@ -1,0 +1,52 @@
+{
+  "id": "20260827-023848__AAPL-IWM-MSFT-NVDA-QQQ-SPY",
+  "label": "",
+  "created_at": "2026-08-27T01:38:48.024509+00:00",
+  "symbols": [
+    "AAPL",
+    "IWM",
+    "MSFT",
+    "NVDA",
+    "QQQ",
+    "SPY"
+  ],
+  "start": "2026-07-01",
+  "end": "2026-08-26",
+  "source": "alpaca",
+  "strategies": [
+    "vol_carry",
+    "event_premium"
+  ],
+  "metrics": {
+    "start_equity": 100000.0,
+    "end_equity": 100826.96,
+    "net_pnl": 826.96,
+    "total_return": 0.00827,
+    "cagr": 0.05515,
+    "max_drawdown": -0.0233,
+    "sharpe": 0.8274,
+    "sortino": 0.421,
+    "volatility_annual": 0.06614,
+    "sessions": 200,
+    "trades": 42,
+    "closed_trades": 42,
+    "open_at_end": 0,
+    "win_rate": 0.881,
+    "avg_win": 80.85,
+    "avg_loss": -432.88,
+    "best_trade": 118.62,
+    "worst_trade": -432.89,
+    "profit_factor": 1.382,
+    "expectancy": 19.69,
+    "avg_hold_days": 4.1,
+    "gross_pnl": 865.82,
+    "fees_paid": 14.28,
+    "margin_interest": 24.69,
+    "spread_cost": 577.0,
+    "total_modelled_cost": 615.97,
+    "ideas_generated": 80,
+    "ideas_approved": 42,
+    "approval_rate": 0.525,
+    "rejections": 1558
+  }
+}

@@ -137,6 +137,20 @@ class VolCarry(Strategy):
         idea.book = self.capital_book
         idea.tags = ["short_vol", "defined_risk", "carry", "resident"]
         idea.probability_of_profit = _pop(idea)
+        # Modelled PoP is understated in level (median 0.488 against a 0.550
+        # realised win rate) but it RANKS correctly: by tertile the realised win
+        # rate was 47.2% / 52.8% / 64.8%. It was computed on every idea and gated
+        # on by nothing. None = off, which is the baseline.
+        pop_floor = self.p("structures.min_probability_of_profit", None)
+        if (
+            pop_floor is not None
+            and idea.probability_of_profit is not None
+            and idea.probability_of_profit < float(pop_floor)
+        ):
+            raise StrategyError(
+                f"modelled PoP {idea.probability_of_profit:.1%} is below the "
+                f"{float(pop_floor):.1%} floor"
+            )
         # The reward/risk the EXIT POLICY implies, not the one expiry implies.
         # This book never holds to expiry: it takes `profit_target_pct` of max
         # profit or stops at `loss_multiple_of_credit`. Judging it on the
@@ -187,6 +201,20 @@ class VolCarry(Strategy):
                 "premium",
                 f"IV rank {iv_rank:.0%} is below the {floor:.0%} floor - premium is "
                 "not rich enough to be worth the gamma",
+                **metrics,
+            )
+        # ABSOLUTE IV ceiling. `iv_rank` is relative to the name's own history,
+        # so rank 90% on a 45-vol name and rank 90% on a 14-vol name both pass -
+        # but only one of them can actually move through a short strike. Measured
+        # over 2026-02-01..08-21, carry win rate by absolute IV tertile was
+        # 62.3% / 56.6% / 46.3% (low to high), monotonic, while iv_rank was the
+        # weakest predictor scanned. None = off, which is the baseline.
+        iv_max = self.p("premium_gate.iv_max", None)
+        if iv_max is not None and iv is not None and iv > float(iv_max):
+            return GateResult.veto(
+                "premium",
+                f"absolute IV {iv:.1%} is above the {float(iv_max):.1%} ceiling - "
+                "rich for this name, but the name moves too much to sell its wings",
                 **metrics,
             )
         min_spread = self.p("premium_gate.iv_rv_spread_min", 0.03)
@@ -445,6 +473,18 @@ class VolCarry(Strategy):
             touched = self._short_strike_touched(idea, market.spot)
             if touched:
                 mode = self.p("exits.defensive_mode", "close_tested_side")
+                # `hold` lets a defined-risk structure ride a touch. A short
+                # strike being tested is a normal event on a 14-delta condor, and
+                # closing on it realises the loss at maximum adverse excursion,
+                # before theta has done anything: measured over
+                # 2026-02-01..08-21, 69 of 160 carry trades exited this way at a
+                # 17% win rate for -$10,801, while every other exit reason
+                # averaged an 84% win rate. `loss_multiple_of_credit` remains the
+                # real stop, so downside is still bounded when this is off.
+                # Until 30 Aug `mode` was interpolated into the message and
+                # otherwise unread, so every value behaved as close_tested_side.
+                if str(mode) == "hold":
+                    return None
                 return f"underlying touched the short {touched} strike - {mode}"
 
         if ctx.macro_flagged(idea.symbol):

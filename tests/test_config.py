@@ -185,3 +185,72 @@ def test_an_enabled_strategy_that_cannot_import_is_a_hard_error():
     src = inspect.getsource(load_strategies)
     assert "import_errors" in src
     assert "failed to" in src
+
+
+# --------------------------------------------------------------------------- #
+# strategy variants
+#
+# `--variant v2` loads config/variants/v2.yaml over the baseline so two
+# strategies can be backtested against each other on identical code. Omitting
+# it must leave the baseline byte-identical - that is the whole contract.
+# --------------------------------------------------------------------------- #
+def _carry(cfg):
+    return next(s for s in cfg.strategies if s.name == "vol_carry")
+
+
+def test_no_variant_is_the_untouched_baseline():
+    cfg = load_config(profile="judged")
+    assert cfg.variant is None
+    carry = _carry(cfg)
+    assert carry.params["premium_gate"].get("iv_max") is None
+    assert carry.params["structures"].get("min_probability_of_profit") is None
+    assert carry.params["exits"]["defensive_mode"] == "close_tested_side"
+    assert next(s for s in cfg.strategies if s.name == "intraday_momentum").enabled
+
+
+def test_v2_applies_its_three_carry_changes():
+    cfg = load_config(profile="judged", variant="v2")
+    assert cfg.variant == "v2"
+    carry = _carry(cfg)
+    assert carry.params["premium_gate"]["iv_max"] == 0.25
+    assert carry.params["structures"]["min_probability_of_profit"] == 0.50
+    assert carry.params["exits"]["defensive_mode"] == "hold"
+
+
+def test_v2_turns_the_intraday_book_off():
+    cfg = load_config(profile="judged", variant="v2")
+    intraday = next(s for s in cfg.strategies if s.name == "intraday_momentum")
+    assert not intraday.enabled
+
+
+def test_v2_inherits_every_setting_it_does_not_name():
+    """The overlay is a diff, not a replacement - a variant that silently reset
+    the other 40 knobs would make the comparison meaningless."""
+    base, v2 = load_config(profile="judged"), load_config(profile="judged", variant="v2")
+    b, v = _carry(base).params, _carry(v2).params
+    assert v["premium_gate"]["iv_rank_min"] == b["premium_gate"]["iv_rank_min"]
+    assert v["exits"]["profit_target_pct"] == b["exits"]["profit_target_pct"]
+    assert v["exits"]["loss_multiple_of_credit"] == b["exits"]["loss_multiple_of_credit"]
+    assert v["structures"]["min_credit_to_width"] == b["structures"]["min_credit_to_width"]
+
+
+def test_a_variant_keeps_strategies_it_does_not_mention():
+    """The first draft of v2.yaml restated the strategies list and silently
+    dropped earnings_event_directional. Patching by name is why it cannot."""
+    base = {s.name for s in load_config(profile="judged").strategies}
+    v2 = {s.name for s in load_config(profile="judged", variant="v2").strategies}
+    assert base == v2
+
+
+def test_an_unknown_variant_is_an_error_not_a_silent_baseline():
+    with pytest.raises(FileNotFoundError, match="unknown variant"):
+        load_config(profile="judged", variant="does-not-exist")
+
+
+def test_a_misspelled_strategy_override_is_an_error():
+    from oaa.config.loader import _apply_strategy_overrides
+
+    with pytest.raises(ValueError, match="no such strategy"):
+        _apply_strategy_overrides(
+            {"strategies": [{"name": "vol_carry"}], "strategy_overrides": {"vol_cary": {}}}
+        )

@@ -10,17 +10,25 @@ Hand-picked deliberately. The published history is the argument the page
 makes; it should be the runs that represent the strategy, not the last five
 things that happened to be executed.
 
+    python scripts/publish_runs.py --all
     python scripts/publish_runs.py --list
     python scripts/publish_runs.py 20260830-152751__DIA-EEM 20260830-013506__wing-fix
     python scripts/publish_runs.py --latest 3
     python scripts/publish_runs.py --clear
 
 Ids may be prefixes; an ambiguous one is refused rather than guessed.
+
+`result.json` is written out **gzipped**. Raw, the store is 333MB and a single
+wide-universe run is 50MB - more than a deploy host should clone and more than
+GitHub is happy to hold. It compresses about 28x, so every backtest ever run
+fits in ~12MB. `load_run` reads either form, preferring a plain local file so
+a re-run is never shadowed by an older published copy.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import shutil
 import sys
@@ -34,6 +42,14 @@ TARGET = REPO / "public" / "runs"
 #: run directory accumulates stays local - the point is a small, committable
 #: directory, not a second copy of the run store.
 WANTED = ("manifest.json", "result.json", "equity.csv")
+
+#: Compressed on the way out. The other two are small and stay readable in a
+#: diff, which is worth more than the few KB gzip would save on them.
+COMPRESS = {"result.json"}
+
+
+def _size(directory: Path) -> int:
+    return sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
 
 
 def _runs(root: Path) -> list[Path]:
@@ -74,6 +90,8 @@ def main() -> None:
     parser.add_argument("ids", nargs="*", help="run ids, or unambiguous prefixes")
     parser.add_argument("--list", action="store_true", help="show what is available")
     parser.add_argument("--latest", type=int, metavar="N", help="publish the newest N")
+    parser.add_argument("--all", action="store_true",
+                        help="publish every run in the store")
     parser.add_argument("--clear", action="store_true",
                         help="empty public/runs/ before copying")
     args = parser.parse_args()
@@ -98,26 +116,41 @@ def main() -> None:
             print(f"removed  {directory.name}")
 
     chosen = [_resolve(t, available) for t in args.ids]
+    if args.all:
+        chosen = list(available)
     if args.latest:
         chosen += [d for d in available[: args.latest] if d not in chosen]
     if not chosen:
         if args.clear:
             return
-        parser.error("name at least one run, or pass --latest N (or --list)")
+        parser.error("name at least one run, or pass --all / --latest N (or --list)")
 
     TARGET.mkdir(parents=True, exist_ok=True)
     total = 0
     for directory in chosen:
         destination = TARGET / directory.name
         destination.mkdir(exist_ok=True)
+        raw = 0
         for name in WANTED:
             source = directory / name
             if not source.exists():
                 print(f"  ! {directory.name} has no {name}")
                 continue
-            shutil.copy2(source, destination / name)
-            total += source.stat().st_size
-        print(f"published  {directory.name}")
+            raw += source.stat().st_size
+            if name in COMPRESS:
+                packed = destination / f"{name}.gz"
+                # mtime=0 so re-publishing an unchanged run produces an
+                # identical file. Without it every run rewrites the gzip
+                # header and git sees 79 modified files each time.
+                with gzip.GzipFile(packed, "wb", compresslevel=9, mtime=0) as out:
+                    out.write(source.read_bytes())
+                (destination / name).unlink(missing_ok=True)
+                total += packed.stat().st_size
+            else:
+                shutil.copy2(source, destination / name)
+                total += source.stat().st_size
+        print(f"published  {directory.name}  "
+              f"({raw / 1024 / 1024:.1f}MB -> {_size(destination) / 1024 / 1024:.2f}MB)")
 
     print(f"\n{len(chosen)} run(s), {total / 1024 / 1024:.1f}MB in "
           f"{TARGET.relative_to(REPO)} - commit it.")

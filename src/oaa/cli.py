@@ -66,11 +66,11 @@ def _boot(profile: str | None, config: str | None, backend: str | None = None):
     return settings, broker, data
 
 
-def _settings_only(profile: str | None, config: str | None):
+def _settings_only(profile: str | None, config: str | None, variant: str | None = None):
     from oaa.config.loader import load_settings
     from oaa.core.logging import setup_logging
 
-    settings = load_settings(config_path=config, profile=profile)
+    settings = load_settings(config_path=config, profile=profile, variant=variant)
     setup_logging(
         settings.config.telemetry.log_level,
         settings.config.telemetry.log_format,
@@ -1033,6 +1033,11 @@ class _SyntheticRef:
 def backtest(
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
+    variant: str | None = typer.Option(
+        None, "--variant", "-V",
+        help="Named strategy variant from config/variants/<name>.yaml. Omit for "
+             "the baseline strategy. e.g. --variant v2",
+    ),
     symbols: str | None = typer.Option(None, "--symbols", "-s", help="Comma separated; defaults to the configured universe"),
     start: str | None = typer.Option(None, help="YYYY-MM-DD"),
     end: str | None = typer.Option(None, help="YYYY-MM-DD"),
@@ -1092,8 +1097,15 @@ def backtest(
     from oaa.app.identity import print_banner, resolve
     from oaa.backtest.runner import BacktestRequest, run_backtest, save_run
 
-    settings = _settings_only(profile, config)
+    settings = _settings_only(profile, config, variant)
     print_banner(resolve(settings, "Backtest"))
+    if settings.config.variant:
+        console.print(
+            f"[bold cyan]  variant          {settings.config.variant}[/bold cyan]"
+            f"   (config/variants/{settings.config.variant}.yaml over the baseline)"
+        )
+    else:
+        console.print("[dim]  variant          none (baseline strategy)[/dim]")
     cfg = settings.config
     if critic_model:
         if cfg.backtest.critic.llm is None:

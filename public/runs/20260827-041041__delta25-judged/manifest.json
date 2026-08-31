@@ -1,0 +1,52 @@
+{
+  "id": "20260827-041041__delta25-judged",
+  "label": "delta25-judged",
+  "created_at": "2026-08-27T03:10:41.635976+00:00",
+  "symbols": [
+    "AAPL",
+    "IWM",
+    "MSFT",
+    "NVDA",
+    "QQQ",
+    "SPY"
+  ],
+  "start": "2026-06-01",
+  "end": "2026-08-26",
+  "source": "alpaca",
+  "strategies": [
+    "vol_carry",
+    "event_premium"
+  ],
+  "metrics": {
+    "start_equity": 100000.0,
+    "end_equity": 101913.31,
+    "net_pnl": 1913.31,
+    "total_return": 0.01913,
+    "cagr": 0.08376,
+    "max_drawdown": -0.03069,
+    "sharpe": 0.9523,
+    "sortino": 0.989,
+    "volatility_annual": 0.08756,
+    "sessions": 61,
+    "trades": 18,
+    "closed_trades": 18,
+    "open_at_end": 0,
+    "win_rate": 0.7222,
+    "avg_win": 356.99,
+    "avg_loss": -545.5,
+    "best_trade": 828.07,
+    "worst_trade": -1497.07,
+    "profit_factor": 1.701,
+    "expectancy": 106.29,
+    "avg_hold_days": 5.78,
+    "gross_pnl": 1944.25,
+    "fees_paid": 6.12,
+    "margin_interest": 24.83,
+    "spread_cost": 1318.75,
+    "total_modelled_cost": 1349.7,
+    "ideas_generated": 37,
+    "ideas_approved": 18,
+    "approval_rate": 0.486,
+    "rejections": 470
+  }
+}

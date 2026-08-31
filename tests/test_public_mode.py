@@ -16,7 +16,6 @@ Two layers, deliberately:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -169,15 +168,33 @@ def test_each_control_is_behind_a_mode_guard(filename, needle, why):
 def test_the_control_tab_is_never_constructed_in_the_public_build():
     """Not merely hidden. A rendered-but-hidden widget is still a widget.
 
-    Streamlit tabs are all rendered; hiding one with CSS leaves its callbacks
-    live. The Control tab flips books on and off on a real account, so the
-    public build must not build it at all.
+    Streamlit renders every tab in the strip; hiding one with CSS leaves its
+    callbacks live. The Control tab flips books on and off on a real account,
+    so the public build must not build it at all - which is why the two page
+    lists are written out separately rather than one list being filtered.
     """
     source = _source("dashboard.py")
     guard = _guards(source, "render_control(settings_for)")
-    assert "mode.is_operator()" in guard
-    assert re.search(r"if mode\.is_operator\(\):\s*\n\s*names\.append\(PAGE_CONTROL\)",
-                     source), "PAGE_CONTROL is appended unconditionally"
+    assert "mode.is_public()" in guard or "mode.is_operator()" in guard
+
+    public_block = source.split("if mode.is_public():")[-1].split("else:")[0]
+    for absent in ("render_control", "PAGE_CONTROL", "render_live", "PAGE_LIVE"):
+        assert absent not in public_block, (
+            f"{absent} is wired into the public page list"
+        )
+
+
+def test_the_terminal_banner_is_silent_on_the_public_build():
+    """stdout on a hosted page is a log stream, not a private terminal.
+
+    The banner names the masked key and the account id. It exists so the
+    operator cannot trade the wrong account by accident; a page with nothing
+    to submit has no such mistake to prevent, and printing it there only puts
+    the account id somewhere a viewer might reach.
+    """
+    body = _source("dashboard.py").split("def _announce(")[1].split("\ndef ")[0]
+    guard = body.split("ident.print_banner(who)")[0]
+    assert "if mode.is_public():\n        return who" in guard
 
 
 def test_the_identity_banner_returns_early_in_the_public_build():
@@ -224,7 +241,11 @@ def _render(monkeypatch, public: bool):
 
 
 def _labels(at) -> set[str]:
-    return {t.label for t in at.tabs} if hasattr(at, "tabs") else set()
+    """Tab labels. AppTest surfaces the strip as `at.tabs`; each has `.label`."""
+    tabs = getattr(at, "tabs", None)
+    if not tabs:
+        return set()
+    return {str(t.label) for t in tabs}
 
 
 def test_the_public_page_has_no_control_tab(monkeypatch):
@@ -234,6 +255,46 @@ def test_the_public_page_has_no_control_tab(monkeypatch):
     assert "Run backtest" not in labels
     assert "Refresh from Alpaca" not in labels
     assert "Price the live chain" not in labels
+
+
+def test_the_public_tabs_are_the_three_a_reader_wants(monkeypatch):
+    """No Live Trading, and Positions carries the name instead.
+
+    Live Trading is the operator's instrument panel - live chain, skew, term
+    structure, the justification for a cycle that just ran - and all of it
+    reads the chain endpoint on our key. The broker's own answer to "is it
+    trading" is the Positions page, so that is what gets the name publicly.
+    """
+    at = _render(monkeypatch, public=True)
+    assert _labels(at) == {"Backtesting", "Live Trading Positions", "Events"}
+
+
+def test_the_operator_tabs_are_untouched(monkeypatch):
+    at = _render(monkeypatch, public=False)
+    assert _labels(at) == {
+        "Backtesting", "Live Trading", "Positions", "Events", "Control",
+    }
+
+
+def test_the_public_positions_page_knows_of_no_dev_account():
+    """The list is shorter, rather than filtered while rendering.
+
+    A render-time filter leaves a code path that can put the dev account back
+    on a public page. `_accounts()` returns a list that never held it.
+    """
+    from oaa.app import positions
+
+    names = {p for p, _ in positions.PUBLIC_ACCOUNTS}
+    assert names == {"judged"}
+    assert "dev" not in " ".join(
+        label for _, label in positions.PUBLIC_ACCOUNTS
+    ).lower()
+
+    source = _source("positions.py")
+    body = source.split("def render_positions(")[1]
+    assert "ACCOUNTS" not in body.replace("_accounts()", ""), (
+        "render_positions still reaches for a hard-coded account list"
+    )
 
 
 def test_the_operator_page_still_has_all_of_them(monkeypatch):
