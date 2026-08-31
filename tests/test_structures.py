@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
 from oaa.core.errors import StrategyError
@@ -209,3 +211,101 @@ def test_the_unfiltered_pool_is_opt_in_only():
         expiry, Right.CALL, outermost, 1.0, must_clear=True, allow_unfiltered=True
     )
     assert reaches.strike > outermost
+
+
+# --------------------------------------------------------------------------- #
+# the inverted condor body - claude/carry-chain-filter-guts-the-view.md
+# --------------------------------------------------------------------------- #
+def _thin_ladder_view(symbol="XLU", spot=43.0):
+    """A chain whose CALL ladder ends below spot.
+
+    This is what the per-contract tradeability filter leaves behind on a thin
+    name: a condor sells the cheap, wide, thinly-held OTM strikes, which are
+    exactly the ones `min_option_price` / `max_bid_ask_spread_pct` /
+    `min_open_interest` remove. Greeks are absent, so `by_delta` falls through
+    to `by_moneyness` - the unguarded nearest-strike search that returns a deep
+    ITM call without complaint.
+    """
+    asof = dt.date(2026, 9, 1)
+    expiry = dt.date(2026, 9, 18)
+    quotes = [
+        make_quote(root=symbol, expiry=expiry, strike=k, right=Right.PUT,
+                   delta=None, bid=0.95, ask=1.05)
+        for k in (42.5, 43.0, 43.5)
+    ] + [
+        # the OTM calls are gone; only these ITM ones survived the filter
+        make_quote(root=symbol, expiry=expiry, strike=k, right=Right.CALL,
+                   delta=None, bid=0.95, ask=1.05)
+        for k in (34.0, 35.0)
+    ] + [
+        # cheap contracts that `min_price` removes from `quotes` but leaves in
+        # the wing pool - which is why the WINGS resolve and the shorts do not.
+        # That asymmetry is the bug; without these the builder would fail on
+        # the wing lookup instead and never reach the inverted body.
+        make_quote(root=symbol, expiry=expiry, strike=41.5, right=Right.CALL,
+                   delta=None, bid=0.08, ask=0.12),
+        make_quote(root=symbol, expiry=expiry, strike=42.0, right=Right.PUT,
+                   delta=None, bid=0.08, ask=0.12),
+    ]
+    chain_filter = ChainFilter(
+        min_dte=0, max_dte=400, min_open_interest=0, min_volume=0,
+        max_spread_pct=float("inf"), min_price=0.50,
+    )
+    return ChainView.from_quotes(
+        symbol=symbol, spot=spot, quotes=quotes,
+        chain_filter=chain_filter, asof=asof,
+    )
+
+
+def test_an_inverted_condor_body_names_the_filter_not_the_strike_order():
+    """XLU produced `iron condor strikes out of order: [43.0, 43.5, 35.0, 41.5]`
+    live on 31 Aug. Both spreads were internally ordered; the call side simply
+    sat below the put side because the filtered call ladder ended before spot.
+    The old message described the symptom and sent you looking at the builder."""
+    builder = StructureBuilder(view=_thin_ladder_view(), strategy="vol_carry")
+
+    with pytest.raises(StrategyError) as excinfo:
+        builder.iron_condor_by_delta(
+            dte_range=(7, 30), short_put_delta=-0.16,
+            short_call_delta=0.16, wing_points=1.0,
+        )
+
+    message = str(excinfo.value)
+    assert "body is inverted" in message
+    assert "filter result, not a listing gap" in message
+    assert "strikes out of order" not in message, "that is the symptom, not the cause"
+    assert "34-35 on calls" in message, "the message must show where the ladder ends"
+
+
+def test_a_healthy_condor_body_is_still_built():
+    """The guard must not cost a single valid structure. Same builder, a ladder
+    that reaches both sides of spot."""
+    asof, expiry = dt.date(2026, 9, 1), dt.date(2026, 9, 18)
+    quotes = [
+        # priced by distance from spot, so the shorts are worth more than the
+        # wings and the structure is a genuine credit
+        make_quote(root="SPY", expiry=expiry, strike=k, right=Right.PUT,
+                   delta=None, bid=(k - 450) * 0.20 - 0.05,
+                   ask=(k - 450) * 0.20 + 0.05)
+        for k in (455, 460, 465, 470, 475, 480, 485)
+    ] + [
+        make_quote(root="SPY", expiry=expiry, strike=k, right=Right.CALL,
+                   delta=None, bid=(550 - k) * 0.20 - 0.05,
+                   ask=(550 - k) * 0.20 + 0.05)
+        for k in (515, 520, 525, 530, 535, 540, 545)
+    ]
+    view = ChainView.from_quotes(
+        symbol="SPY", spot=500.0, quotes=quotes,
+        chain_filter=ChainFilter(min_dte=0, max_dte=400, min_open_interest=0,
+                                 min_volume=0, max_spread_pct=float("inf"),
+                                 min_price=0.0),
+        asof=asof,
+    )
+    idea = StructureBuilder(view=view, strategy="vol_carry").iron_condor_by_delta(
+        dte_range=(7, 30), short_put_delta=-0.16,
+        short_call_delta=0.16, wing_points=5.0,
+    )
+    assert idea.structure is StructureType.IRON_CONDOR
+    assert idea.is_credit
+    strikes = [leg.quote.strike for leg in idea.legs]
+    assert strikes == sorted(strikes), f"legs came back out of order: {strikes}"

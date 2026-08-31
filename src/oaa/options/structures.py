@@ -339,6 +339,33 @@ class StructureBuilder:
             width = max(width, rung)
         short_put = self.view.by_delta(exp, Right.PUT, short_put_delta)
         short_call = self.view.by_delta(exp, Right.CALL, short_call_delta)
+
+        # The body must straddle spot. `iron_condor_outside_move` already
+        # asserts this; this constructor did not, and that is the whole
+        # difference between a diagnosable rejection and a mystery.
+        #
+        # `by_delta` and its `by_moneyness` fallback both select from the
+        # FILTERED quotes, and a condor sells the cheap, wide, thinly-held OTM
+        # strikes that `min_option_price`, `max_bid_ask_spread_pct` and
+        # `min_open_interest` remove by construction. When one side's filtered
+        # ladder ends before it reaches spot, the nearest surviving strike is
+        # returned with no complaint - so the "short call" comes back deep ITM,
+        # below the short put, and `build_iron_condor` reports `strikes out of
+        # order`. That names the symptom; the cause is our own filter, not the
+        # listed market. See `claude/carry-chain-filter-guts-the-view.md`.
+        spot = abs(self.view.spot)
+        if short_put.strike >= short_call.strike:
+            calls = [q.strike for q in self.view.for_expiry(exp, Right.CALL)]
+            puts = [q.strike for q in self.view.for_expiry(exp, Right.PUT)]
+            raise StrategyError(
+                f"{self.view.symbol}: the condor body is inverted - short put "
+                f"{short_put.strike:g} is at or above short call "
+                f"{short_call.strike:g} with spot {spot:.2f}. The filtered "
+                f"ladder for {exp} runs {min(calls):g}-{max(calls):g} on calls "
+                f"and {min(puts):g}-{max(puts):g} on puts, so one side ends "
+                f"before it reaches the money and strike selection had nothing "
+                f"correct to return. A filter result, not a listing gap."
+            )
         long_put = self.view.strike_offset(
             exp, Right.PUT, short_put.strike, -width,
             must_clear=True, allow_unfiltered=True,

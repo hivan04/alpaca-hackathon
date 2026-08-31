@@ -225,6 +225,18 @@ class ExecutionConfig(Base):
     chase: ChaseConfig = Field(default_factory=ChaseConfig)
     time_in_force: Literal["day", "gtc"] = "day"
     cancel_unfilled_after_seconds: int = 180
+    #: How long to let a submitted order WORK before asking the broker whether
+    #: it filled. A fresh limit order is never reported filled on the submit
+    #: acknowledgement - the exchange answers later - so a router that checks
+    #: the acknowledgement and cancels has cancelled every order it ever sent.
+    #: That is exactly what happened on the judged account on 31 Aug: the only
+    #: sleep in the chase loop sat inside the `step < max_steps - 1` branch, so
+    #: disabling the chase (max_steps=1) removed it. See
+    #: `claude/order-cancelled-before-it-could-fill.md`.
+    #: Generous by default because the free data tier serves DELAYED quotes:
+    #: a limit priced off a stale touch may not be marketable at the real
+    #: market and needs time to be reached.
+    fill_settle_seconds: int = 20
     dry_run: bool = True
 
 
@@ -409,6 +421,9 @@ CycleAction = Literal[
     # Reads the names whose prints are coming, several times a day, and stops
     # reading each one the day its print is behind us. Opens nothing.
     "events_watch",
+    # After the close: read the session back out of the journal, and have the
+    # reasoning provider say what to change. Writes a file, trades nothing.
+    "daily_report",
 ]
 
 
@@ -467,6 +482,12 @@ class TelemetryConfig(Base):
     # REJECT lines. The journal, the JSONL sink and `oaa gates` are identical
     # either way - this cannot hide a decision, only move where you read it.
     console: Literal["full", "focused"] = "full"
+    #: Where `oaa daily-report` writes. Repo-relative and deliberately OUTSIDE
+    #: `run_dir`: the daily reports are the human-readable record of the week
+    #: and want to be committed, while `runs/` is machine state and is not.
+    #: The profile name is appended, so the judged and dev accounts can never
+    #: overwrite each other's day.
+    report_dir: str = "reports"
     snapshot_interval_seconds: int = 300
     capture_screenshots: bool = False
 

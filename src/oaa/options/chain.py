@@ -31,26 +31,41 @@ class ChainFilter:
     rights: tuple[Right, ...] = (Right.CALL, Right.PUT)
     require_greeks: bool = False
 
-    def accepts(self, q: OptionQuote, asof: dt.date) -> bool:
+    def reject_reason(self, q: OptionQuote, asof: dt.date) -> str | None:
+        """Why this contract is not tradeable, or None if it is.
+
+        `accepts` is the hot path and only needs the bit. This exists because a
+        chain that empties out reports "no contracts survived the liquidity
+        filter" and nothing else, which twice this week sent us looking at the
+        market when the answer was our own config. `oaa chain --why` reads it.
+        """
         dte = q.dte(asof)
         if not (self.min_dte <= dte <= self.max_dte):
-            return False
+            return f"outside the {self.min_dte}-{self.max_dte} DTE window ({dte}d)"
         if q.right not in self.rights:
-            return False
+            return "right not requested"
         mid = q.mid
-        if mid is None or mid < self.min_price:
-            return False
+        if mid is None:
+            return "no two-sided quote"
+        if mid < self.min_price:
+            return f"mid {mid:.2f} below min_price {self.min_price:.2f}"
         if self.max_price is not None and mid > self.max_price:
-            return False
+            return f"mid {mid:.2f} above max_price {self.max_price:.2f}"
         if q.spread_pct is not None and q.spread_pct > self.max_spread_pct:
-            return False
+            return (
+                f"spread {q.spread_pct:.1%} above max_spread_pct "
+                f"{self.max_spread_pct:.1%}"
+            )
         if q.open_interest is not None and q.open_interest < self.min_open_interest:
-            return False
+            return f"open interest {q.open_interest} below {self.min_open_interest}"
         if self.min_volume and q.volume is not None and q.volume < self.min_volume:
-            return False
+            return f"volume {q.volume} below {self.min_volume}"
         if self.require_greeks and q.greeks.delta is None:
-            return False
-        return True
+            return "no delta"
+        return None
+
+    def accepts(self, q: OptionQuote, asof: dt.date) -> bool:
+        return self.reject_reason(q, asof) is None
 
 
 @dataclass

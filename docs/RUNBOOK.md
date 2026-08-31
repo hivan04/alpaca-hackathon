@@ -69,11 +69,18 @@ oaa doctor                     # 30 seconds, catches everything before it matter
 oaa scan                       # dry: what would it do right now?
 oaa run --profile judged       # the autonomous loop
 oaa report                     # equity curve + decision stats -> HTML
+oaa daily-report               # after the close: the session, evaluated -> reports/
 ```
 
 The loop runs the cycles in `schedule.cycles` and monitors positions in between. It
 survives a failed cycle and fires late cycles after a restart, so a crash at 09:40
 does not cost the day's first scan.
+
+**After the close, without you.** The `daily_report` cycle fires at 16:20 ET
+inside the same process and writes `reports/<profile>/<date>.md`: the ideas it
+priced and declined, the gate funnel, the fills, the day's P&L, and a
+bullet-point critique from Featherless. `oaa daily-report --date YYYY-MM-DD`
+regenerates any past session from the journal - see `docs/DAILY-REPORT.md`.
 
 ## Going live on the judged account
 

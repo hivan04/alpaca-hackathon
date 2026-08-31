@@ -1,7 +1,9 @@
 # The decision pipeline — end to end
 
-How a bar becomes an order, and where every gate sits. Current as of **27 Aug**,
-branch `strategy-v2`. Companion docs: `docs/ARCHITECTURE.md` for layout,
+How a bar becomes an order, and where every gate sits. Current as of **31 Aug**,
+branch `strategy-v2`. The rendered version of this document is
+`docs/OAA-pipeline-flowchart.pdf`, redrawn the same day; boxes marked there
+carry the date the parameter changed. Companion docs: `docs/ARCHITECTURE.md` for layout,
 `docs/BACKTEST.md` for the harness,
 `docs/DECISIONS.md` for what moved today.
 
@@ -35,7 +37,7 @@ live call; that is what keeps them deterministic and replayable.
 |---|---|---|
 | `bars` | daily, `lookback_days` | complete prior sessions only |
 | `intraday_bars` | `data.intraday_timeframe` × `intraday_lookback_days` | **same** (fixed 27 Aug — replay previously carried one day, making the backtest a strictly harsher strategy than live) |
-| `chain` | live Alpaca chain snapshot | real option bars where a print exists, modelled elsewhere |
+| `chain` | live Alpaca chain snapshot, DTE window = `tradable_dte_range(cfg)` — **0–32 on the judged profile** (fixed 31 Aug, on `fix/live-chain-dte-window`, not yet merged) | real option bars where a print exists, modelled elsewhere |
 | `news` | Alpaca news stream | Alpaca headlines published before the replayed moment |
 | `iv_rank`, `realised_vol` | computed live (Garman-Klass) | computed at `i-1`, same estimator |
 
@@ -54,8 +56,14 @@ artefact — an agent declining trades, with the number that caused it.
 | book | strategy | gates in order |
 |---|---|---|
 | carry | `vol_carry` | premium (IV rank ≥ 0.35 **and** IV−RV ≥ 3pts) → trend → event → macro lens → cost |
-| intraday | `intraday_momentum` | time of day → data sufficiency → momentum (VWAP / volume-z / persistence / BB width / RSI veto) → catalyst → macro → selection → structure → spread |
+| intraday | `intraday_momentum` | time of day → data sufficiency → momentum (VWAP cross over 15 one-minute bars, volume-z ≥ 0.5 in its time-of-day bucket, 2-bar persistence) → **confirmation score, 3 of up to 7 votes** (band width, dispersion, term structure, breadth, volume, news, RSI veto) → catalyst → macro → selection → structure → spread |
 | opportunistic | `event_premium` | scheduled catalyst → implied vs realised move |
+| events | `earnings_event_directional` | a **date**, not a threshold — see `docs/STRATEGY-EVENTS.md`. It runs on its own cycles and never leases from the firewall. |
+
+The intraday stack stopped being eight hard vetoes on 28–30 Aug. Each gate passed
+roughly 70% of candidates, so stacked as hard vetoes the book was arithmetically
+built to fire on 0.7⁸ ≈ 6% of them; measured over 864 candidates, **0 survived the
+whole chain**. The confirmation score replaced the middle of the stack.
 
 Read it with `oaa backtest --why 15`, which groups by **reason** and normalises
 the numbers inside each one, so "IV rank 19% below the 70% floor" and "IV rank 4%
@@ -97,6 +105,14 @@ unknown_risk -> leg_count -> duplicate_legs -> max_positions ->
 max_new_per_day -> duplicate_structure -> reentry_cooldown ->
 concentration -> sizing -> portfolio_risk -> cash
 ```
+
+**Not in that list, and it should be:** `credit_to_width ≤ 0.45`, which refuses a
+credit structure collecting more than 45% of its own width. On the Feb–Aug run 47
+of 198 carry trades breach it and carry **71% of the book's P&L** — they are
+arithmetically impossible condors produced by per-leg implied vols recovered
+without a cross-strike consistency check. The patch is written
+(`oaa_gate.patch`, 30 Aug) and **has not been applied to this tree**. Every carry
+figure quoted in the deck and in `docs/STRATEGY-CARRY.md` is the post-gate one.
 
 Two of those are new on 27 Aug and exist because **brokers net identical option
 symbols**: re-entering the same structure doubles one position rather than
@@ -156,24 +172,26 @@ Both are counted and reported per run as `mixed_surface_marks` and
 ## Session schedule (America/New_York)
 
 ```
-09:15 discover        candidate pool + regime read
-09:45 intraday_scan   transient books lease the headroom
-10:00 carry_scan      resident book looks for rich premium
-12:00 manage          exit rules
-13:45 intraday_scan
-14:30 manage
-15:15 intraday_cutoff HARD CUTOFF - transient books only
-15:45 carry_verify    the sign-off
-16:10 report
+04:00-16:00 events_watch     hourly, names inside the 3-day window
+09:15       discover         candidate pool + regime read
+09:45       events_flatten   into the post-print IV collapse
+10:00       carry_scan       resident book looks for rich premium
+10:00-14:45 intraday_scan    every 15 minutes - twelve scans
+11:30-13:15 manage           lunch: management only, no new intraday entries
+14:30/15:00/15:10 manage     exit rules
+15:15       intraday_cutoff  HARD CUTOFF - transient books only
+15:45       carry_verify     the sign-off
+15:50       events_arm       the session before an after-close print
+16:10       report           16:20 daily_report
 ```
 
 The carry book is **held overnight** — there is no morning exit.
 
-**Known divergence:** the *backtest* now scans 12 times a day (every 15 min,
-10:00–14:45) because a VWAP cross is an event that a 4-times-a-day poll cannot
-see. `schedule.cycles` above still fires the live agent 4 times. Until those
-agree, the live intraday book sees far less of the session than the replayed one
-does. This is the top open item.
+**The live/replay schedule divergence is closed (30 Aug).** The live agent fired
+four intraday cycles a day while the backtest scanned twelve, so the live book saw
+far less of the session than the replayed one. `schedule.cycles` now carries the
+same twelve-point 10:00–14:45 grid, with the lunch window turned over to
+management. This was the top open item on 27 Aug and is no longer open.
 
 ## Dated controls, fired from the clock
 

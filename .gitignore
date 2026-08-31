@@ -44,3 +44,6 @@ logs/
 # claude files
 .agents/
 .claude/
+
+# Generated per-day judged reports, same treatment as runs/.
+reports/

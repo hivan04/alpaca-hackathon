@@ -132,3 +132,102 @@ def test_the_simulator_closes_a_short_instead_of_doubling_it():
     broker._apply("SPY260918C00500000", 3, 1.00)
     broker.close_position("SPY260918C00500000", 3)
     assert broker._positions.get("SPY260918C00500000") is None
+
+
+# --------------------------------------------------------------------------- #
+# the order that was cancelled before it could fill - 31 Aug
+# --------------------------------------------------------------------------- #
+class _AsyncFillBroker:
+    """A broker that behaves like a real one: `submit` acknowledges, it does not
+    fill. The fill shows up on the next `order_status`, which is how every
+    venue works and how Alpaca works."""
+
+    def __init__(self, fills_on_poll: bool = True) -> None:
+        self.fills_on_poll = fills_on_poll
+        self.submitted = 0
+        self.cancelled: list[str] = []
+        self.polls = 0
+
+    def client_order_id(self, idea, suffix: str = "") -> str:
+        return f"{idea.id}-{suffix}"
+
+    def submit(self, ticket):
+        from oaa.core.types import Fill
+
+        self.submitted += 1
+        return Fill(symbol=ticket.symbol, order_id=f"ord-{self.submitted}",
+                    status="accepted", filled_qty=0, filled_avg_price=None)
+
+    def order_status(self, order_id: str):
+        from oaa.core.types import Fill
+
+        self.polls += 1
+        if not self.fills_on_poll:
+            return Fill(symbol="SPY", order_id=order_id, status="accepted",
+                        filled_qty=0, filled_avg_price=None)
+        return Fill(symbol="SPY", order_id=order_id, status="filled",
+                    filled_qty=1, filled_avg_price=4.05)
+
+    def cancel(self, order_id: str) -> None:
+        self.cancelled.append(order_id)
+
+
+def _router_with(broker, monkeypatch, chase_enabled: bool):
+    from oaa.config.loader import load_config
+
+    cfg = load_config()
+    cfg.execution.chase.enabled = chase_enabled
+    # no real sleeping in tests; guarded so this file also RUNS against a tree
+    # without the field, where it fails on the behaviour rather than an
+    # AttributeError - which is the point of a regression test
+    if hasattr(cfg.execution, "fill_settle_seconds"):
+        cfg.execution.fill_settle_seconds = 0
+    cfg.execution.chase.interval_seconds = 0
+    cfg.execution.dry_run = False
+    cfg.broker.require_risk_approval = False
+    return ExecutionRouter(cfg, broker)
+
+
+def test_an_order_is_given_time_to_fill_before_it_is_cancelled(monkeypatch):
+    """QQQ 31 Aug: a marketable limit on a one-cent-wide 0-DTE call, approved by
+    every gate, came back `unfilled after chase`. With the chase disabled the
+    router checked the SUBMIT ACKNOWLEDGEMENT - which is never 'filled' - and
+    cancelled immediately. No order could ever fill on the judged account."""
+    broker = _AsyncFillBroker(fills_on_poll=True)
+    router = _router_with(broker, monkeypatch, chase_enabled=False)
+
+    result = router.execute(spread_idea(), RiskVerdict(approved=True, stamp="ok"))
+
+    assert result.ok, "the order filled on the re-poll and must be reported as filled"
+    assert result.fill is not None and result.fill.is_filled
+    assert broker.polls == 1, "the router must ASK before giving up"
+    assert broker.cancelled == [], "a filled order must not be cancelled"
+    assert broker.submitted == 1
+
+
+def test_a_genuinely_unfilled_order_is_still_cancelled(monkeypatch):
+    """The fix must not leave orders resting. If it is still unfilled after the
+    settle, cancel it - an abandoned limit is worse than a missed trade."""
+    broker = _AsyncFillBroker(fills_on_poll=False)
+    router = _router_with(broker, monkeypatch, chase_enabled=False)
+
+    result = router.execute(spread_idea(), RiskVerdict(approved=True, stamp="ok"))
+
+    assert not result.ok
+    assert broker.cancelled == ["ord-1"], "an unfilled order must be cancelled"
+    assert broker.submitted == 1, "chase is off - exactly one order, never two"
+    assert "unfilled" in (result.error or "")
+
+
+def test_the_chase_still_sends_one_resting_order_per_step(monkeypatch):
+    """The 28 Aug reason for disabling the chase was a doubled position: cancel
+    without checking, then resubmit under a new client_order_id. Whatever the
+    settle does, it must never leave two live orders."""
+    broker = _AsyncFillBroker(fills_on_poll=False)
+    router = _router_with(broker, monkeypatch, chase_enabled=True)
+
+    router.execute(spread_idea(), RiskVerdict(approved=True, stamp="ok"))
+
+    assert broker.submitted == len(broker.cancelled), (
+        "every submitted order must be cancelled before the next is sent"
+    )

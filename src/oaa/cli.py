@@ -440,22 +440,74 @@ def chain(
     symbol: str,
     dte: int = typer.Option(30, help="Target days to expiry"),
     limit: int = typer.Option(20, help="Rows to show"),
+    min_dte: int | None = typer.Option(
+        None, "--min-dte",
+        help="Override options.min_days_to_expiry. Use 0 to see the front "
+             "expiry the intraday book trades - the default 3 hides it.",
+    ),
+    max_dte: int | None = typer.Option(None, "--max-dte", help="Override the DTE ceiling"),
+    why: bool = typer.Option(
+        False, "--why",
+        help="Tally WHY contracts were filtered out, worst offender first",
+    ),
     profile: str | None = _PROFILE,
     config: str | None = _CONFIG,
 ) -> None:
-    """Inspect a filtered option chain - the view a strategy actually sees."""
+    """Inspect a filtered option chain - the view a strategy actually sees.
+
+    Without `--min-dte`, this shows the chain built from
+    `options.min_days_to_expiry` (3), which is NOT what the intraday book sees:
+    that book trades 0-2 DTE and its context chain is built from the union of
+    the enabled strategies' windows. `oaa chain SPY --min-dte 0 --max-dte 2
+    --why` is the command that answers "why did this book take no trades".
+    """
     settings, _, data = _boot(profile, config)
-    from oaa.options.chain import ChainView
+    from oaa.options.chain import ChainFilter, ChainView
 
     symbol = symbol.upper()
     spot = data.spot(symbol)
-    quotes = data.option_chain(symbol)
-    view = ChainView.from_quotes(symbol, spot, quotes)
+    opts = settings.config.options
+    lo = opts.min_days_to_expiry if min_dte is None else min_dte
+    hi = opts.max_days_to_expiry if max_dte is None else max_dte
+    quotes = data.option_chain(symbol, min_dte=lo, max_dte=hi)
+    chain_filter = ChainFilter(
+        min_dte=lo,
+        max_dte=hi,
+        min_open_interest=opts.min_open_interest,
+        max_spread_pct=opts.max_bid_ask_spread_pct,
+        min_price=opts.min_option_price,
+        max_price=opts.max_option_price,
+    )
+    view = ChainView.from_quotes(symbol, spot, quotes, chain_filter=chain_filter)
 
-    console.print(f"[bold]{symbol}[/] spot {spot:.2f} | "
+    console.print(f"[bold]{symbol}[/] spot {spot:.2f} | DTE window {lo}-{hi} | "
                   f"{len(quotes)} contracts, {len(view)} after liquidity filter")
+
+    if why:
+        import collections as _collections
+
+        tally: _collections.Counter = _collections.Counter()
+        for q in quotes:
+            reason = chain_filter.reject_reason(q, view.asof)
+            if reason is not None:
+                # collapse the numbers so the CAUSE aggregates
+                tally[reason.split(" (")[0].split(" below ")[0]
+                      .split(" above ")[0]] += 1
+        if tally:
+            rejected = Table("Removed by", "Count", title="what the filter took out")
+            for reason, count in tally.most_common():
+                rejected.add_row(reason, str(count))
+            console.print(rejected)
+        else:
+            console.print("[green]the filter removed nothing[/]")
+
     if view.is_empty:
-        console.print("[red]nothing survived the filter - loosen config/default.yaml options.*[/]")
+        console.print(
+            "[red]nothing survived the filter.[/] This is what a strategy sees "
+            "as 'no contracts survived the liquidity filter'. Re-run with "
+            "--why to see which line of config emptied it - it is usually ours, "
+            "not the market's."
+        )
         raise typer.Exit(1)
 
     expiry = view.nearest_expiry(dte)
@@ -594,6 +646,65 @@ def report(
     paths = write_report(metrics, equity, out_dir, title=settings.config.meta.project)
     console.print(f"[green]wrote[/] {paths['html']}")
     console.print(f"[green]wrote[/] {paths['json']}")
+
+
+@app.command("daily-report")
+def daily_report(
+    date: str | None = typer.Option(
+        None, help="Session date, YYYY-MM-DD in the schedule's timezone. Default: today."
+    ),
+    days: int = typer.Option(1, help="Also generate the N-1 sessions before --date."),
+    out: str | None = typer.Option(None, help="Output directory (default reports/<profile>)"),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Skip Featherless; arithmetic critique only."),
+    profile: str | None = _PROFILE,
+    config: str | None = _CONFIG,
+) -> None:
+    """End-of-day evaluator: what it could have traded, what filled, P&L, and
+    a Featherless critique - written to reports/<profile>/<date>.md.
+
+    Reads the journal only, so any past session can be regenerated and a
+    re-run of the same day corrects the file rather than adding another.
+    """
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    from oaa.agents.llm import get_llm
+    from oaa.telemetry.daily import generate_daily_report
+
+    settings = _settings_only(profile, config)
+    tz = settings.config.schedule.timezone
+    journal = _journal(settings)
+
+    if date:
+        try:
+            last = _dt.date.fromisoformat(date)
+        except ValueError:
+            console.print(f"[red]--date must be YYYY-MM-DD, got {date!r}[/]")
+            raise typer.Exit(2) from None
+    else:
+        last = _dt.datetime.now(ZoneInfo(tz)).date()
+
+    llm = None if no_llm else get_llm(settings.config.agents.llm)
+    if llm is not None and getattr(llm, "provider", "null") == "null":
+        console.print(
+            "[yellow]no reasoning provider available - the critique will be the "
+            "arithmetic one. `oaa doctor` says why.[/]"
+        )
+
+    base = out or f"{settings.config.telemetry.report_dir}/{settings.config.profile}"
+    for offset in range(max(days, 1) - 1, -1, -1):
+        day = last - _dt.timedelta(days=offset)
+        session, paths = generate_daily_report(
+            journal=journal,
+            day=day,
+            out_dir=settings.path(base),
+            profile=settings.config.profile,
+            timezone=tz,
+            llm=llm,
+        )
+        console.print(Panel.fit(session.headline(), title=f"daily report {day}"))
+        console.print(f"[green]wrote[/] {paths['markdown']}")
+        console.print(f"[green]wrote[/] {paths['json']}")
 
 
 @app.command()

@@ -45,7 +45,27 @@ broker:
 
   mcp:
     command: uvx
-    args: ["alpaca-mcp-server"]
+    # `fastmcp>=3.1,<4` is LOAD-BEARING, added 31 Aug. alpaca-mcp-server 2.3.0
+    # declares `fastmcp>=3.1.0` with no upper bound, so an unpinned `uvx
+    # alpaca-mcp-server` resolves fastmcp 4.0.0 - which removed
+    # `fastmcp.tools.tool`, the module `security.py:14` imports `ToolResult`
+    # from. The server then dies on import and the agent logs one WARNING and
+    # runs with no MCP surface at all:
+    #
+    #   ModuleNotFoundError: No module named 'fastmcp.tools.tool'
+    #   WARNING oaa.agents.trader | could not start an MCP session ...
+    #
+    # Reproduced and fixed by measurement: unpinned resolves 4.0.0 and raises;
+    # `--with "fastmcp>=3.1,<4"` resolves 3.4.7 and the server prints
+    # "Starting MCP server 'Alpaca MCP'". ToolResult still exists in 4.x, it
+    # moved to `fastmcp.tools.ToolResult` - so this is a third-party import to
+    # wait out, not something to patch here.
+    #
+    # Fourth unpinned-major break in this repo. See
+    # `claude/mcp-sdk-2x-renames.md` for the other three and why an
+    # optional-dependency major bump is a silent-failure generator in a
+    # codebase whose error paths all degrade gracefully.
+    args: ["--with", "fastmcp>=3.1,<4", "alpaca-mcp-server"]
     transport: stdio        # stdio | streamable-http
     url: "http://127.0.0.1:8000/mcp"   # used when transport=streamable-http
     # EMPTY ON PURPOSE (30 Aug). These names were passed to the server as
@@ -403,6 +423,15 @@ execution:
     max_slippage_pct: 0.15
   time_in_force: day
   cancel_unfilled_after_seconds: 180
+  # How long a submitted order is left to WORK before we ask the broker whether
+  # it filled. `submit` returns an acknowledgement, never a fill - so a router
+  # that reads the acknowledgement and cancels has cancelled every order it
+  # ever sent. That is what happened on the judged account on 31 Aug: the only
+  # sleep sat inside the chase branch, and the judged profile disables the
+  # chase. 20s rather than 2s because the free data tier serves DELAYED quotes,
+  # so a limit priced off a stale touch may need time for the real market to
+  # come to it.
+  fill_settle_seconds: 20
   # Dry run logs the exact payload without submitting. Flip to false to go live.
   dry_run: true
 
@@ -695,6 +724,17 @@ schedule:
     - name: eod_report
       at: "16:10"
       action: report
+    # The evaluator. Reads the whole session back out of the journal - every
+    # idea that was priced and declined, every gate that refused, the fills and
+    # the day's P&L - and asks Featherless what to change. Writes
+    # reports/<profile>/<date>.md and trades nothing.
+    #
+    # 16:20 rather than 16:10: it wants the closing snapshot the `report` cycle
+    # takes ten minutes earlier, and it is the only cycle whose output is read
+    # by a human rather than by the next cycle, so it goes last.
+    - name: daily_report
+      at: "16:20"
+      action: daily_report
   monitor_interval_seconds: 300
 
 # -----------------------------------------------------------------------------

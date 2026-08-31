@@ -236,3 +236,60 @@ class Journal:
                     "SELECT COUNT(*) FROM decisions WHERE approved = 1"
                 ).fetchone()[0],
             }
+
+    # -- session-scoped reads -------------------------------------------- #
+    def decisions_between(self, start: str, end: str) -> list[dict[str, Any]]:
+        """Every decision with `start <= ts < end`, oldest first.
+
+        The daily report needs a whole session and nothing else. `decisions()`
+        takes a row limit, which on a busy day silently truncates the tail of
+        the session - the opposite of what a report of the session should do.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM decisions WHERE ts >= ? AND ts < ? ORDER BY ts ASC",
+                (start, end),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def fills_between(self, start: str, end: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM fills WHERE ts >= ? AND ts < ? ORDER BY ts ASC",
+                (start, end),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def equity_between(self, start: str, end: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM equity WHERE ts >= ? AND ts < ? ORDER BY ts ASC",
+                (start, end),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def events_between(self, start: str, end: str) -> list[dict[str, Any]]:
+        """Structured events in a UTC window, oldest first, no row cap.
+
+        Streams the JSONL rather than reading it into memory twice the way
+        `events()` does: a week of hourly watch cycles is a large file and the
+        report reads it once a day.
+        """
+        if not self.journal_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        with self.journal_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("kind") is None:
+                    continue
+                ts = str(record.get("ts") or "")
+                if start <= ts < end:
+                    rows.append(record)
+        return rows

@@ -205,7 +205,8 @@ class AlpacaDataProvider(MarketDataProvider):
     def context(self, symbol: str, lookback_days: int = 90) -> MarketContext:
         spot = self.spot(symbol)
         history = self.bars(symbol, lookback_days=lookback_days)
-        chain = self.option_chain(symbol)
+        chain_min_dte, chain_max_dte = self.context_chain_window()
+        chain = self.option_chain(symbol, min_dte=chain_min_dte, max_dte=chain_max_dte)
 
         atm_iv = _atm_iv(chain, spot)
         # One observation per DAY, seeded from the replay's own IV model so the

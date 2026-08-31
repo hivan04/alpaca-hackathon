@@ -107,17 +107,37 @@ class ExecutionRouter:
                     log.warning("filled %s with %.1f%% slippage vs mid", idea.symbol, slip * 100)
                 return ExecutionResult(ticket=ticket, fill=fill, attempts=step + 1, slippage=slip)
 
-            # Unfilled: wait, then walk the price toward the touch.
+            # Not filled ON THE ACKNOWLEDGEMENT - which is the normal case,
+            # not a failure. The exchange answers later, so let the order WORK
+            # and then ASK before giving up. This settle-and-repoll used to sit
+            # inside the `step < max_steps - 1` branch, so with the chase
+            # disabled (max_steps = 1) it never ran and every order was
+            # cancelled microseconds after being sent. See
+            # `claude/order-cancelled-before-it-could-fill.md`.
+            settle = self.exec_cfg.fill_settle_seconds
+            if chase.enabled and step < max_steps - 1:
+                settle = chase.interval_seconds
+            if settle > 0:
+                time.sleep(settle)
+            refreshed = self.broker.order_status(fill.order_id) if fill.order_id else None
+            if refreshed and refreshed.is_filled:
+                slip = slippage_vs_mid(
+                    idea, refreshed.filled_avg_price or ticket.limit_price or 0
+                )
+                return ExecutionResult(
+                    ticket=ticket, fill=refreshed, attempts=step + 1, slippage=slip
+                )
+
+            # Still unfilled. Cancel, and walk the price only if a chase step
+            # remains - one resting order per step, never two.
+            self.broker.cancel(fill.order_id)
             if step < max_steps - 1:
-                time.sleep(chase.interval_seconds)
-                refreshed = self.broker.order_status(fill.order_id) if fill.order_id else None
-                if refreshed and refreshed.is_filled:
-                    return ExecutionResult(ticket=ticket, fill=refreshed, attempts=step + 1)
-                self.broker.cancel(fill.order_id)
                 log.info("chasing %s: step %d -> %d", idea.symbol, step, step + 1)
             else:
-                self.broker.cancel(fill.order_id)
-                last_error = "unfilled after chase"
+                last_error = (
+                    f"unfilled after {settle}s at {ticket.limit_price}"
+                    if not chase.enabled else "unfilled after chase"
+                )
 
         assert ticket is not None
         return ExecutionResult(ticket=ticket, fill=None, attempts=max_steps, error=last_error)

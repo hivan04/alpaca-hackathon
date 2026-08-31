@@ -48,6 +48,7 @@ import datetime as dt
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from oaa.agents.critic import Critic
 from oaa.agents.llm import get_llm
@@ -279,6 +280,7 @@ class Orchestrator:
             "events_arm": self.events_arm,
             "events_flatten": self.events_flatten,
             "events_watch": self.events_watch,
+            "daily_report": self.daily_report,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -931,6 +933,63 @@ class Orchestrator:
             len(account.positions), f"{account.regt_buying_power or 0:,.0f}",
         )
         return result
+
+    def daily_report(self, cycle: str = "daily_report") -> CycleResult:
+        """After the close: the session, read back out of the journal.
+
+        Runs last, opens nothing, and is deliberately not allowed to fail the
+        day: a report that raised would put a `cycle_error` in tomorrow's
+        report about yesterday's report. It also takes a final account
+        snapshot first, so the closing equity in the file is the closing
+        equity and not the 15:45 one.
+        """
+        from oaa.telemetry.daily import generate_daily_report
+
+        result = CycleResult(cycle=cycle, started=dt.datetime.now(dt.timezone.utc))
+        tz = self.cfg.schedule.timezone
+        try:
+            self.journal.snapshot(self._account())
+        except Exception as exc:  # noqa: BLE001 - a stale close price is
+            # better than no report at all.
+            result.errors.append(f"closing snapshot failed: {exc}")
+            log.warning("daily report: closing snapshot failed (%s)", exc)
+
+        day = dt.datetime.now(ZoneInfo(tz)).date()
+        try:
+            session, paths = generate_daily_report(
+                journal=self.journal,
+                day=day,
+                out_dir=self.settings.path(self.report_dir()),
+                profile=self.cfg.profile,
+                timezone=tz,
+                llm=self.llm,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"daily report failed: {exc}")
+            log.exception("daily report failed: %s", exc)
+            return result
+
+        result.notes.append(session.headline())
+        result.notes.append(str(paths["markdown"]))
+        self.journal.event(
+            "daily_report",
+            date=session.date,
+            day_pl=session.day_pl,
+            fills=len(session.fills),
+            declined=len(session.potential),
+            gate_rejections=session.gate_rejections,
+            path=str(paths["markdown"]),
+        )
+        # On the tape rather than at INFO: `telemetry.console: focused` filters
+        # INFO, and "the day's report exists, here it is" is precisely an
+        # operator line - the same class as OPEN and CLOSE.
+        tape().info("REPORT %s -> %s", session.headline(), paths["markdown"])
+        return result
+
+    def report_dir(self) -> str:
+        """`<telemetry.report_dir>/<profile>` - one folder per account."""
+        base = getattr(self.cfg.telemetry, "report_dir", "reports")
+        return f"{base}/{self.cfg.profile}"
 
     # ================================================================== #
     # shared pipeline

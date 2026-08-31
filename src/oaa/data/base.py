@@ -56,6 +56,27 @@ class MarketDataProvider(abc.ABC):
         thousands of contracts and will exhaust the 200 req/min budget."""
         return round(spot * (1 - width_pct), 2), round(spot * (1 + width_pct), 2)
 
+    def context_chain_window(self) -> tuple[int, int]:
+        """The DTE band the ENABLED strategies could actually trade.
+
+        `options.min/max_days_to_expiry` is the outer envelope the per-contract
+        filter uses, NOT what anything trades. Building the context chain from
+        the envelope handed `intraday_momentum` - which buys 0-2 DTE - a chain
+        whose minimum DTE was 3, so its `ChainView` was empty on every symbol of
+        every cycle and it reported "no contracts survived the liquidity filter"
+        forever. See `claude/live-chain-defect-confirmed.md`.
+
+        Replay has always been right here: `tradable_dte_range` is the same
+        computation `backtest/runner.py` does, and a test already pins that its
+        config-only form agrees with the strategy-aware one. This makes the live
+        path ask the same question, so the two stop disagreeing.
+
+        Imported inside the function because `backtest` imports `data`.
+        """
+        from oaa.backtest.runner import tradable_dte_range
+
+        return tradable_dte_range(self.cfg)
+
     @staticmethod
     def _today() -> dt.date:
         return clock.today()

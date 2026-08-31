@@ -295,7 +295,10 @@ class AlpacaCliDataProvider(MarketDataProvider):
             spot = float(history[-1]["close"])
 
         try:
-            chain = self.option_chain(symbol)
+            chain_min_dte, chain_max_dte = self.context_chain_window()
+            chain = self.option_chain(
+                symbol, min_dte=chain_min_dte, max_dte=chain_max_dte
+            )
         except DataError as exc:
             log.debug("%s: no chain (%s) - continuing without an overlay", symbol, exc)
             chain = []
