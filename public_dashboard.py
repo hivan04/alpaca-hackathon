@@ -34,7 +34,15 @@ os.environ["OAA_PUBLIC"] = "1"
 if "OAA_BACKTEST__OUTPUT_DIR" not in os.environ:
     _published = Path(__file__).resolve().parent / "public" / "runs"
     if any(_published.glob("*/manifest.json")):
-        os.environ["OAA_BACKTEST__OUTPUT_DIR"] = "public/runs"
+        # ABSOLUTE, deliberately. A relative value is resolved against
+        # `Settings.root`, which `project_root()` finds by walking up from the
+        # INSTALLED `oaa/config/loader.py` looking for a directory holding both
+        # `config/` and `src/` - and falls back to `Path.cwd()` when the
+        # package is installed into site-packages rather than run from the
+        # tree. On a deploy host those are not always the repo root, and the
+        # only symptom is a backtest tab with no history and no error.
+        # `Settings.path` returns an absolute value untouched.
+        os.environ["OAA_BACKTEST__OUTPUT_DIR"] = str(_published)
 
 
 def _bootstrap_path() -> None:

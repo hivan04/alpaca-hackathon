@@ -504,11 +504,27 @@ def render_backtest(settings: Any) -> None:
 
     payload = st.session_state.get("bt_result")
     if not payload:
-        st.markdown(
-            "### No backtest loaded\n"
-            "Open **Run a new backtest** above, set the universe and window, "
-            "then **Run backtest**. "
-            "Every run is saved under `runs/backtests/` and can be reopened here."
+        # Name the directory that was searched. An empty history has exactly
+        # one cause - nothing with a `manifest.json` under the configured
+        # output directory - and without the path on screen that is
+        # indistinguishable from a broken page. It cost an evening once.
+        store = settings.path(cfg.backtest.output_dir)
+        found = len(list(store.glob("*/manifest.json"))) if store.is_dir() else 0
+        if mode.is_public():
+            st.markdown(
+                "### No backtest loaded\n"
+                "This build reads published runs only; it cannot start one."
+            )
+        else:
+            st.markdown(
+                "### No backtest loaded\n"
+                "Open **Run a new backtest** above, set the universe and "
+                "window, then **Run backtest**."
+            )
+        st.caption(
+            f"Looked in `{store}` — "
+            + ("directory does not exist" if not store.is_dir()
+               else f"{found} run(s) with a manifest")
         )
         _methodology(cfg)
         return

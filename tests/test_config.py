@@ -247,6 +247,35 @@ def test_an_unknown_variant_is_an_error_not_a_silent_baseline():
         load_config(profile="judged", variant="does-not-exist")
 
 
+def test_a_variant_resolves_from_the_archive():
+    """Archiving v2 must not break it - an archived result has to stay
+    reproducible or the archive is just a folder of claims."""
+    root = project_root()
+    assert (root / "archive/strategies/v2/v2.yaml").exists()
+    assert not (root / "config/variants/v2.yaml").exists(), (
+        "two copies of a variant drift, and the loader cannot then say which "
+        "one produced a run"
+    )
+    assert load_config(profile="judged", variant="v2").variant == "v2"
+
+
+def test_a_variant_cannot_reach_the_live_path(monkeypatch):
+    """v2 is archived research. The ONLY way to select a variant is an explicit
+    `--variant` on `oaa backtest`; there is no env var and no config key, so a
+    stray export cannot put a fitted strategy on the judged account."""
+    monkeypatch.setenv("OAA_VARIANT", "v2")
+    assert load_config(profile="judged").variant is None
+
+
+def test_no_variant_key_ships_in_the_default_config():
+    import yaml
+
+    raw = yaml.safe_load((project_root() / "config/default.yaml").read_text())
+    assert "variant" not in raw, (
+        "a variant in default.yaml would apply to `oaa run` as well as backtests"
+    )
+
+
 def test_a_misspelled_strategy_override_is_an_error():
     from oaa.config.loader import _apply_strategy_overrides
 

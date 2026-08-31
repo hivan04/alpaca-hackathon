@@ -88,6 +88,34 @@ def _env_overlay(known_keys: set[str]) -> dict[str, Any]:
     return overlay
 
 
+#: Where a named variant may live. `config/variants/` is the working set;
+#: `archive/strategies/<name>/` is where a strategy is parked once it is
+#: reference material rather than a candidate - still runnable, so an archived
+#: result stays reproducible, but out of the live config tree.
+_VARIANT_DIRS = ("config/variants/{name}.yaml", "archive/strategies/{name}/{name}.yaml")
+
+
+def _variant_path(root: Path, name: str) -> Path:
+    candidates = [root / t.format(name=name) for t in _VARIANT_DIRS]
+    found = [p for p in candidates if p.exists()]
+    if len(found) > 1:
+        raise ValueError(
+            f"variant '{name}' exists in more than one place: "
+            + ", ".join(str(p.relative_to(root)) for p in found)
+            + ". Keep exactly one - two copies drift and the loader cannot "
+            "tell you which produced a run."
+        )
+    if not found:
+        available = sorted(
+            {q.stem for q in (root / "config/variants").glob("*.yaml")}
+            | {q.parent.name for q in (root / "archive/strategies").glob("*/*.yaml")}
+        )
+        raise FileNotFoundError(
+            f"unknown variant '{name}'. Available: {', '.join(available) or 'none'}"
+        )
+    return found[0]
+
+
 def _apply_strategy_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
     """Merge `strategy_overrides: {<name>: {...}}` into the strategies list.
 
@@ -167,18 +195,14 @@ def load_config(
     # exits over the same code - applied after the profile so it is orthogonal
     # to which account is being traded, and before local.yaml so a machine
     # override still wins. `None` is the baseline strategy and touches nothing.
-    active_variant = variant or os.getenv("OAA_VARIANT") or merged.get("variant")
+    # A variant can ONLY be selected by an explicit `--variant` on `oaa
+    # backtest`. There is deliberately no environment variable and no
+    # `variant:` key in default.yaml: an archived research strategy must not be
+    # able to reach the live loop through a stray export, and `oaa run` never
+    # passes this argument. See tests/test_config.py.
+    active_variant = variant
     if active_variant:
-        variant_path = base_path.parent / "variants" / f"{active_variant}.yaml"
-        if not variant_path.exists():
-            available = sorted(
-                q.stem for q in (base_path.parent / "variants").glob("*.yaml")
-            )
-            raise FileNotFoundError(
-                f"unknown variant '{active_variant}': {variant_path} does not exist. "
-                f"Available: {', '.join(available) or 'none'}"
-            )
-        merged = _deep_merge(merged, _read_yaml(variant_path))
+        merged = _deep_merge(merged, _read_yaml(_variant_path(root, active_variant)))
         merged = _apply_strategy_overrides(merged)
     merged["variant"] = active_variant or None
 
@@ -187,15 +211,18 @@ def load_config(
     if overrides:
         merged = _deep_merge(merged, overrides)
 
+    # Re-assert AFTER the env overlay. `variant` is a Config field, so the
+    # generic OAA_* overlay happily set it from OAA_VARIANT - which is exactly
+    # the leak the argument-only rule above exists to prevent, and a test
+    # caught it. The selected variant is whatever `--variant` said, or None.
+    merged["variant"] = active_variant or None
+
     # An explicit `--profile` beats OAA_PROFILE in .env, always. Without this
     # the env overlay silently wins and `oaa <cmd> --profile judged` quietly
     # keeps running on the dev account - the exact failure the profile split
     # exists to prevent, and one that leaves no trace in the output.
     if profile:
         merged["profile"] = profile
-    # Same reasoning for the variant: an explicit --variant beats OAA_VARIANT.
-    if variant:
-        merged["variant"] = variant
 
     merged = _load_strategy_params(merged, root)
     return Config.model_validate(merged)

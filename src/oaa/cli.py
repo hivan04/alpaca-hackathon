@@ -1100,9 +1100,16 @@ def backtest(
     settings = _settings_only(profile, config, variant)
     print_banner(resolve(settings, "Backtest"))
     if settings.config.variant:
+        # Show the path it actually RESOLVED to. A variant can live in
+        # config/variants/ or archive/strategies/, and a banner naming the
+        # wrong one is how you end up sure you ran something you did not.
+        from oaa.config.loader import _variant_path, project_root
+
+        root = project_root()
+        where = _variant_path(root, settings.config.variant).relative_to(root)
         console.print(
             f"[bold cyan]  variant          {settings.config.variant}[/bold cyan]"
-            f"   (config/variants/{settings.config.variant}.yaml over the baseline)"
+            f"   ({where} over the baseline)"
         )
     else:
         console.print("[dim]  variant          none (baseline strategy)[/dim]")
