@@ -4,8 +4,7 @@
 config, monitors positions in between, and keeps going across days without
 supervision.
 
-Deliberately dependency-free (no APScheduler): one loop, one sleep, easy to
-reason about at 2am when something is wrong.
+Deliberately dependency-free (no APScheduler): one loop, one sleep.
 """
 
 from __future__ import annotations
