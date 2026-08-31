@@ -374,7 +374,7 @@ benefit two days before the entry cutoff.
 Three defects surfaced in today's session. None is a market state; all three are
 our own code or our own config reporting itself as the market.
 
-### 1. The live chain DTE window — confirmed, fixed on a branch, not merged
+### 1. The live chain DTE window — confirmed, fixed, on `main` (`375e59a`)
 
 `config/default.yaml: options.min_days_to_expiry: 3`, and both live providers'
 `context()` called `option_chain(symbol)` with **no** `min_dte`, so the live
@@ -388,15 +388,20 @@ This hit carry indirectly rather than directly — 7–14 DTE sits inside 3–45
 it is the reason 25 of 54 rejections carried *"term structure: chain has no two
 expiries to compare"*: the front anchor is 1 DTE and was never fetched.
 
-The fix is on branch **`fix/live-chain-dte-window`, 27 lines across three
-files, uncommitted**: a `context_chain_window()` on `MarketDataProvider`
+The fix is **27 lines across three files, committed to `main` as `375e59a`**
+on the evening of 31 Aug: a `context_chain_window()` on `MarketDataProvider`
 returning `tradable_dte_range(cfg)`, called by both live `context()` methods.
 The requested window becomes **0–32 DTE**. It is *cheaper*, not dearer — one
 `get_option_chain` per symbol either way, and the modelled contract count falls
 7,865 → 7,182 (−8.7%) because the 33–45 tail is larger than the 0–2 head on
 everything except SPY and QQQ. Five new tests in `tests/test_live_chain_window.py`
-fail on `main` and pass on the branch; the 13 pre-existing suite failures are
-identical on both trees (Streamlit rendering tests, Linux artefact).
+failed before the change and pass after it; the 13 pre-existing suite failures
+were identical on both trees (Streamlit rendering tests, a Linux artefact of the
+checking environment).
+
+**The running process has not restarted into it.** The agent holds its modules
+in memory, so the live chain request is still 3–45 DTE until `oaa run` is
+restarted. Committing changed the repo, not the process.
 
 Do **not** lower `options.min_days_to_expiry` globally to achieve this: that
 widens the carry chain, whose 3 DTE floor is a gamma control.
@@ -432,7 +437,7 @@ cannot.** That asymmetry is the bug in one sentence.
 **The fix is a risk decision, not a correction, and only half of it should
 ship before the cutoff.**
 
-- **A — landed in the working tree (uncommitted).** `iron_condor_by_delta` now
+- **A — shipped, on `main`.** `iron_condor_by_delta` now
   asserts the body straddles spot and names the real cause ("the filtered
   ladder for this expiry runs X–Y on calls … one side ends before it reaches the
   money … a filter result, not a listing gap"). Creates no trades; costs
@@ -555,14 +560,15 @@ of them on 31 Aug).
   and `exit_on_vwap_recross` is still `true`. Every honest number in this
   document was measured on a patched build. Apply the patch or state the
   provenance.
-- **`.git/index.lock` exists, zero bytes, and blocks all git writes.**
-  `rm -f .git/index.lock` on the MacBook. Until then nothing — including the
-  chain-window fix and the condor invariant — can be committed, and any run
-  stamps as `dirty`.
-- **The chain-window fix is on an unmerged branch and the live process has not
-  restarted into it.** The running agent holds its modules in memory. Without it
-  the intraday book cannot trade at all and the term-structure vote is dead
-  live.
+- **The live process has not restarted into the chain-window fix.** The code is
+  on `main` (`375e59a`); the running agent holds its modules in memory, so until
+  `oaa run` is restarted the intraday book still cannot trade and the
+  term-structure vote is still dead live. This is now the only thing standing
+  between the fix and the account.
+
+*Cleared 31 Aug evening:* the stale `.git/index.lock` that blocked every git
+write, and the `fix/live-chain-dte-window` branch — everything is committed on
+`main` and the working tree is clean.
 
 **Open, and honest about it:**
 

@@ -567,14 +567,13 @@ alongside nothing else.
   `{market.symbol: market}` — the single name it is arming. Coverage is counted
   and carried onto the verdict, so this is visible rather than silent, but a
   cap computed over part of the book is looser than one computed over all of it.
-- **The live chain DTE window fix is on a branch, not in the running process.**
-  `fix/live-chain-dte-window` derives the live `context()` chain window from
+- **The live chain DTE window fix is committed but not in the running process.**
+  `375e59a` on `main` derives the live `context()` chain window from
   `tradable_dte_range(cfg)`, which includes this book's runtime-derived 1-9 DTE
-  window; without it the live providers request `options.min/max_days_to_expiry`
-  (3-45 DTE) regardless of what any book declared. The working tree is on that
-  branch and **uncommitted** — a stale `.git/index.lock` blocks git writes — and
-  the running agent holds its modules in memory, so the live process is on the
-  old window until it is restarted.
+  window; before it the live providers requested `options.min/max_days_to_expiry`
+  (3-45 DTE) regardless of what any book declared. The running agent holds its
+  modules in memory, so the live process is still on the old window until
+  `oaa run` is restarted.
 
 ## Running it
 

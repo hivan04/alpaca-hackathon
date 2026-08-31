@@ -37,7 +37,7 @@ live call; that is what keeps them deterministic and replayable.
 |---|---|---|
 | `bars` | daily, `lookback_days` | complete prior sessions only |
 | `intraday_bars` | `data.intraday_timeframe` × `intraday_lookback_days` | **same** (fixed 27 Aug — replay previously carried one day, making the backtest a strictly harsher strategy than live) |
-| `chain` | live Alpaca chain snapshot, DTE window = `tradable_dte_range(cfg)` — **0–32 on the judged profile** (fixed 31 Aug, on `fix/live-chain-dte-window`, not yet merged) | real option bars where a print exists, modelled elsewhere |
+| `chain` | live Alpaca chain snapshot, DTE window = `tradable_dte_range(cfg)` — **0–32 on the judged profile** (fixed 31 Aug, on `main` as `375e59a`; the running agent needs a restart to pick it up) | real option bars where a print exists, modelled elsewhere |
 | `news` | Alpaca news stream | Alpaca headlines published before the replayed moment |
 | `iv_rank`, `realised_vol` | computed live (Garman-Klass) | computed at `i-1`, same estimator |
 

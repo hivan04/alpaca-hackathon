@@ -1,7 +1,7 @@
 # Intraday book — intraday_momentum
 
-**Status as of 31 Aug 2026, evening:** `enabled: true`. Working tree on branch
-`fix/live-chain-dte-window`.
+**Status as of 31 Aug 2026, evening:** `enabled: true`. Everything below is on
+`main` as of `375e59a`; the working tree is clean.
 
 **Two things a judge should know before anything else in this file:**
 
@@ -444,9 +444,8 @@ carry chain, whose 3 DTE floor is a gamma control.
 
 ### The fix, and its state
 
-Branch **`fix/live-chain-dte-window`**, **27 lines across three files**,
-**uncommitted** (a stale zero-byte `.git/index.lock` blocks `git add` and
-`git commit` until `rm -f .git/index.lock` is run on the MacBook).
+**27 lines across three files**, committed to `main` as `375e59a` on the evening
+of 31 Aug.
 
 One new method on `MarketDataProvider` returning `tradable_dte_range(cfg)` — the
 function replay already uses — and both live `context()` methods passing that
@@ -471,12 +470,12 @@ the point of the exercise, same model, SPY on 31 Aug:
 | 3–45 | **0** |
 | 0–32 | **324** |
 
-Five new tests in `tests/test_live_chain_window.py`; **5 failed on `main`, 5
-passed on the branch**, and the full-suite failure set is identical on both
+Five new tests in `tests/test_live_chain_window.py`; **5 failed before the
+change, 5 pass after it**, and the full-suite failure set was identical on both
 trees (13 pre-existing Streamlit rendering failures in the checking
-environment). The branch is **not merged and not restarted into** — the running
-agent holds its modules in memory, so the live process is unaffected by the
-edited files until it is restarted.
+environment). It is **committed but not restarted into** — the running agent
+holds its modules in memory, so the live process is still requesting 3–45 DTE
+until `oaa run` is restarted.
 
 ### An IV-rank divergence the same run surfaced
 
@@ -575,9 +574,10 @@ third subtraction — a labelling defect, not an accounting one.
    arbitraged long ago. The originality is the catalyst gate, the confirmation
    score, the term-structure vote and the surface-aware selection — and none of
    them turned the sign.
-4. **The book cannot trade live today**, for a reason that is a 27-line fix on
-   an uncommitted branch, not a strategy failure. The distinction between an
-   empty shelf and a strict filter is the interesting part.
+4. **The book could not trade live today**, for a reason that turned out to be a
+   27-line fix rather than a strategy failure. The distinction between an empty
+   shelf and a strict filter is the interesting part. The fix is committed; the
+   process still needs a restart.
 5. **Sizing has a known open defect.** 6% of `single_long` trades were 1.5×+
    oversized and both the largest win and the largest loss are in that tail. The
    measured expectancy is contaminated in both directions by it.
@@ -596,9 +596,9 @@ third subtraction — a labelling defect, not an accounting one.
 
 **Before the entry cutoff (`2026-09-02T20:00:00Z`), in order:**
 
-1. **Land the live chain-window fix.** Without it the book cannot trade at all.
-   Requires `rm -f .git/index.lock` on the MacBook, then commit, then restart
-   the live process — the running agent holds its modules in memory.
+1. **Restart the live process.** The chain-window fix is on `main` (`375e59a`)
+   but the running agent holds its modules in memory, so until it restarts the
+   book still cannot trade at all.
 2. **Decide whether this book runs at all on the judged account.** The weekly
    table argues for dropping it; §"Dropping this book" states both sides. This
    is a decision, not a measurement, and it has not been made.
