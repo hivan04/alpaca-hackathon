@@ -1,9 +1,9 @@
 /**
  * PM2 process definitions.
  *
- *   pm2 start ecosystem.config.js --only oaa-dev      # throwaway account
- *   pm2 start ecosystem.config.js --only oaa-judged   # THE judged account
- *   pm2 start ecosystem.config.js --only oaa-dashboard
+ *   pm2 start deploy/ecosystem.config.js --only oaa-dev      # throwaway account
+ *   pm2 start deploy/ecosystem.config.js --only oaa-judged   # THE judged account
+ *   pm2 start deploy/ecosystem.config.js --only oaa-dashboard
  *   pm2 logs oaa-judged
  *   pm2 save && pm2 startup            # survive a host reboot
  *
@@ -14,10 +14,13 @@
  * development only.
  */
 const path = require("path");
-const PY = path.join(__dirname, ".venv", "bin", "oaa");
+// This file lives in deploy/, so the repo root is one level up. Every path
+// below is anchored there - pm2 resolves out_file/error_file against cwd.
+const ROOT = path.join(__dirname, "..");
+const PY = path.join(ROOT, ".venv", "bin", "oaa");
 
 const base = {
-  cwd: __dirname,
+  cwd: ROOT,
   interpreter: "none",          // `oaa` is already an executable entry point
   autorestart: true,
   max_restarts: 50,

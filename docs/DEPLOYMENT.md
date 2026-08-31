@@ -26,9 +26,9 @@ npm install -g pm2
 
 make setup && make doctor            # confirm it works before daemonising
 
-pm2 start ecosystem.config.js --only oaa-dev        # throwaway account
-pm2 start ecosystem.config.js --only oaa-judged     # THE judged account
-pm2 start ecosystem.config.js --only oaa-dashboard  # the public URL
+pm2 start deploy/ecosystem.config.js --only oaa-dev        # throwaway account
+pm2 start deploy/ecosystem.config.js --only oaa-judged     # THE judged account
+pm2 start deploy/ecosystem.config.js --only oaa-dashboard  # the public URL
 
 pm2 save && pm2 startup              # survive a host reboot
 pm2 logs oaa-judged

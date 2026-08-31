@@ -139,6 +139,10 @@ bt-wiring: ## Synthetic smoke test - proves the plumbing, NOT a result
 dashboard: ## Streamlit operator dashboard: backtesting + live trading
 	$(BIN)/oaa dashboard
 
+.PHONY: publish-reports
+publish-reports: ## Copy judged daily reports into public/reports/ (commit after)
+	$(BIN)/python scripts/publish_reports.py --all
+
 .PHONY: public-dashboard
 public-dashboard: ## Streamlit PUBLIC dashboard (read-only) - preview it locally
 	OAA_PUBLIC=1 $(BIN)/streamlit run public_dashboard.py --server.port 8502
@@ -150,13 +154,13 @@ mcp-tools: ## List the tools the Alpaca MCP server exposes
 # --- deployment ---------------------------------------------------------------
 .PHONY: pm2-dev
 pm2-dev: ## Run the dev loop under PM2
-	pm2 start ecosystem.config.js --only oaa-dev
+	pm2 start deploy/ecosystem.config.js --only oaa-dev
 
 .PHONY: pm2-judged
 pm2-judged: ## Run the JUDGED loop under PM2 (this trades the submitted account)
 	@echo "This trades the account the judges evaluate."
 	@read -p "Type 'judged' to confirm: " c; [ "$$c" = "judged" ] || exit 1
-	pm2 start ecosystem.config.js --only oaa-judged
+	pm2 start deploy/ecosystem.config.js --only oaa-judged
 	pm2 save
 
 .PHONY: pm2-status
@@ -199,7 +203,7 @@ clean: ## Remove caches and build artefacts
 live: ## Start both accounts live + the dashboard (pm2)
 	@command -v pm2 >/dev/null || { echo "pm2 not installed: npm i -g pm2"; exit 1; }
 	@mkdir -p logs runs/dev runs/judged
-	pm2 start ecosystem.config.js
+	pm2 start deploy/ecosystem.config.js
 	@pm2 ls
 	@echo ""
 	@echo "Streamlit operator dashboard: http://localhost:8501 -> Control tab"
@@ -232,7 +236,7 @@ live-logs: ## Tail both live loops
 
 .PHONY: live-stop
 live-stop: ## Stop both loops and the dashboard
-	pm2 stop ecosystem.config.js
+	pm2 stop deploy/ecosystem.config.js
 
 .PHONY: switchboard
 switchboard: ## Print the switch state of both accounts

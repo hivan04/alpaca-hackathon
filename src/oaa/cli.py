@@ -199,7 +199,7 @@ def _render_status(snap: dict) -> None:
     else:
         console.print(
             "[red]No agent process found.[/] Start it with "
-            "[bold]pm2 start ecosystem.config.js --only oaa-judged[/] "
+            "[bold]pm2 start deploy/ecosystem.config.js --only oaa-judged[/] "
             "(or `oaa run --profile judged`)."
         )
 

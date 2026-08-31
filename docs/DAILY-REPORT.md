@@ -73,8 +73,40 @@ oaa daily-report --profile judged --no-llm             # arithmetic critique onl
 
 The report reads the **journal**, never the broker, so regenerating a past day
 gives that day's numbers, and a second run of the same date corrects the file
-rather than adding another. That is also why `reports/` is committed and
-`runs/` is not: the reports are the week's readable record.
+rather than adding another.
+
+`reports/` is gitignored, like `runs/`: it is generated, it grows by a pair of
+files every afternoon, and committing it would put a diff in the tree after
+every close. The sessions worth publishing are copied into `public/reports/`,
+which is committed - see below.
+
+## On the dashboard
+
+The **Daily Reports** tab renders the `.json` sidecar rather than the markdown:
+the session's headline numbers, the ideas that were priced and refused, the
+risk-approved-but-unsent callout, the gate funnel as a chart, and the critique
+with its author named. The written report is under the last expander, with a
+download button, for anyone who would rather read the file.
+
+The tab is on **both** builds and carries no mode guard, which is worth stating
+plainly because every other public page either had a control removed or hides a
+live read behind a button. This one opens files a finished cycle already wrote:
+no data provider, no broker, no network of any kind. `tests/test_reports_page.py`
+asserts that against the source, because the change that breaks it - a Refresh
+button, a "regenerate today" action - is the kind that looks reasonable in
+review.
+
+    make publish-reports                          # every judged session
+    python scripts/publish_reports.py --list      # or choose them by hand
+    python scripts/publish_reports.py 2026-08-31
+
+`reports/` is gitignored, so a deploy host has none of it; the script copies
+chosen dates into `public/reports/<profile>/`, which is committed. The page
+reads the local store first and falls back to the published one, so a report
+regenerated on the Mac is never shadowed by the copy published before it. The
+published directory is found from the package's own location as well as from
+`Settings.root`, because on a hosted process the config's root can resolve to
+the working directory rather than the repo.
 
 ## Where the numbers come from
 

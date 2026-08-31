@@ -47,3 +47,11 @@ logs/
 
 # Generated per-day judged reports, same treatment as runs/.
 reports/
+# Same trap as runs/: no leading slash means `reports/` matches at ANY depth,
+# so public/reports/ is ignored too without these - and the deployed Daily
+# Reports tab boots empty with no error anywhere.
+!public/reports/
+!public/reports/**
+
+# scratch: junk moved out of the repo root, safe to delete by hand
+_to_delete/

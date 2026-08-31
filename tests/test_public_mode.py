@@ -257,22 +257,29 @@ def test_the_public_page_has_no_control_tab(monkeypatch):
     assert "Price the live chain" not in labels
 
 
-def test_the_public_tabs_are_the_three_a_reader_wants(monkeypatch):
+def test_the_public_tabs_are_the_four_a_reader_wants(monkeypatch):
     """No Live Trading, and Positions carries the name instead.
 
     Live Trading is the operator's instrument panel - live chain, skew, term
     structure, the justification for a cycle that just ran - and all of it
     reads the chain endpoint on our key. The broker's own answer to "is it
     trading" is the Positions page, so that is what gets the name publicly.
+
+    Daily Reports IS public: it opens files a finished cycle already wrote,
+    reaches no network at all, and is the only page that says what the system
+    thinks is wrong with itself.
     """
     at = _render(monkeypatch, public=True)
-    assert _labels(at) == {"Backtesting", "Live Trading Positions", "Events"}
+    assert _labels(at) == {
+        "Backtesting", "Live Trading Positions", "Events", "Daily Reports",
+    }
 
 
 def test_the_operator_tabs_are_untouched(monkeypatch):
     at = _render(monkeypatch, public=False)
     assert _labels(at) == {
-        "Backtesting", "Live Trading", "Positions", "Events", "Control",
+        "Backtesting", "Live Trading", "Positions", "Events", "Daily Reports",
+        "Control",
     }
 
 

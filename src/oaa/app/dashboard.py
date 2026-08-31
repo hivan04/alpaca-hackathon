@@ -72,6 +72,7 @@ from oaa.app import mode, skin  # noqa: E402
 from oaa.app.control import render_control  # noqa: E402
 from oaa.app.events_page import render_events  # noqa: E402
 from oaa.app.positions import render_positions  # noqa: E402
+from oaa.app.reports_page import render_reports  # noqa: E402
 from oaa.app.theme import is_dark, palette, style  # noqa: E402
 from oaa.core.errors import DataError  # noqa: E402
 
@@ -80,6 +81,7 @@ PAGE_LIVE = "Live Trading"
 PAGE_POSITIONS = "Positions"
 PAGE_EVENTS = "Events"
 PAGE_CONTROL = "Control"
+PAGE_REPORTS = "Daily Reports"
 
 #: The public build has no Live Trading tab. That page is the operator's
 #: instrument panel - the live option chain, the skew and term charts, the
@@ -88,6 +90,12 @@ PAGE_CONTROL = "Control"
 #: actually trading" is the broker's own answer, which is the Positions page,
 #: so that page carries the name there.
 PAGE_PUBLIC_POSITIONS = "Live Trading Positions"
+
+#: Daily Reports is on BOTH builds. It reads files a completed cycle already
+#: wrote - no fetch, no chain read, no broker call - so there is nothing on it
+#: for a guard to protect, and it is the only page that says what the system
+#: thinks is wrong with itself. On the public build it is the judged account's
+#: reports, because that is the only profile the public build constructs.
 
 #: The dashboard is a viewer; the config it reads is the one the agent runs on.
 #: `oaa dashboard --config ...` is the way to point it somewhere else.
@@ -1562,6 +1570,7 @@ def main() -> None:
             (PAGE_BACKTEST, lambda: render_backtest(settings)),
             (PAGE_PUBLIC_POSITIONS, lambda: render_positions(settings_for)),
             (PAGE_EVENTS, lambda: render_events(settings)),
+            (PAGE_REPORTS, lambda: render_reports(settings)),
         ]
     else:
         pages = [
@@ -1569,6 +1578,7 @@ def main() -> None:
             (PAGE_LIVE, lambda: render_live(settings)),
             (PAGE_POSITIONS, lambda: render_positions(settings_for)),
             (PAGE_EVENTS, lambda: render_events(settings)),
+            (PAGE_REPORTS, lambda: render_reports(settings)),
             (PAGE_CONTROL, lambda: render_control(settings_for)),
         ]
     for tab, (_, render) in zip(st.tabs([name for name, _ in pages]), pages,
