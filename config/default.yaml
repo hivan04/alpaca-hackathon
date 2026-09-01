@@ -782,10 +782,22 @@ management:
   # null disables the gate; entry_window_gate() and the orchestrator both
   # treat null as "no cutoff".
   entry_cutoff_utc: null
-  # Flatten the ENTIRE book on the morning of submission day, well before the
-  # 15:00 UTC deadline. Realised P&L on a flat account is unambiguous evidence;
-  # an open book asks a judge to trust a mid-price mark on a wide quote.
-  submission_flatten_utc: "2026-09-04T13:45:00Z"
+  # Whole-book submission flatten, DISABLED 1 Sep so the agent keeps running
+  # past the judged window instead of locking itself out permanently.
+  #
+  # What it did when set: at this UTC moment the runner fired one
+  # `submission_flatten` cycle closing every position, then set
+  # `LockState.flattened_for_submission`, after which `lock.may_open` refused
+  # EVERY book for the life of the process - the agent stays up but can never
+  # trade again. The rationale was that realised P&L on a flat account is
+  # unambiguous evidence, where an open book asks a judge to trust a mid-price
+  # mark on a wide quote. That argument still holds; flatten by hand
+  # (`oaa flatten --profile judged`) rather than by restoring this key, so the
+  # timing is a decision instead of a deadline.
+  #
+  # null disables it: runner._check_submission_flatten returns early when
+  # parse_utc() yields None, so nothing else changes.
+  submission_flatten_utc: null
 
 # -----------------------------------------------------------------------------
 # Modelled transaction costs. Paper trading charges none of this and fills

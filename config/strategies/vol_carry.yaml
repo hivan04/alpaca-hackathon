@@ -230,7 +230,12 @@ exits:
   # the same NVDA condor open at 14:00 and again at 15:15.
   reentry_cooldown_minutes: 1440
   defensive_mode: close_tested_side
-  entry_cutoff_utc: "2026-09-02T20:00:00Z"
+  # Carry entry cutoff, DISABLED 1 Sep alongside management.submission_flatten_utc.
+  # Its whole justification was "do not open a structure that cannot decay
+  # before the submission flatten". There is no submission flatten any more, so
+  # the gate now only silences the resident book for no reason. null disables
+  # it: entry_window_gate() returns ok when parse_utc() yields None.
+  entry_cutoff_utc: null
 
 # --- cost gate ----------------------------------------------------------------
 # Underlying selection is a liquidity decision as much as a vol decision. A

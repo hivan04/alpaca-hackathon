@@ -1,0 +1,729 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Three Books, One Account</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 14mm 15mm; }
+  :root{
+    --ink:#12161c; --mid:#4a5560; --soft:#7b8794; --line:#dde3e9; --wash:#f5f7f9;
+    --accent:#0f5c8c; --warn:#8c4a0f; --stop:#8c1f1f; --ok:#1f6b45;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;color:var(--ink);font:10.5pt/1.5 "Helvetica Neue",Helvetica,Arial,sans-serif;
+       -webkit-font-smoothing:antialiased}
+  h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-0.012em}
+  p{margin:0 0 .7em}
+  .eyebrow{font-size:7.6pt;letter-spacing:.16em;text-transform:uppercase;color:var(--soft);
+           font-weight:700;margin-bottom:.5em}
+  section{page-break-inside:avoid;margin-bottom:9mm}
+  .break{page-break-before:always}
+  .lede{font-size:11.5pt;line-height:1.55;color:var(--mid);max-width:52em}
+
+  /* cover */
+  .cover{height:247mm;display:flex;flex-direction:column;justify-content:space-between;
+         page-break-after:always}
+  .rule{border-top:2.5px solid var(--ink);padding-top:6px;font-size:7.6pt;letter-spacing:.16em;
+        text-transform:uppercase;font-weight:700}
+  .cover h1{font-size:44pt;line-height:1.02;letter-spacing:-0.03em;margin:0 0 14px}
+  .cover .sub{font-size:13pt;line-height:1.45;color:var(--mid);max-width:30em}
+  .facts{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border-top:1px solid var(--line)}
+  .facts div{padding:10px 12px 0 0;border-right:1px solid var(--line)}
+  .facts div:last-child{border-right:0}
+  .facts .k{font-size:7.2pt;letter-spacing:.14em;text-transform:uppercase;color:var(--soft);font-weight:700}
+  .facts .v{font-size:10pt;font-weight:600;margin-top:3px}
+
+  h2.head{font-size:22pt;line-height:1.12;letter-spacing:-0.025em;margin:0 0 8px}
+  h3.sub{font-size:12.5pt;margin:14px 0 5px}
+
+  table{width:100%;border-collapse:collapse;font-size:9.4pt;margin:8px 0}
+  th{text-align:left;font-size:7.2pt;letter-spacing:.13em;text-transform:uppercase;color:var(--soft);
+     border-bottom:1.5px solid var(--ink);padding:0 8px 5px 0;font-weight:700;vertical-align:bottom}
+  td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+  td.mono,.mono{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:8.8pt}
+  .num{white-space:nowrap}
+
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:5mm}
+  .card{border:1px solid var(--line);border-top:3px solid var(--ink);padding:11px 12px;background:#fff}
+  .card.transient{border-top-color:var(--soft)}
+  .card .tag{font-size:7pt;letter-spacing:.14em;text-transform:uppercase;color:var(--soft);font-weight:700}
+  .card h4{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11pt;margin:3px 0 7px}
+  .card p{font-size:9.1pt;line-height:1.45;color:var(--mid);margin:0 0 9px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:8.6pt;border-top:1px solid var(--line);padding-top:7px}
+  .kv .k{font-size:6.9pt;letter-spacing:.1em;text-transform:uppercase;color:var(--soft);font-weight:700;padding-top:2px}
+  .kv .v{font-weight:500}
+
+  .gate{border-left:3px solid var(--ink);padding:2px 0 2px 12px;margin:0 0 11px}
+  .gate .n{font-size:7.4pt;letter-spacing:.14em;text-transform:uppercase;color:var(--soft);font-weight:700}
+  .gate h4{font-size:11pt;margin:1px 0 4px}
+  .gate p{font-size:9.3pt;color:var(--mid);margin:0 0 5px}
+  .rule-line{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:8.8pt;background:var(--wash);
+             border:1px solid var(--line);padding:4px 8px;display:inline-block}
+
+  .note{background:var(--wash);border-left:3px solid var(--accent);padding:10px 13px;font-size:9.3pt;
+        line-height:1.5;color:var(--mid);margin:10px 0}
+  .note strong{color:var(--ink)}
+  .note.warn{border-left-color:var(--warn)}
+  .note.stop{border-left-color:var(--stop)}
+  .note .lab{font-size:7pt;letter-spacing:.14em;text-transform:uppercase;font-weight:700;color:var(--ink);
+             display:block;margin-bottom:4px}
+
+  pre{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:8.4pt;line-height:1.42;background:var(--wash);
+      border:1px solid var(--line);padding:10px 12px;margin:8px 0;white-space:pre;overflow:hidden}
+
+  .flow{display:flex;align-items:stretch;gap:0;margin:10px 0;font-size:8.6pt}
+  .flow .step{flex:1;border:1px solid var(--line);padding:8px 9px;background:#fff}
+  .flow .step .t{font-size:6.9pt;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);font-weight:700}
+  .flow .step .b{font-weight:600;margin-top:2px}
+  .flow .arr{display:flex;align-items:center;padding:0 5px;color:var(--soft);font-size:11pt}
+  .flow .step.approve{border-color:var(--ink);border-width:2px}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:6mm}
+  ul{margin:6px 0 10px;padding-left:1.05em}
+  li{margin-bottom:5px;font-size:9.4pt;color:var(--mid)}
+  li strong{color:var(--ink)}
+  .foot{border-top:1px solid var(--line);padding-top:7px;font-size:7.8pt;color:var(--soft);
+        font-family:"SF Mono",Menlo,Consolas,monospace}
+  .tl{width:100%;font-size:8.6pt;border-collapse:collapse}
+  .tl td{border-bottom:1px solid var(--line);padding:4px 8px 4px 0}
+  .tl td:first-child{font-family:"SF Mono",Menlo,Consolas,monospace;white-space:nowrap;width:88px;font-weight:600}
+  .tl td:nth-child(2){font-family:"SF Mono",Menlo,Consolas,monospace;color:var(--accent);width:112px}
+  .tl tr.hard td{background:#fbf3f3}
+  .tl tr.hard td:nth-child(2){color:var(--stop);font-weight:700}
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div>
+    <div class="rule">Eventus · Options Alpha Agents · System architecture</div>
+  </div>
+  <div>
+    <h1>Three books,<br>one account.</h1>
+    <p class="sub">A resident short-premium book, a transient day book, and an overnight
+    events book bounded by size rather than by the firewall. This is the whole system,
+    from the outer frame down to each gate — and every threshold in it was moved at
+    least once, always by measurement.</p>
+  </div>
+  <div class="facts">
+    <div><div class="k">Repo</div><div class="v">alpaca-hackathon</div></div>
+    <div><div class="k">Books</div><div class="v">carry · intraday · events</div></div>
+    <div><div class="k">Judged account</div><div class="v">PA3TSH9YTFJL</div></div>
+    <div><div class="k">Window</div><div class="v">28 Aug – 4 Sep 2026</div></div>
+  </div>
+</div>
+
+<section>
+  <div class="eyebrow">The outer frame</div>
+  <h2 class="head">One account is the only shared resource</h2>
+  <p class="lede">Everything else in the system exists to decide who may touch it, with how
+  much, and at which minute. Alpaca is reached three ways, deliberately, for three
+  different jobs.</p>
+
+  <pre>
+   AI ASSISTANT                MCP SERVER · read              ALPACA PAPER ACCOUNT
+   decides WHAT to trade  ──►  7-tool allowlist        ──►    the judged account
+   cannot decide the rules     no order tools exposed         full history on the record
+        │                                                              ▲
+        │  TradeIdea                                                   │ orders
+        ▼                                                              │
+   CAPITAL FIREWALL  ──►  RISK ENGINE  ──[signed stamp]──►  CLI · write
+   which book,            the ONLY approver                 refuses unstamped tickets
+   which minute                                             every order is replayable
+
+   place_option_order is WITHHELD from the model.
+  </pre>
+
+  <p>Reads and writes take different paths on purpose. The agent queries Alpaca's MCP server
+  directly and reasons over live state — that is real autonomy, not a scripted pipeline with a
+  language model bolted on. But the server's own order-placing tools are never exposed to it.
+  An agent that can place a raw order can bypass the firewall, and the whole point of the
+  firewall is that nothing can.</p>
+
+  <table>
+    <tr><th>Surface</th><th>Job</th><th>Why this one</th></tr>
+    <tr><td class="mono">MCP server</td><td>read</td><td>account, positions, orders, clock, quotes, news — seven tools, allowlisted</td></tr>
+    <tr><td class="mono">Alpaca CLI</td><td>write, and the backtest data path</td><td>every order is a shell command you can paste into a terminal and replay</td></tr>
+    <tr><td class="mono">Trading API (REST)</td><td>the judged profile's broker</td><td><span class="mono">broker.primary: rest</span>, and the only path with websocket streaming</td></tr>
+  </table>
+</section>
+
+<section class="break">
+  <div class="eyebrow">The books</div>
+  <h2 class="head">One resident, one transient tenant, one overnight guest</h2>
+  <p class="lede">Carry and intraday are uncorrelated in signal and opposite in vol exposure.
+  That is the real portfolio argument for running both — and the reason the boundary
+  between them has to be enforced rather than assumed.</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="tag">Resident · firewall tenant</div>
+      <h4>vol_carry</h4>
+      <p>Sells the IV–RV spread as defined-risk structures and holds them. Theta accrues on
+      calendar days, weekend included; a nightly round trip would pay the spread for nothing.</p>
+      <div class="kv">
+        <div class="k">Edge</div><div class="v">variance risk premium</div>
+        <div class="k">Shape</div><div class="v">iron condor, 0.25Δ shorts</div>
+        <div class="k">Hold</div><div class="v">3–10 sessions, 7–14 DTE</div>
+        <div class="k">Window</div><div class="v">10:00 – 15:00 ET</div>
+        <div class="k">Universe</div><div class="v">14 index &amp; sector ETFs</div>
+        <div class="k">Risk</div><div class="v">short gamma into a move</div>
+      </div>
+    </div>
+    <div class="card transient">
+      <div class="tag">Transient · firewall tenant</div>
+      <h4>intraday_momentum</h4>
+      <p>Momentum expressed through options. The option is leverage and defined risk — it is
+      not the source of edge. Flat by 15:10, five minutes ahead of the cutoff, every session.</p>
+      <div class="kv">
+        <div class="k">Edge</div><div class="v">directional continuation</div>
+        <div class="k">Shape</div><div class="v">long option · debit vertical</div>
+        <div class="k">Hold</div><div class="v">minutes, 0–2 DTE</div>
+        <div class="k">Window</div><div class="v">09:45 – 14:45 ET</div>
+        <div class="k">Universe</div><div class="v">8 index ETFs</div>
+        <div class="k">Risk</div><div class="v">spread cost, signal decay</div>
+      </div>
+    </div>
+    <div class="card transient">
+      <div class="tag">Overnight · bounded by size</div>
+      <h4>earnings_event_directional</h4>
+      <p>The only book whose gate opens on a <em>date</em>. It leases no capital from the
+      firewall — a book whose entire life is one overnight hold does not fit the tenancy
+      model, so three size limits bound it instead.</p>
+      <div class="kv">
+        <div class="k">Edge</div><div class="v">implied vs realised reaction</div>
+        <div class="k">Shape</div><div class="v">condor if rich, vertical if cheap</div>
+        <div class="k">Hold</div><div class="v">one night</div>
+        <div class="k">Window</div><div class="v">arm 15:50 · flat 09:45 ET</div>
+        <div class="k">Bounds</div><div class="v">1.2% / name · 4% / night · 10 contracts</div>
+        <div class="k">Risk</div><div class="v">the gap — bounded by structure</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note warn">
+    <span class="lab">A fourth book, enabled and unable to trade</span>
+    <strong>event_premium</strong> (book <span class="mono">opportunistic</span>) is
+    <span class="mono">enabled: true</span> in config and cannot open a position:
+    <span class="mono">_transient_scan</span> always acquires the capital lease as
+    <span class="mono">INTRADAY</span>, so the opportunistic book's <span class="mono">may_open</span>
+    check always fails. It is documented as enabled because that is what the config says,
+    not because it trades.
+  </div>
+</section>
+
+<section class="break">
+  <div class="eyebrow">The session</div>
+  <h2 class="head">Forty-six cycles, and one of them is a hard stop</h2>
+  <p class="lede">Every row below is a firewall boundary. The runner re-fires any cycle whose
+  time has passed, so a crash at 15:10 cannot skip the 15:15 cutoff.</p>
+
+  <table class="tl">
+    <tr><td>04:00–16:00</td><td>events_watch</td><td>hourly, 13 polls. Read the wire on names reporting this week</td></tr>
+    <tr><td>09:15</td><td>discover</td><td>attention sweep + macro regime read, pre-market</td></tr>
+    <tr><td>09:30</td><td>— bell —</td><td>OPEN_SETTLE: nothing opens, quotes are wide</td></tr>
+    <tr><td>09:45</td><td>events_flatten</td><td>close last night's spreads into the IV crush, before the day books compete for the same buying power</td></tr>
+    <tr><td>10:00–11:15</td><td>intraday_scan</td><td>every 15 minutes</td></tr>
+    <tr><td>10:00</td><td>carry_scan</td><td>resident book reserves capital, hunts rich premium</td></tr>
+    <tr><td>11:30–15:10</td><td>manage_positions</td><td>11 passes: profit target, stop, DTE floor, defensive close</td></tr>
+    <tr><td>13:30–14:45</td><td>intraday_scan</td><td>every 15 minutes (11:30–13:30 skipped by the strategy's own time gate)</td></tr>
+    <tr><td>13:50, 14:40</td><td>carry_scan</td><td>two further passes</td></tr>
+    <tr class="hard"><td>15:15</td><td>intraday_cutoff</td><td>HARD: cancel → liquidate TRANSIENT ONLY → poll until confirmed flat</td></tr>
+    <tr><td>15:45</td><td>carry_verify</td><td>zero transient exposure, fresh Reg T, carry margin covered</td></tr>
+    <tr><td>15:50</td><td>events_arm</td><td>open tonight's earnings spreads, one night only</td></tr>
+    <tr><td>16:00</td><td>— bell —</td><td>the carry book is HELD. There is no nightly exit.</td></tr>
+    <tr><td>16:10 / 16:20</td><td>report</td><td>performance report, then the LLM-written daily report and its evaluator</td></tr>
+  </table>
+
+  <p><strong>Twelve intraday scans, not two.</strong> A VWAP cross is an event that lasts
+  minutes: two scans a day observed roughly 30 of 390 session minutes and required the cross
+  to land inside one of them. These times mirror <span class="mono">backtest.session_times_et</span>
+  exactly — when they diverged, the live agent saw a sixth of what the backtest was tuned
+  against.</p>
+
+  <p>Two dated controls fire from the clock rather than from the daily schedule, and the
+  second is checked on <em>every</em> runner poll:</p>
+  <pre>
+  2026-09-02 20:00 UTC   vol_carry entry cutoff   stop opening CARRY structures only
+  2026-09-04 13:45 UTC   submission_flatten       close EVERYTHING, then refuse every book
+  </pre>
+  <div class="note warn">
+    <span class="lab">What that second date means in practice</span>
+    13:45 UTC is <strong>09:45 ET on 4 September</strong>, and the intraday entry window opens
+    at 09:45. <strong>4 September yields zero new trades.</strong> The tradeable sessions are
+    2 and 3 September.
+  </div>
+</section>
+
+<section class="break">
+  <div class="eyebrow">The capital firewall</div>
+  <h2 class="head">The reservation comes off the top</h2>
+  <p class="lede">Alpaca grants 4× day-trading buying power but only 2× Reg T overnight.
+  Intraday leverage still on the books at 16:00 is a broker-forced liquidation —
+  unrecoverable inside a one-week judged window. Two layers make the overlap impossible.</p>
+
+  <h3 class="sub">Layer 1 — temporal</h3>
+  <p><span class="mono">firewall/clock.py</span> derives every boundary from one ET phase machine:</p>
+  <pre>CLOSED → OPEN_SETTLE → INTRADAY → ACTIVE → CARRY_ONLY → WIND_DOWN
+       → INTRADAY_CUTOFF → CARRY_VERIFY → CLOSED</pre>
+  <p><span class="mono">Phase.intraday_may_open</span> and <span class="mono">Phase.carry_may_open</span>
+  are the only two questions anything asks it. Boundaries must be strictly increasing and the
+  cutoff must sit at least 15 minutes before verification, both validated on load.</p>
+
+  <h3 class="sub">Layer 2 — capital</h3>
+  <pre>
+   Reg T buying power   (fresh poll, never a cached number)
+        │
+        ├── carry requirement ─────────►  reserved FIRST, never lent out
+        │   live marks on the legs the ledger attributes to `carry`, × 1.25 cushion,
+        │   capped at carry_max_equity_pct 0.50
+        │
+        └── what is left × transient_utilisation 0.50
+                        ∧ transient_max_equity_pct 0.15   ──►  transient lease
+  </pre>
+  <p>The property, asserted directly in <span class="mono">tests/test_firewall.py</span>: for
+  every level of carry usage, <span class="mono">carry_claim + transient_claim ≤
+  regt_buying_power</span>, and the transient lease shrinks monotonically as the resident book
+  grows. The transient lease is what is <em>left</em>, not a share of the whole.</p>
+
+  <h3 class="sub">The position ledger</h3>
+  <p>Once the carry book became resident, "flat" stopped being a property of the account and
+  became a property of a <em>book</em>. <span class="mono">firewall/ledger.py</span> persists a
+  leg → book map to disk, so a restart at 15:10 cannot cause the 15:15 cutoff to liquidate a
+  multi-session iron condor.</p>
+  <div class="note">
+    <span class="lab">The conservative default</span>
+    <strong>Unattributed legs are treated as transient.</strong> A leg the ledger has never seen
+    is by definition not something the system deliberately chose to hold overnight. Closing it
+    at 15:15 is the recoverable error; carrying it into the close is the one that is not.
+  </div>
+
+  <h3 class="sub">What the cutoff actually guarantees</h3>
+  <ul>
+    <li><strong>Liquidation is confirmed, not requested.</strong> A 200 from
+    <span class="mono">close_all_positions</span> means accepted, not filled — so it polls,
+    four attempts, five seconds apart.</li>
+    <li><strong>Working orders count as "not flat".</strong> A resting order that fills at 15:59
+    is unexpected exposure into the close.</li>
+    <li><strong>Residual transient <em>positions</em> at 15:45 disable the transient books for
+    the following session.</strong> This used to trigger on any open order account-wide — so a
+    single resting carry entry at the sign-off cost the next day's intraday book an entire
+    session. A working order is now cancelled by the emergency cutoff and noted, without the
+    ratchet.</li>
+  </ul>
+</section>
+
+<section class="break">
+  <div class="eyebrow">Carry book · signal stack</div>
+  <h2 class="head">Four hard gates, not a score</h2>
+  <p class="lede">A blended score would let a rich-IV reading paper over an earnings date. That
+  is precisely the trade a short-premium book must never take, so every gate is hard and a
+  candidate that passes three of four does not trade.</p>
+
+  <div class="gate">
+    <div class="n">01 · Premium</div>
+    <h4>Is vol rich?</h4>
+    <p>IV rank says vol is high for this name. The IV–RV spread says you are being paid more
+    than the stock has actually been moving. <strong>The spread is the edge; the rank is only a
+    regime filter.</strong> Both required — either alone is a known false-positive generator.</p>
+    <span class="rule-line">iv_rank ≥ 0.35  AND  (iv − rv) ≥ 0.03</span>
+  </div>
+  <div class="gate">
+    <div class="n">02 · Trend</div>
+    <h4>Is it going nowhere?</h4>
+    <p>Short premium is short movement. A name that is going somewhere is disqualified before
+    anything else is measured — and this is the same measurement that fires the momentum
+    strategy, which is what makes the two mutually exclusive by construction. A test asserts
+    they never co-fire.</p>
+    <span class="rule-line">adx ≤ 25  AND  |trend| ≤ 0.60</span>
+  </div>
+  <div class="gate">
+    <div class="n">03 · Event</div>
+    <h4>Hard exclusions</h4>
+    <p>Earnings inside the expiry window, or an ex-dividend date under a short call. No model
+    input, no scoring. IV is elevated <em>because</em> of the event, so that premium is fair —
+    selling it is selling the one thing the market has priced correctly.</p>
+    <span class="rule-line">no earnings ≤ dte_max  ·  no ex-div with a short call</span>
+  </div>
+  <div class="gate">
+    <div class="n">04 · Macro lens</div>
+    <h4>Shared, or idiosyncratic?</h4>
+    <p>The question a z-score cannot answer, and the one place a language model genuinely earns
+    its seat. Sector-wide IV elevation with no name-specific catalyst is <em>shared</em> —
+    exactly the premium the thesis targets. A name repricing on its own news is
+    <em>idiosyncratic</em>: the distribution has a fat tail the model cannot see. Veto.</p>
+    <span class="rule-line">guidance ≠ stand_down  AND  symbol not flagged</span>
+  </div>
+
+  <p>Then economics, and it is not a nicety: a four-leg condor crosses <strong>eight
+  half-spreads</strong> on a round trip.</p>
+  <span class="rule-line">round-trip spread ≤ 20% of the credit received  ·  relative spread ≤ 10%</span>
+
+  <div class="note">
+    <span class="lab">The IV-rank floor was 0.70, and it rejected 304 of 304 candidates</span>
+    Every threshold in this document was moved at least once, and always by measurement. A gate
+    that rejects everything is not conservative — it is a book that does not exist. The
+    rejection log is what made that visible: <span class="mono">oaa backtest --why 15</span>
+    groups by reason and normalises the numbers inside each one, so "IV rank 19% below the
+    floor" and "IV rank 4% below the floor" count as one finding rather than two.
+  </div>
+</section>
+
+<section class="break">
+  <div class="eyebrow">Carry book · exits</div>
+  <h2 class="head">The exit pair sets the hit rate you need</h2>
+  <p class="lede">Breakeven hit rate = stop ÷ (target + stop). It is arithmetic, and it is
+  decided before any trade is taken.</p>
+
+  <div class="two">
+    <div>
+      <div class="eyebrow">Was · 30% target / 2.0× stop</div>
+      <p style="font-size:26pt;font-weight:650;margin:0">87.0%</p>
+      <p style="font-size:9.2pt">needed before any spread. The observed win rate was 88% — one
+      point of margin. Worse, the 20% cost ceiling implied 95.7%, so the gate was admitting
+      trades the arithmetic said would lose.</p>
+    </div>
+    <div>
+      <div class="eyebrow">Now · 50% target / 1.5× stop</div>
+      <p style="font-size:26pt;font-weight:650;margin:0">75.0%</p>
+      <p style="font-size:9.2pt">The same 20% cost ceiling now implies 85% — three points of
+      margin. Same gate, opposite meaning, because the exits changed underneath it.</p>
+    </div>
+  </div>
+
+  <table>
+    <tr><th style="width:44%">Exit trigger</th><th>Action</th></tr>
+    <tr><td class="mono">$450 hard dollar stop</td><td>close — checked first</td></tr>
+    <tr><td class="mono">50% of max profit</td><td>close</td></tr>
+    <tr><td class="mono">loss reaches 1.5× credit</td><td>close</td></tr>
+    <tr><td class="mono">DTE floor (3)</td><td>close regardless of P&amp;L — gamma rises sharply into expiry</td></tr>
+    <tr><td class="mono">underlying touches a short strike</td><td>close the tested side</td></tr>
+    <tr><td class="mono">macro lens flags the name mid-hold</td><td>close at the next open</td></tr>
+    <tr><td class="mono">submission flatten</td><td>close everything, unconditionally</td></tr>
+  </table>
+
+  <div class="note">
+    <span class="lab">A stop set above the loss distribution is decoration</span>
+    The dollar stop was <strong>$900 and never fired</strong>. The six largest losses were
+    $780–868 — all sitting just underneath it — and every one exited on the DTE floor instead,
+    which realises whatever has accumulated rather than capping it. $450 is a stop that can be
+    reached.
+  </div>
+
+  <h3 class="sub">Why 7–14 DTE, and not the conventional 20–45</h3>
+  <p>Theta is steeply non-linear into expiry. At 30 DTE a five-session hold captures roughly
+  20–25% of the structure's remaining decay; at 10 DTE it captures the majority. The judged
+  window is the constraint, and the structure's life has to fit inside it.</p>
+  <p>The cost is gamma, and it is real: short-dated short-premium positions reprice violently
+  when the underlying approaches a short strike. Three controls offset it partially, not
+  completely — 0.25Δ short strikes, the position-count cap, and the defensive exit on a
+  short-strike touch.</p>
+  <div class="note">
+    <span class="lab">Say this out loud</span>
+    This is a deliberate trade of tail risk for realised P&amp;L inside the window. It is the
+    right call for a seven-day judged period and the wrong call for a live book. A judge who
+    sees 10-DTE condors will either think you do not know the convention or that you knowingly
+    departed from it — and the second impression is only available if you write it down.
+  </div>
+</section>
+
+<section class="break">
+  <div class="eyebrow">Intraday book · signal stack</div>
+  <h2 class="head">Eight vetoes in a row is not a strategy</h2>
+  <p class="lede">Each gate passed roughly 70% of candidates. Stacked as hard vetoes that is
+  0.7⁸ ≈ 6% — a book arithmetically designed almost never to fire. Measured over 864 candidates
+  across 9 sessions: 424 died on the volume gate alone, and <strong>zero</strong> survived the
+  whole chain. Loosening any one gate simply promoted the next one to being the wall.</p>
+
+  <h3 class="sub">The fix: two hard gates, everything else votes</h3>
+  <div class="cards">
+    <div class="card">
+      <div class="tag">Hard</div>
+      <h4>VWAP trigger</h4>
+      <p>It decides <em>direction</em>; without it there is no trade to make. A session VWAP
+      cross, or price on the band within 2.0× the session's usual dispersion, searched over the
+      last 15 one-minute bars — exactly one polling gap, so a cross cannot fall between two
+      cycles unseen.</p>
+    </div>
+    <div class="card">
+      <div class="tag">Hard</div>
+      <h4>Spread gate</h4>
+      <p>It is economics, not evidence. <span class="mono">(ask−bid)/mid ≤ 4%</span> and
+      round-trip spread ≤ 30% of target. The ceiling was 2% until measurement showed the
+      tightest quote in the universe was 2.59% — the gate was rejecting the market rather than
+      selecting within it.</p>
+    </div>
+    <div class="card transient">
+      <div class="tag">Three of seven</div>
+      <h4>The voters</h4>
+      <p>Volume z ≥ 0.5 in the same time-of-day bucket · 2-bar persistence · Bollinger
+      <em>width</em> rising · higher-timeframe agreement · term-structure slope in band · RSI
+      not at 80/20 · catalyst score. <span class="mono">needed = min(3, possible)</span>.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="lab">"Unmeasurable" is not "failed"</span>
+    With no time-of-day volume baseline yet, volume simply does not vote rather than blocking
+    the trade. Demoting the catalyst to a vote exposed a second bug worth recording: the
+    catalyst gate returned <span class="mono">ok()</span> immediately when
+    <span class="mono">required=False</span>, before measuring anything — so it always voted
+    yes and the fifth confirmation was free. It now always measures, and only
+    <span class="mono">required</span> decides whether a failure is a veto or a lost vote.
+  </div>
+
+  <h3 class="sub">Three indicators, three different questions</h3>
+  <p>Only VWAP has an opinion on direction. RSI and Bollinger <em>position</em> are
+  mean-reversion measures and would contradict a VWAP momentum trigger on every signal — price
+  breaking above VWAP is simultaneously "momentum, buy" and "overbought, fade". Width, not
+  position: band width is a volatility-regime read and is direction-agnostic. RSI is one-sided
+  at 80/20 rather than 70/30, because strong momentum carries elevated RSI for long stretches
+  and a tight threshold rejects exactly the trades this book exists to take.</p>
+
+  <h3 class="sub">The constraint that shapes everything: spread cost</h3>
+  <table>
+    <tr><th>Quote width</th><th>Round trip / contract</th><th>Share of a $20 target</th></tr>
+    <tr><td class="mono">$0.01 <span style="color:var(--soft)">SPY ATM</span></td><td class="num">$2</td><td>10%</td></tr>
+    <tr><td class="mono">$0.02</td><td class="num">$4</td><td>20%</td></tr>
+    <tr><td class="mono">$0.05</td><td class="num">$10</td><td>50%</td></tr>
+    <tr><td class="mono">$0.10 <span style="color:var(--soft)">typical single name</span></td><td class="num">$20</td><td><strong>100% — no edge survives</strong></td></tr>
+  </table>
+  <p><strong>Index products only.</strong> Not a preference — arithmetic. Eight ETFs: SPY, QQQ,
+  IWM, DIA, XLF, XLE, TLT, GLD.</p>
+
+  <h3 class="sub">Selection, and the exits</h3>
+  <table>
+    <tr><th>Expected move</th><th>Implied vol</th><th>Selection</th><th>Reasoning</th></tr>
+    <tr><td>small</td><td>low</td><td>ATM, 0–1 DTE</td><td>max gamma, cheap</td></tr>
+    <tr><td>small</td><td>elevated</td><td>ATM, longer dated</td><td>less premium burn if the move stalls</td></tr>
+    <tr><td>large</td><td>low</td><td>slightly OTM</td><td>better convexity per dollar</td></tr>
+    <tr><td>large</td><td>elevated</td><td>debit vertical</td><td>caps the cost of the elevated IV; sells the expensive wing</td></tr>
+    <tr><td>any</td><td class="mono">iv_rank ≥ 0.85</td><td><strong>NO TRADE</strong></td><td>paying for a move already priced in</td></tr>
+  </table>
+  <p>Exits: 10% target, 15% stop, 20-minute time stop, flat by 15:10. The stop is
+  <em>wider</em> than the target deliberately — option premium is noisy and a tight stop is hit
+  by spread flicker alone — which implies a breakeven hit rate near 60%, computed and displayed
+  against the actual.</p>
+  <div class="note stop">
+    <span class="lab">Known, and still live</span>
+    <span class="mono">exit_on_vwap_recross</span> is still <span class="mono">true</span> in
+    <span class="mono">config/strategies/intraday_momentum.yaml</span>. The A/B measured that
+    rule at <strong>0 wins in 55 attempts</strong>.
+  </div>
+</section>
+
+<section class="break">
+  <div class="eyebrow">Events book</div>
+  <h2 class="head">The only book whose gate opens on a date</h2>
+  <p class="lede">The other two wait for a market condition to cross a threshold, and the
+  recurring failure is that it never crosses. Broadcom reports on 2 September whether or not
+  any indicator agrees. The gate opens on schedule; the pipeline only decides whether the trade
+  is worth taking.</p>
+
+  <h3 class="sub">The model proposes. A file confirms.</h3>
+  <p>Featherless serves open-weight models whose weights were frozen months ago. Asked to list
+  next week's reporters, one answers fluently and sometimes wrongly — and <strong>a wrong date
+  is not a bad trade, it is a position opened against no event at all.</strong> So the model
+  only proposes candidates; <span class="mono">config/events/earnings_calendar.json</span>
+  confirms every one of them, and anything unverified is logged and never armed.</p>
+
+  <table>
+    <tr><th>Stage</th><th>What it does</th></tr>
+    <tr><td class="mono">calendar.py</td><td>model proposes → the calendar file disposes. Unconfirmed names never arm</td></tr>
+    <tr><td class="mono">volscreen.py</td><td>prices the ATM straddle in the expiry <em>containing</em> the print; ranks by divergence against the last four actual reactions. Implied move ≥ 3%, relative spread ≤ 25%, top 10</td></tr>
+    <tr><td class="mono">watch.py</td><td>hourly from three days out. Alpaca news + StockTwits, deduplicated by hash — a quiet name makes <strong>no model call</strong>. Notes kept at salience ≥ 0.35, aged out at 10 days, capped at 40</td></tr>
+    <tr><td class="mono">direction.py</td><td>one call per name. Direction, confidence, and the evidence it cited. Abstention is a valid and expected answer</td></tr>
+    <tr><td class="mono">sizing.py</td><td>confidence maps linearly onto size, then bounded per trade, per night, and by an absolute contract cap</td></tr>
+    <tr><td class="mono">strategy.py</td><td>builds the structure the divergence calls for, behind three interlocks</td></tr>
+  </table>
+
+  <h3 class="sub">The correction that mattered: we measured volatility and traded direction</h3>
+  <p>A directional structure bought at a fair-to-rich implied move, on a direction call no
+  better than a coin flip, returns minus the round trip in expectation. That is arithmetic, not
+  a sample-size problem. So the <em>expression follows the sign of the divergence</em>:</p>
+  <table>
+    <tr><th>implied move ÷ median realised reaction</th><th>Structure</th><th>Where the edge is</th></tr>
+    <tr><td class="mono">≥ 1.35 &nbsp;rich</td><td>iron condor, both shorts <em>outside</em> the implied move</td><td>the overpricing itself</td></tr>
+    <tr><td class="mono">0.80 – 1.35 &nbsp;fair</td><td><strong>no trade</strong></td><td>none measurable — and this band is where the book used to do all of its trading</td></tr>
+    <tr><td class="mono">≤ 0.80 &nbsp;cheap</td><td>debit vertical, in the called direction</td><td>the underpricing</td></tr>
+  </table>
+  <p>The thresholds sit well clear of 1.0 because the ratio is computed off four prints — a
+  name at 1.10 is inside its own sampling error. Strikes are placed by <strong>distance, not
+  delta</strong> (shorts at spot ± 1.0 × implied move): the front-weekly surface across a print
+  is too deformed for delta to stand in for distance, and where the shorts sit relative to that
+  move <em>is</em> the thesis. A coarse strike ladder that snaps one back inside is declined,
+  not quietly downgraded.</p>
+  <p><strong>The direction call is a tilt, not the thesis.</strong> It picks the side of the
+  vertical, and on a condor it pushes the threatened short further out — never pulls the other
+  one in, because collecting more premium by moving a short inside the implied move surrenders
+  the one property the structure is built on.</p>
+
+  <div class="two">
+    <div>
+      <h3 class="sub">Two roles, two models</h3>
+      <table>
+        <tr><td class="mono">watch triage</td><td class="mono">Qwen3-8B</td><td style="color:var(--soft)">~40 calls/day</td></tr>
+        <tr><td class="mono">direction call</td><td class="mono">Qwen3-32B</td><td style="color:var(--soft)">once per name</td></tr>
+      </table>
+      <p style="font-size:9.2pt">The triage is narrow, schema-bound and usually right to say
+      "immaterial". Running the big model on it spends the direction call's budget on noise.</p>
+    </div>
+    <div>
+      <h3 class="sub">What bounds the model</h3>
+      <ul>
+        <li><strong>Confidence floor 0.55</strong> — and it sets the size, so a marginal call trades small.</li>
+        <li><strong>Evidence required</strong> — a confident call citing nothing is a guess with a number attached.</li>
+        <li><strong>Abstention rate journalled</strong> — zero abstentions logs a warning. A model that never declines is not filtering.</li>
+        <li><strong>Evidence is untrusted text</strong> — fenced, stripped, truncated, parsed to a fixed schema, every field clamped.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="break">
+  <div class="eyebrow">The order path</div>
+  <h2 class="head">Only one component can say yes</h2>
+  <p class="lede">The critic scores and writes reasoning. Partner adapters may veto. Neither can
+  approve. Between the idea and the broker sits a deterministic engine, and execution refuses
+  any ticket it has not stamped.</p>
+
+  <div class="flow">
+    <div class="step"><div class="t">01</div><div class="b">Strategy gates</div></div>
+    <div class="arr">→</div>
+    <div class="step"><div class="t">02</div><div class="b">Modelled cost</div></div>
+    <div class="arr">→</div>
+    <div class="step"><div class="t">03 · advisory</div><div class="b">LLM critic</div></div>
+    <div class="arr">→</div>
+    <div class="step approve"><div class="t">04 · the only approver</div><div class="b">Risk engine</div></div>
+    <div class="arr">→</div>
+    <div class="step"><div class="t">05 · veto only</div><div class="b">Partners</div></div>
+    <div class="arr">→</div>
+    <div class="step"><div class="t">06</div><div class="b">Execution</div></div>
+  </div>
+
+  <p>Stage 1 returns either a <span class="mono">TradeIdea</span> or a rejection carrying the
+  gate that stopped it and the metric it measured. Stage 2 attaches a full modelled round trip
+  — OCC clearing, ORF, FINRA CAT both sides, TAF and SEC on sells, exchange fees, margin
+  interest — <em>before</em> anything judges it, so a rejection still carries what the trade
+  would have cost. Stage 4 is fifteen deterministic checks in a fixed order:</p>
+
+  <pre>firewall → halted → market_open → undefined_risk → unknown_risk → leg_count →
+duplicate_legs → max_positions → max_new_per_day → duplicate_structure →
+reentry_cooldown → concentration → sizing → portfolio_risk → cash</pre>
+
+  <div class="note">
+    <span class="lab">Two of those exist because brokers net identical option symbols</span>
+    Re-opening the same condor <strong>doubles one position</strong> rather than creating a
+    second, so every count-based limit was blind to it.
+    <span class="mono">duplicate_structure</span> refuses a structure whose every leg is already
+    held on the same side; <span class="mono">reentry_cooldown</span> catches the near-duplicate
+    once spot has moved enough to change the strikes.
+  </div>
+
+  <ul>
+    <li><strong>Sizing is from max loss, not from capital.</strong> A structure without a
+    computable <span class="mono">max_loss</span> is refused outright
+    (<span class="mono">allow_undefined_risk: false</span>) — which is what makes a stray
+    undefined-risk idea impossible to execute by accident.</li>
+    <li><strong>Portfolio Greek caps</strong> are checked across the whole account, not per
+    trade. A greek block of exact zeros is treated as <em>missing</em>, not as a measurement:
+    the indicative feed serves those, and they turned three caps green on a book that had never
+    been measured.</li>
+    <li><strong>Atomic combos by default</strong> — one spread crossed, not four — with a
+    deterministic <span class="mono">client_order_id</span> and a pre-submit existence check, so
+    a retry cannot double-fill.</li>
+    <li><strong>On the judged profile the limit posts at the far touch.</strong> At the 0.5
+    default with the chase disabled, every order rested half a spread from the touch with no
+    second attempt, and simply never filled. The chase itself stays off: it cancels without
+    checking the cancel succeeded, then resubmits under a new order id — a race that can double
+    the risk-approved size.</li>
+    <li><strong>Ledger registration is what makes 15:15 correct.</strong> Every filled leg is
+    attributed to its book the moment it opens.</li>
+  </ul>
+</section>
+
+<section class="break">
+  <div class="eyebrow">Instrumentation</div>
+  <h2 class="head">Built from the first commit, not retrofitted for the deck</h2>
+  <table>
+    <tr><th style="width:26%">Artefact</th><th>Why it exists</th></tr>
+    <tr><td><strong>Gate rejection log</strong><br><span class="mono">oaa gates</span></td>
+        <td>Which gate vetoed each candidate and every metric it measured — <strong>72,753
+        rejections</strong> across the Feb–Aug replay against 441 trades taken. The
+        highest-value judging artefact: it shows an agent declining trades, with the number
+        that caused it.</td></tr>
+    <tr><td><strong>Modelled cost line</strong></td>
+        <td>Gross P&amp;L, modelled cost, net — side by side, with the spread charged
+        <em>inside</em> the fills rather than added beside them. Paper charges no fees and fills
+        at mid.</td></tr>
+    <tr><td><strong>Breakeven hit rate</strong></td>
+        <td>Computed from the target/stop asymmetry and shown against the actual rate, rather
+        than assumed away.</td></tr>
+    <tr><td><strong>Equity curve</strong></td>
+        <td>Snapshotted through the session, so the curve is dense enough to be the primary
+        visual evidence.</td></tr>
+    <tr><td><strong>Macro lens archive</strong></td>
+        <td>Regime, flagged symbols and themes, per cycle — the reasoning trail behind every
+        stand-down.</td></tr>
+    <tr><td><strong>Daily report</strong><br><span class="mono">oaa daily-report</span></td>
+        <td>An LLM-written end-of-day report <em>and</em> an evaluator score for it. The only
+        page that says what the system thinks is wrong with itself, and it is published
+        unguarded on both dashboard builds.</td></tr>
+    <tr><td><strong>Watch dossiers</strong></td>
+        <td>Dated pre-print notes per name, published to the public Events tab. Retired
+        dossiers are deliberately never published: post-print commentary beside names still
+        being watched reads as a pre-print call.</td></tr>
+  </table>
+</section>
+
+<section class="break">
+  <div class="eyebrow">Limitations</div>
+  <h2 class="head">Six things that are true and should not be hidden</h2>
+  <p class="lede">A judge who spots an unacknowledged paper-fill advantage forms a much worse
+  impression than one who reads that it was modelled.</p>
+
+  <h3 class="sub">The credit-to-width audit</h3>
+  <p>A share of the carry book's replayed P&amp;L sits in structures whose recorded credit
+  exceeded their own width — arithmetically impossible for a condor, since a condor cannot
+  collect more credit than it can lose. Reproduced independently by computing credit ÷ width
+  per trade, 47 of 198 carry trades carried the large majority of the book's P&amp;L. The gated
+  re-run is far smaller than the ungated headline, and
+  <span class="mono">risk.max_credit_to_width</span> is <strong>not implemented in the working
+  tree</strong> — so a run started from it reproduces the ungated number. Quote the gated
+  figure, or state the provenance.</p>
+
+  <h3 class="sub">And five more</h3>
+  <ul>
+    <li><strong>Exit code is not shared.</strong> Entry runs the same objects live and in
+    replay. Exit is reimplemented in the backtest engine, and nothing asserts the two agree.</li>
+    <li><strong>Intraday replay marks are coarse</strong> relative to a 20-minute hold, so that
+    book's replay P&amp;L reads for candidate flow, not for edge.</li>
+    <li><strong>Paper fills flatter.</strong> Mid fills, no queue position, no partials — and
+    spread cost is the intraday book's primary loss mechanism, which is exactly what paper does
+    not simulate.</li>
+    <li><strong>Five sessions is not a sample.</strong> Expect 10–20 trades in the judged
+    window. That cannot distinguish edge from luck in either direction.</li>
+    <li><strong>The events book has no usable backtest.</strong> Four prints per name is not a
+    sample you can walk forward, and the divergence ratio is a ranking device rather than an
+    edge estimate.</li>
+    <li><strong>Short-dated short premium is a deliberate tail-risk trade.</strong> 7–14 DTE
+    fits the judged window and would be the wrong call for a live book.</li>
+  </ul>
+
+  <div class="note stop">
+    <span class="lab">Operational, and it outranks the rest</span>
+    There is no pidfile, lockfile or singleton guard. Two runners append to one journal, race
+    one <span class="mono">position_ledger.json</span>, and hold separate in-memory caches — so
+    one can serve pre-fix data hours after a fix lands, and every conclusion drawn from the
+    journal while both are live is suspect. <strong>Run exactly one instance.</strong>
+  </div>
+</section>
+
+<div class="foot">
+  Eventus · Options Alpha Agents · carry resident · intraday transient · events size-bounded ·
+  opportunistic enabled but blocked · carry entry cutoff 2 Sep 20:00 UTC · submission flatten
+  4 Sep 13:45 UTC
+</div>
+
+</body>
+</html>
