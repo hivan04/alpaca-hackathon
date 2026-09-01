@@ -16,6 +16,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 
+from freezegun import freeze_time
+
 from oaa.core.types import (
     AccountSnapshot,
     Decision,
@@ -34,6 +36,16 @@ from oaa.telemetry.journal import Journal
 
 ET = "America/New_York"
 DAY = dt.date(2026, 8, 31)
+
+#: `Journal.event()` stamps `datetime.now()`. Unlike `journal.record(Decision(
+#: ts=...))` it takes no timestamp, so a test that writes events and then asks
+#: `collect_session` about DAY only agrees with itself while the real clock is
+#: still on DAY. The three tests below passed every run until 31 Aug ended in
+#: New York and went red on 1 Sep with nothing in the repo having changed -
+#: a red build that says nothing about the code, which is worse than no build.
+#: Freezing the clock ON the session day is what they always meant. Derived
+#: from DAY rather than written out again, so the two cannot drift apart.
+FROZEN = dt.datetime.combine(DAY, dt.time(18, 0), tzinfo=dt.timezone.utc)
 
 
 def journal_at(tmp_path) -> Journal:
@@ -134,6 +146,7 @@ def test_a_risk_approved_idea_that_never_traded_is_a_near_miss(tmp_path):
     assert "critic scored it" in session.potential[0].reason
 
 
+@freeze_time(FROZEN)
 def test_the_gate_funnel_is_aggregated_by_gate_book_and_reason(tmp_path):
     journal = journal_at(tmp_path)
     for _ in range(3):
@@ -151,6 +164,7 @@ def test_the_gate_funnel_is_aggregated_by_gate_book_and_reason(tmp_path):
     assert max(session.rejections_by_reason.values()) == 3
 
 
+@freeze_time(FROZEN)
 def test_a_degraded_reasoning_layer_is_reported_not_hidden(tmp_path):
     journal = journal_at(tmp_path)
     journal.event("agent_degraded", cycle="startup", reason="FEATHERLESS_API_KEY is not set")
@@ -188,6 +202,7 @@ def test_bullets_survive_the_shapes_models_actually_return():
     assert _parse_bullets("no bullets at all, just prose") == []
 
 
+@freeze_time(FROZEN)
 def test_the_critic_is_given_the_session_and_returns_its_bullets(tmp_path):
     journal = journal_at(tmp_path)
     journal.event("gate_rejection", book="intraday", vetoed_by="selection",
