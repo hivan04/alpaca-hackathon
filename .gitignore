@@ -55,3 +55,6 @@ reports/
 
 # scratch: junk moved out of the repo root, safe to delete by hand
 _to_delete/
+
+# Personal README.md file
+personal_README.md
