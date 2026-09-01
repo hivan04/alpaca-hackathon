@@ -1,0 +1,30 @@
+{
+  "symbol": "ZS",
+  "report_date": "2026-09-03",
+  "seen": [
+    "3de2ca63c77810d2",
+    "5e55ae2c0cd8d07a",
+    "0bd266bd3364c2c2",
+    "bacf5aa3c9ebb38b",
+    "f5170091eebad4c6",
+    "181171df2a42db3f",
+    "c44b3de3376ae4ce",
+    "5972b81906a13a33"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-31",
+      "salience": 0.8,
+      "summary": "Multiple sell-side analysts have raised price targets on Zscaler, indicating increased confidence in its stock performance post-earnings.",
+      "lean": "bullish",
+      "evidence": [
+        "JP Morgan Maintains Overweight on Zscaler, Raises Price Target to $215",
+        "Barclays Maintains Overweight on Zscaler, Raises Price Target to $192",
+        "Guggenheim Reiterates Buy on Zscaler, Maintains $214 Price Target"
+      ],
+      "headlines": 8,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}

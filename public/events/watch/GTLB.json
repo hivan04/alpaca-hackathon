@@ -1,0 +1,44 @@
+{
+  "symbol": "GTLB",
+  "report_date": "2026-09-01",
+  "seen": [
+    "a43db18c65f67101",
+    "57ab69215e17fe48",
+    "65c57f51140a9ab0",
+    "312a55061ec89ae8",
+    "ee86135d64a64e82",
+    "1af3e7697915585b",
+    "4aae6e885b7e8279",
+    "8036d213d9835426",
+    "71581719ebb55eaf"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-30",
+      "salience": 0.8,
+      "summary": "Multiple major banks raised their price targets on GitLab, signaling increased confidence in the stock's potential post-earnings, which could influence trading behavior on the first session after the report.",
+      "lean": "bullish",
+      "evidence": [
+        "TD Cowen Maintains Hold on GitLab, Raises Price Target to $42",
+        "JP Morgan Maintains Neutral on GitLab, Raises Price Target to $44",
+        "Wells Fargo Maintains Equal-Weight on GitLab, Raises Price Target to $40"
+      ],
+      "headlines": 3,
+      "messages": 0,
+      "injection_noticed": false
+    },
+    {
+      "asof": "2026-08-31",
+      "salience": 0.8,
+      "summary": "Two sell-side firms raised price targets on GTLB, suggesting increased confidence in the stock's potential post-earnings, which could influence trading activity after the report.",
+      "lean": "bullish",
+      "evidence": [
+        "Cantor Fitzgerald Maintains Neutral on GitLab, Raises Price Target to $50",
+        "BTIG Maintains Buy on GitLab, Raises Price Target to $52"
+      ],
+      "headlines": 2,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}

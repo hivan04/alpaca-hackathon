@@ -1,0 +1,59 @@
+{
+  "symbol": "SNOW",
+  "report_date": "2026-09-02",
+  "seen": [
+    "3de2ca63c77810d2",
+    "1e57fd4d4681a29a",
+    "f503935f44cdc523",
+    "40d8e0b9e11adcb6",
+    "f43833a056b81c73",
+    "3abf26e970620a69",
+    "f0c182cd9dd94ce3",
+    "5e1b326243fec93c",
+    "cfdf03e5c1b0353a",
+    "4aae6e885b7e8279",
+    "f9bba1f5c54f26b4",
+    "51cd1ca6c61175b5",
+    "8fd446e68b18d4db",
+    "6af77690ccd28c02"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-30",
+      "salience": 0.8,
+      "summary": "Multiple sell-side analysts raised price targets for SNOW, indicating increased confidence in the stock's potential post-earnings, which could influence trading behavior after the report.",
+      "lean": "bullish",
+      "evidence": [
+        "Barclays Maintains Equal-Weight on Snowflake, Raises Price Target to $332",
+        "Citigroup Maintains Buy on Snowflake, Raises Price Target to $395",
+        "Benchmark Maintains Buy on Snowflake, Raises Price Target to $360",
+        "Baird Maintains Outperform on Snowflake, Raises Price Target to $350"
+      ],
+      "headlines": 7,
+      "messages": 0,
+      "injection_noticed": false
+    },
+    {
+      "asof": "2026-08-31",
+      "salience": 0.5,
+      "summary": "Cantor Fitzgerald has raised its price target for Snowflake to $405, indicating potential positive sentiment ahead of the earnings report.",
+      "lean": "bullish",
+      "evidence": [],
+      "headlines": 1,
+      "messages": 0,
+      "injection_noticed": false
+    },
+    {
+      "asof": "2026-09-01",
+      "salience": 0.8,
+      "summary": "A sell-side analyst raised their price target for SNOW, which could influence trading sentiment post-earnings.",
+      "lean": "bullish",
+      "evidence": [
+        "Rosenblatt Maintains Buy on Snowflake, Raises Price Target to $345"
+      ],
+      "headlines": 2,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "symbol": "MDB",
+  "report_date": "2026-09-01",
+  "seen": [
+    "3de2ca63c77810d2",
+    "49bbb8da98c381dd",
+    "4d30b1ab3db95f13",
+    "2c941d9ddb298718",
+    "bb7db60a6c074a29",
+    "ec8dedcc15f571a6",
+    "08b8771ac1409891",
+    "33cd79365450e258",
+    "b7bcf5766c2c56cb",
+    "a6224e3fc7fbb175",
+    "4aae6e885b7e8279",
+    "8036d213d9835426",
+    "5ae5bfe5d07a7fd8",
+    "219f96203ea8d77e",
+    "95d638f616ec1ff2"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-30",
+      "salience": 0.8,
+      "summary": "Multiple analysts raised price targets for MongoDB ahead of its earnings report, indicating increased confidence in the stock's potential performance.",
+      "lean": "bullish",
+      "evidence": [
+        "DA Davidson Maintains Buy on MongoDB, Raises Price Target to $465",
+        "Barclays Maintains Overweight on MongoDB, Raises Price Target to $460",
+        "Wells Fargo Maintains Overweight on MongoDB, Raises Price Target to $475"
+      ],
+      "headlines": 8,
+      "messages": 0,
+      "injection_noticed": false
+    },
+    {
+      "asof": "2026-08-31",
+      "salience": 0.8,
+      "summary": "Analyst raises price target and revises forecasts ahead of MongoDB's earnings report, indicating potential positive outlook.",
+      "lean": "bullish",
+      "evidence": [
+        "Cantor Fitzgerald Maintains Overweight on MongoDB, Raises Price Target to $540"
+      ],
+      "headlines": 2,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}

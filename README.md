@@ -431,6 +431,25 @@ Both files travel together: the `.json` sidecar is what the page renders and the
 and `.gitignore` needs its `!public/reports/` escape for the same
 matches-at-any-depth reason `runs/` does.
 
+### Publishing the watch dossiers
+
+The Events tab's **run-up** section is the only place a reader sees what the
+model actually found on this week's names — the dated notes the hourly watch
+cycles wrote. They live under `runs/events/watch/`, so a deploy host clones the
+repo, finds none, and the section says *"Nothing logged yet"* on a week where a
+great deal was logged:
+
+```bash
+python scripts/publish_events.py --all        # or --list, or name the tickers
+```
+
+`public/events/watch/` **is** committed — it sits outside `runs/`, so it needs
+no `.gitignore` escape. The page prefers the local store, so a fresh
+`oaa events watch` poll is never shadowed by an older published copy. Retired
+dossiers (`runs/events/watch/reported/`) are deliberately never published:
+post-print commentary beside names still being watched reads as a pre-print
+call.
+
 ### Deploying
 
 Point the host at `public_dashboard.py`. Streamlit Community Cloud exposes its

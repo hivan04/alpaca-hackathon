@@ -16,12 +16,23 @@ print:
 Section 2 is a live chain read, so it sits behind a button and its result is
 held in session state until asked again - the same rule the Positions tab
 follows for the same reason.
+
+Where the dossiers come from
+----------------------------
+`runs/` is gitignored, so a deployed host clones the repo and has none of the
+watch store - section 2b, the only place a reader sees what the model actually
+found on this week's names, would say "Nothing logged yet" with nothing on the
+page to say why. `scripts/publish_events.py` copies them into
+`public/events/watch/`, which IS committed, and this page reads whichever it
+finds - preferring the local store so a fresh poll is never shadowed by an
+older published copy of itself.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -128,7 +139,41 @@ def _screen_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
-def _watcher(settings: Any, params: Any):
+# where the dossiers are
+# --------------------------------------------------------------------------- #
+#: Committed, and read when the local watch store has nothing for a name.
+#: `runs/` is gitignored and the rule has no leading slash, so it matches at
+#: ANY depth: a deploy host clones the repo with no dossiers at all, and this
+#: section boots empty with nothing on the page to say why.
+#: `scripts/publish_events.py` copies the week's dossiers here.
+PUBLISHED = Path("public") / "events" / "watch"
+
+
+def _repo_root() -> Path:
+    """`<repo>` from this file: src/oaa/app/events_page.py -> parents[3].
+
+    `Settings.root` is the right answer when the package runs from the tree and
+    the wrong one when it is installed into site-packages - there
+    `project_root()` falls back to `Path.cwd()`, which on a deploy host is not
+    reliably the repo. Both are searched; this one does not depend on cwd.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def watch_dirs(settings: Any, params: Any) -> list[Path]:
+    """Every directory that may hold dossiers, best first.
+
+    Local before published, deliberately: `oaa events watch` polling again is a
+    correction, and a correction must not be shadowed by the copy that was
+    published before it.
+    """
+    roots: list[Path] = [settings.path(params.watch.store_dir)]
+    for root in dict.fromkeys((settings.root, _repo_root())):
+        roots.append(root / PUBLISHED)
+    return [d for d in dict.fromkeys(roots) if d.is_dir()]
+
+
+def _watcher(settings: Any, params: Any, store_dir: Path | None = None):
     """A read-only watcher: no LLM, so nothing this page does can spend a call."""
     from oaa.strategies.events.watch import EventWatcher
 
@@ -138,16 +183,25 @@ def _watcher(settings: Any, params: Any):
         sentiment=params.sentiment,
         calendar={},
         news_fn=None,
-        store_dir=settings.path(params.watch.store_dir),
+        store_dir=store_dir or settings.path(params.watch.store_dir),
     )
+
+
+def _load_dossier(settings: Any, params: Any, symbol: str) -> Any:
+    """This name's dossier from the first store that actually holds it."""
+    dirs = watch_dirs(settings, params) or [settings.path(params.watch.store_dir)]
+    for directory in dirs:
+        dossier = _watcher(settings, params, directory).load(symbol)
+        if dossier.notes or dossier.seen:
+            return dossier
+    return _watcher(settings, params, dirs[0]).load(symbol)
 
 
 def _dossiers(settings: Any, params: Any, events: list[Any]) -> list[dict[str, Any]]:
     """One row per name currently being watched, newest activity first."""
-    watcher = _watcher(settings, params)
     rows: list[dict[str, Any]] = []
     for event in events:
-        dossier = watcher.load(event.symbol)
+        dossier = _load_dossier(settings, params, event.symbol)
         if not dossier.notes and not dossier.seen:
             continue
         lean, score = dossier.lean()
@@ -165,7 +219,7 @@ def _dossiers(settings: Any, params: Any, events: list[Any]) -> list[dict[str, A
 
 
 def _dossier_notes(settings: Any, params: Any, symbol: str) -> list[Any]:
-    return _watcher(settings, params).load(symbol).notes
+    return _load_dossier(settings, params, symbol).notes
 
 
 def _journal_rows(settings: Any, limit: int = 400) -> list[dict[str, Any]]:

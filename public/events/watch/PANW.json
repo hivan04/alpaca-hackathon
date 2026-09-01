@@ -1,0 +1,51 @@
+{
+  "symbol": "PANW",
+  "report_date": "2026-09-01",
+  "seen": [
+    "3de2ca63c77810d2",
+    "066f6d3bdcb8ebcb",
+    "5e55ae2c0cd8d07a",
+    "0bd266bd3364c2c2",
+    "bacf5aa3c9ebb38b",
+    "2ce71e1ea8d97b58",
+    "0a5001545aeec139",
+    "ef5b1982ee75c339",
+    "aaa49a3145e00bce",
+    "07e5b7ee255dac09",
+    "21c2fb9c84d8be7c",
+    "adcf8e8de4e29db8",
+    "3a8afa65f2487339",
+    "5e1b326243fec93c",
+    "b111ad02945e3a18",
+    "f4ebe58a436cf499",
+    "32797c08c03b3386",
+    "d39bdfd8701a8218",
+    "e68d67cc78b3d024",
+    "8036d213d9835426",
+    "f9bba1f5c54f26b4",
+    "5ae5bfe5d07a7fd8",
+    "c8b0655c1b84bc74",
+    "751a9cfe9b9492d1",
+    "51e6cf81e6153b0e",
+    "219f96203ea8d77e",
+    "95d638f616ec1ff2",
+    "5402a0d19f4f6e4a"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-30",
+      "salience": 0.8,
+      "summary": "Multiple sell-side analysts have raised price targets for PANW, indicating increased confidence in the stock's potential, which could influence trading activity post-earnings.",
+      "lean": "bullish",
+      "evidence": [
+        "Jefferies Maintains Buy on Palo Alto Networks, Raises Price Target to $450",
+        "BTIG Reiterates Buy on Palo Alto Networks, Maintains $380 Price Target",
+        "JP Morgan Maintains Overweight on Palo Alto Networks, Raises Price Target to $384",
+        "Benchmark Maintains Buy on Palo Alto Networks, Raises Price Target to $400"
+      ],
+      "headlines": 12,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}

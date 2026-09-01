@@ -143,6 +143,10 @@ dashboard: ## Streamlit operator dashboard: backtesting + live trading
 publish-reports: ## Copy judged daily reports into public/reports/ (commit after)
 	$(BIN)/python scripts/publish_reports.py --all
 
+.PHONY: publish-events
+publish-events: ## Copy this week's watch dossiers into public/events/ (commit after)
+	$(BIN)/python scripts/publish_events.py --all
+
 .PHONY: public-dashboard
 public-dashboard: ## Streamlit PUBLIC dashboard (read-only) - preview it locally
 	OAA_PUBLIC=1 $(BIN)/streamlit run public_dashboard.py --server.port 8502

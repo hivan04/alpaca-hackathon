@@ -1,0 +1,25 @@
+{
+  "symbol": "CIEN",
+  "report_date": "2026-09-03",
+  "seen": [
+    "3de2ca63c77810d2",
+    "e3b9d805265d120a",
+    "b0e65d5bee0599ea",
+    "2af4e8dbcf584993",
+    "5402a0d19f4f6e4a"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-31",
+      "salience": 0.5,
+      "summary": "B. Riley Securities has lowered its price target for CIEN to $413, maintaining a Neutral rating. This suggests a potential downside risk to the stock, which could influence trading activity following the earnings report.",
+      "lean": "neutral",
+      "evidence": [
+        "B. Riley Securities Maintains Neutral on Ciena, Lowers Price Target to $413"
+      ],
+      "headlines": 1,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}

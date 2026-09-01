@@ -1,0 +1,52 @@
+{
+  "symbol": "DELL",
+  "report_date": "2026-09-01",
+  "seen": [
+    "3de2ca63c77810d2",
+    "ee8a344f26fe3a3e",
+    "b98b684a64cbdc57",
+    "9b460ca8508a2779",
+    "04e29f29595fe76a",
+    "96603c5680597228",
+    "a993e9b3d488c790",
+    "e54195a9f200e34d",
+    "2d78f8124233f7f2",
+    "d563eb1c98e292d5",
+    "3a8afa65f2487339",
+    "39c2b2d4cb3b8021",
+    "b111ad02945e3a18",
+    "f103db653c2a1420",
+    "96ad1906b1625ed1",
+    "d39bdfd8701a8218",
+    "4aae6e885b7e8279",
+    "b6ee7661b574c315",
+    "4f451082ae0857ad",
+    "8036d213d9835426",
+    "f9bba1f5c54f26b4",
+    "5ae5bfe5d07a7fd8",
+    "c8b0655c1b84bc74",
+    "751a9cfe9b9492d1",
+    "51e6cf81e6153b0e",
+    "219f96203ea8d77e",
+    "e88f5706dd84000a",
+    "95d638f616ec1ff2",
+    "7ec9ec4a0290f1a2",
+    "5402a0d19f4f6e4a",
+    "25c77f0530eca143"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-31",
+      "salience": 0.8,
+      "summary": "A price target increase from B of A Securities to $505 suggests potential upside, while the mention of forecast changes indicates heightened analyst interest ahead of earnings.",
+      "lean": "bullish",
+      "evidence": [
+        "B of A Securities Maintains Buy on Dell Technologies, Raises Price Target to $505",
+        "Dell Gears Up For Q2 Print; Here Are The Recent Forecast Changes From Wall Street's Most Accurate Analysts"
+      ],
+      "headlines": 2,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}

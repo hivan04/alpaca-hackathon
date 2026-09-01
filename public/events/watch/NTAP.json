@@ -1,0 +1,25 @@
+{
+  "symbol": "NTAP",
+  "report_date": "2026-09-02",
+  "seen": [
+    "3de2ca63c77810d2",
+    "58020bfac95cd4f9",
+    "3c840bcc2eafb21e",
+    "78374431e0ed88b7",
+    "2af4e8dbcf584993"
+  ],
+  "notes": [
+    {
+      "asof": "2026-08-31",
+      "salience": 0.5,
+      "summary": "B of A Securities raised its price target for NTAP to $206, maintaining a Neutral rating. This suggests some level of confidence in the stock's potential, but the Neutral rating indicates no strong directional bias.",
+      "lean": "neutral",
+      "evidence": [
+        "BOA Securities Maintains Neutral on NetApp, Raises Price Target to $206"
+      ],
+      "headlines": 1,
+      "messages": 0,
+      "injection_noticed": false
+    }
+  ]
+}
