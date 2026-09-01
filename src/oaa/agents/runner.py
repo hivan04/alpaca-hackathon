@@ -178,9 +178,35 @@ class Runner:
         )
         self.orch.journal.event("agent_degraded", cycle="startup", reason=str(provider))
 
+    #: Cycle actions that open RESIDENT positions and therefore need the carry
+    #: book's capital allocated before the agent can submit anything.
+    _CARRY_ACTIONS = frozenset({"carry_scan"})
+
     def _fire(self, cycle: Any) -> None:
         """Run one cycle, through the assistant where that makes sense."""
         if self.agent is not None and cycle.action in self.agent_cycles:
+            # Allocate the carry book's capital FIRST. `Orchestrator.carry_scan`
+            # calls `firewall.allocate_carry` before it generates anything, and
+            # it is the only caller in the codebase - but `agent_cycles`
+            # defaults to ["carry_scan"], so on this profile the agent path
+            # replaces that method entirely and the allocation never runs.
+            # `state.carry_reserved` therefore stays 0 and `may_open` refuses
+            # every resident entry with "carry book has no reserved capital",
+            # which is what happened to a fully-priced DIA condor - all four
+            # gates passed, $546 of risk against a $1,000 cap - on 1 Sep.
+            #
+            # This is not a bypass of the firewall. It is the same capacity
+            # check the deterministic path runs, and it can still refuse: if
+            # the book is at its equity ceiling the verdict fails and the
+            # agent does not run.
+            if cycle.action in self._CARRY_ACTIONS:
+                verdict = self.firewall.allocate_carry(self.orch.broker)
+                if not verdict.passed:
+                    log.warning(
+                        "carry allocation refused - skipping the agent cycle: %s",
+                        verdict.summary(),
+                    )
+                    return
             self.agent.run_cycle(cycle.action)
             return
         self.orch.run_cycle(cycle.action, cycle.name)

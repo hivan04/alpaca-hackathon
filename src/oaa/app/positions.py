@@ -39,7 +39,18 @@ def _accounts() -> list[tuple[str, str]]:
 
 
 def _fetch(settings: Any) -> dict[str, Any]:
-    out: dict[str, Any] = {"error": None, "fetched_at": dt.datetime.now()}
+    """Account and positions first, order history second, failing separately.
+
+    They were one try block, so anything raised while mapping the order
+    history discarded an account snapshot and a position list that had
+    already been read successfully - the page showed one error line and no
+    positions, for a fault in a panel below them. Two failures, two messages,
+    and the half that worked still renders.
+    """
+    out: dict[str, Any] = {
+        "error": None, "orders_error": None, "fetched_at": dt.datetime.now(),
+        "positions": [], "orders": [],
+    }
     try:
         from oaa.brokers.alpaca_rest import AlpacaRestBroker
 
@@ -47,9 +58,14 @@ def _fetch(settings: Any) -> dict[str, Any]:
         snapshot = broker.account()
         out["account"] = snapshot
         out["positions"] = [p.model_dump() for p in (snapshot.positions or [])]
-        out["orders"] = broker.orders(limit=500)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    try:
+        out["orders"] = broker.orders(limit=500)
+    except Exception as exc:  # noqa: BLE001
+        out["orders_error"] = f"{type(exc).__name__}: {exc}"
     return out
 
 
@@ -61,7 +77,10 @@ def _positions_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
         "symbol", "underlying", "expiry", "strike", "right", "qty",
         "avg_entry_price", "market_value", "unrealized_pl", "unrealized_plpc",
     ) if c in df.columns]
-    return df[keep].sort_values("unrealized_pl", ascending=True)
+    out = df[keep]
+    # Worst first, when the broker gave us a P&L to sort on. A missing column
+    # is a thinner table, never a KeyError that hides every open position.
+    return out.sort_values("unrealized_pl", ascending=True) if "unrealized_pl" in out else out
 
 
 def _orders_frame(rows: list[dict[str, Any]], filled_only: bool) -> pd.DataFrame:
@@ -164,8 +183,11 @@ def render_positions(settings_for: dict[str, Any]) -> None:
         else:
             st.dataframe(positions, width="stretch", hide_index=True)
 
-        orders = _orders_frame(data["orders"], filled_only)
         st.markdown("**Order history**")
+        if data.get("orders_error"):
+            st.warning(f"Could not read the order history: {data['orders_error']}")
+            continue
+        orders = _orders_frame(data["orders"], filled_only)
         if orders.empty:
             st.caption(
                 "No orders on this account yet."

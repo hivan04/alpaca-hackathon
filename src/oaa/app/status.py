@@ -206,7 +206,17 @@ def _next_open(now: dt.datetime, market_open: dt.time) -> str:
 
 def collect(settings: Any, journal: Any, profile: str) -> dict[str, Any]:
     """Everything `oaa status` shows, as plain data. Never raises."""
-    events = journal.events(limit=400)
+    # 2000, raised from 400 on 1 Sep. `by_kind` below picks the most recent
+    # event of each kind FROM THIS WINDOW, so a kind that fires once a day -
+    # `report`, which carries equity, day P&L and the position count - drops
+    # out of the status screen entirely once the window fills with something
+    # noisier. It did, the same afternoon the carry book started journaling 14
+    # rejections per scan and the intraday book 8 per cycle: 310 gate
+    # rejections pushed the 00:05 report past 400 and the money line silently
+    # vanished. A status screen that hides the P&L when the day gets busy is
+    # the wrong way round. The journal is a few hundred KB; reading five times
+    # more of it costs nothing.
+    events = journal.events(limit=2000)
     # A journal line is either a structured event (has `kind`) or a recorded
     # decision (has `action`). Both are activity; only the first has a kind.
     for record in events:

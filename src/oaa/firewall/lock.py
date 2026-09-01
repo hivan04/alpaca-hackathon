@@ -422,6 +422,27 @@ class TemporalFirewall:
 
         carry_used = round(sum(abs(p.market_value) for p in resident), 2)
         carry_reserve = max(carry_used, self.state.carry_reserved)
+
+        # An EMPTY carry book should not hold capital away from the day book.
+        # `allocate_carry` sets `carry_reserved` to the resident CEILING - 50%
+        # of equity - the moment it runs, whether or not the book owns a single
+        # contract. That reservation then comes off the top here, so with no
+        # resident positions at all the transient books were being sized around
+        # a $50,000 claim on nothing.
+        #
+        # When the resident book holds nothing, the day book is sized against
+        # what carry is ACTUALLY using (zero). The reservation is an
+        # authorisation to open, not a lien on cash: `may_open` still requires
+        # `carry_reserved > 0`, so the carry book can still enter afterwards,
+        # and both books remain bounded by their own ceilings (50% resident,
+        # 15% transient) and by Reg T.
+        if not resident and bool(self._setting("transient_ignores_idle_carry", True)):
+            carry_reserve = carry_used
+            verdict.reasons.append(
+                "carry book holds no positions - its reservation is not charged "
+                "against the transient headroom"
+            )
+
         verdict.carry_requirement = round(carry_reserve, 2)
 
         regt = snapshot.regt_buying_power

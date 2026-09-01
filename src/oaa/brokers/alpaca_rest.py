@@ -20,7 +20,7 @@ from oaa.core.types import (
     Right,
     Side,
 )
-from oaa.options.occ import is_occ, parse_occ
+from oaa.options.occ import is_occ, parse_occ, underlying_of
 
 log = get_logger("brokers.rest")
 
@@ -275,34 +275,52 @@ class AlpacaRestBroker(Broker):
             # Flattening them keeps one row per CONTRACT, which is what a
             # reader counting positions expects to see.
             for item in [order, *(getattr(order, "legs", None) or [])]:
-                symbol = str(getattr(item, "symbol", "") or "")
-                filled_qty = _maybe_float(getattr(item, "filled_qty", None)) or 0.0
-                price = _maybe_float(getattr(item, "filled_avg_price", None))
-                out.append({
-                    "submitted_at": getattr(item, "submitted_at", None),
-                    "filled_at": getattr(item, "filled_at", None),
-                    "symbol": symbol,
-                    "underlying": parse_occ(symbol).underlying if is_occ(symbol) else symbol,
-                    "side": str(getattr(getattr(item, "side", None), "value", "") or ""),
-                    "qty": _maybe_float(getattr(item, "qty", None)) or 0.0,
-                    "filled_qty": filled_qty,
-                    "filled_avg_price": price,
-                    # x100 is the OPTION contract multiplier and applies to
-                    # nothing else. A 0.0043 BTC fill at $70k is $301 of
-                    # notional, not $30,100 - and a crypto row inflated by two
-                    # orders of magnitude next to real option rows is the kind
-                    # of number an operator acts on before questioning.
-                    "notional": (
-                        round(price * filled_qty * (100 if is_occ(symbol) else 1), 2)
-                        if price else None
-                    ),
-                    "status": str(getattr(getattr(item, "status", None), "value", "") or ""),
-                    "order_type": str(getattr(getattr(item, "order_type", None), "value", "") or ""),
-                    "order_id": str(getattr(item, "id", "") or ""),
-                    "client_order_id": str(getattr(item, "client_order_id", "") or ""),
-                    "leg": item is not order,
-                })
+                # One unmappable row must not cost the reader the other 499.
+                # This loop is the only thing between the account and the
+                # Positions tab, and the tab shows the judged account.
+                try:
+                    out.append(self._order_row(item, item is not order))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "skipped an order row (%s): %s",
+                        getattr(item, "symbol", "?"), exc,
+                    )
         return out
+
+    @staticmethod
+    def _order_row(item: Any, is_leg: bool) -> dict[str, Any]:
+        symbol = str(getattr(item, "symbol", "") or "")
+        filled_qty = _maybe_float(getattr(item, "filled_qty", None)) or 0.0
+        price = _maybe_float(getattr(item, "filled_avg_price", None))
+        return {
+            "submitted_at": getattr(item, "submitted_at", None),
+            "filled_at": getattr(item, "filled_at", None),
+            "symbol": symbol,
+            # `underlying_of`, not `parse_occ(symbol).underlying` - OccSymbol's
+            # field is `root`, so that attribute access raised AttributeError
+            # on the first option order and took the whole tab down with it.
+            # `underlying_of` also answers for a non-option symbol, so the
+            # is_occ branch that used to guard it is not needed here.
+            "underlying": underlying_of(symbol),
+            "side": str(getattr(getattr(item, "side", None), "value", "") or ""),
+            "qty": _maybe_float(getattr(item, "qty", None)) or 0.0,
+            "filled_qty": filled_qty,
+            "filled_avg_price": price,
+            # x100 is the OPTION contract multiplier and applies to
+            # nothing else. A 0.0043 BTC fill at $70k is $301 of
+            # notional, not $30,100 - and a crypto row inflated by two
+            # orders of magnitude next to real option rows is the kind
+            # of number an operator acts on before questioning.
+            "notional": (
+                round(price * filled_qty * (100 if is_occ(symbol) else 1), 2)
+                if price else None
+            ),
+            "status": str(getattr(getattr(item, "status", None), "value", "") or ""),
+            "order_type": str(getattr(getattr(item, "order_type", None), "value", "") or ""),
+            "order_id": str(getattr(item, "id", "") or ""),
+            "client_order_id": str(getattr(item, "client_order_id", "") or ""),
+            "leg": is_leg,
+        }
 
     # -- mapping ---------------------------------------------------------- #
     @staticmethod

@@ -332,3 +332,61 @@ def test_a_corrupt_switchboard_falls_back_to_the_config(tmp_path):
     (tmp_path / "switchboard.json").write_text("{not json")
     board = Switchboard.open(tmp_path)
     assert board.enabled("vol_carry", default=True) is True
+
+
+# --------------------------------------------------------------------- #
+# 1 Sep: the ceiling and the cap were two numbers nothing kept in step
+# --------------------------------------------------------------------- #
+
+def test_the_affordable_premium_sits_under_the_cap_not_on_it():
+    """10.00 x 100 == 0.01 x 100_000 exactly. Equality holds at one equity
+    value; the first losing trade breaks it and the whole band auto-rejects."""
+    from oaa.risk.sizing import affordable_premium
+
+    assert affordable_premium(100_000, 0.01) == 9.00
+    assert affordable_premium(100_000, 0.01) * 100 < 100_000 * 0.01
+
+
+def test_the_affordable_premium_follows_equity():
+    from oaa.risk.sizing import affordable_premium
+
+    assert affordable_premium(95_000, 0.01) == 8.55
+    assert affordable_premium(120_000, 0.01) == 10.80
+    assert affordable_premium(0, 0.01) is None
+    assert affordable_premium(100_000, 0) is None
+
+
+def test_a_contract_at_the_affordable_premium_actually_sizes_to_one(cfg, account):
+    """The point of the number: a structure priced at it must be approvable."""
+    from oaa.risk.sizing import affordable_premium
+
+    ceiling = affordable_premium(account.equity, cfg.risk.max_risk_per_trade_pct)
+    verdict = RiskEngine(cfg).evaluate(
+        idea(max_loss=ceiling * 100), account, now=MIDDAY
+    )
+    assert verdict.approved
+    assert verdict.adjusted_quantity >= 1
+
+
+def test_an_unaffordable_trade_is_told_what_would_have_fitted(cfg, account):
+    """Refusing is correct - a contract is indivisible. Refusing without
+    naming the affordable premium is what made 1 Sep unreadable for four days."""
+    verdict = RiskEngine(cfg).evaluate(idea(max_loss=2_460.5), account, now=MIDDAY)
+    assert not verdict.approved
+    reason = " ".join(verdict.reasons)
+    assert "rule=sizing" in reason
+    assert "per contract" in reason
+    assert "indivisible" in reason
+
+
+def test_honour_strategy_quantity_makes_a_quantity_of_one_binding(cfg, account):
+    """Off by default the budget sizes up from 1; on, the strategy's number
+    binds at every value including 1."""
+    small = idea(max_loss=300.0)
+    small.quantity = 1
+
+    assert RiskEngine(cfg).evaluate(small, account, now=MIDDAY).adjusted_quantity > 1
+
+    strict = cfg.model_copy(deep=True)
+    strict.risk.honour_strategy_quantity = True
+    assert RiskEngine(strict).evaluate(small, account, now=MIDDAY).adjusted_quantity == 1

@@ -319,6 +319,11 @@ firewall:
   carry_max_equity_pct: 0.50          # resident book's gross ceiling
   transient_utilisation: 0.50         # of what Reg T leaves after carry
   transient_max_equity_pct: 0.15      # second, absolute ceiling
+  # NOTE: `transient_ignores_idle_carry` is read by `lock.py` with a default of
+  # True and is deliberately NOT declared here - the firewall settings model
+  # forbids unknown keys, so adding it to this block fails config validation on
+  # every profile (125 tests, 1 Sep). Declare it in the schema first if it ever
+  # needs to be turned off from config.
   carry_margin_cushion: 1.25
   min_trade_value: 500.0
 

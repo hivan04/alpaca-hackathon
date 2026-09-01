@@ -522,7 +522,7 @@ class IntradayMomentum(Strategy):
             max_spread_pct=float(self.p("spread_gate.max_relative_spread", 0.02)) * 2,
             min_open_interest=int(self.p("structure.min_open_interest", 100)),
             min_volume=0,
-            max_price=_price_ceiling(ctx, float(self.p("structure.max_option_price", 25.0))),
+            max_price=float(self.p("structure.max_option_price", 25.0)),
         ))
         thesis = self._thesis(market, selection, bullish, momentum, catalyst)
         quantity = int(self.p("structure.fixed_quantity", 1))
@@ -546,6 +546,24 @@ class IntradayMomentum(Strategy):
             )
         if idea.is_credit:
             raise StrategyError("intraday structures are long premium by construction")
+
+        # Affordability is checked HERE, on the built structure - never by
+        # narrowing the chain. `ChainFilter.max_price` does not refuse a trade,
+        # it removes the near-the-money strikes and leaves the cheap far-OTM
+        # ones, so `atm()` then prices an OTM strike as ATM: a distorted
+        # structure rather than a refused one. `chain.py:24-30` says exactly
+        # this and I used it as a budget guard anyway - on 1 Sep a 9.00 ceiling
+        # emptied the filtered chain on all eight symbols and every cycle
+        # reported "no contracts survived the liquidity filter", which is a
+        # liquidity claim about a chain that was perfectly healthy.
+        ceiling = _affordable_ceiling(ctx)
+        if ceiling is not None and idea.max_loss and idea.max_loss > ceiling * 100:
+            raise StrategyError(
+                f"{market.symbol}: structure costs ${idea.max_loss:,.0f} per "
+                f"contract against a per-trade budget of ${ceiling * 100:,.0f} "
+                f"(${ceiling:,.2f} of premium) - the risk engine would refuse "
+                f"it at any quantity, so it is not proposed"
+            )
         return idea
 
     # ================================================================== #
@@ -726,8 +744,8 @@ def _session_slice(bars: list[dict]) -> list[dict]:
     return [b for b in bars if _day(b) == last]
 
 
-def _price_ceiling(ctx: Any, configured: float) -> float:
-    """The per-contract premium ceiling, derived from the LIVE risk budget.
+def _affordable_ceiling(ctx: Any) -> float | None:
+    """The per-contract premium the LIVE risk budget can actually approve.
 
     A hard-coded ceiling and the account's per-trade cap are two numbers that
     have to agree, and nothing made them. On 1 Sep the ceiling was 25.00 while
@@ -737,13 +755,10 @@ def _price_ceiling(ctx: Any, configured: float) -> float:
     Setting the ceiling to 9.00 fixes it for one equity value; deriving it
     fixes it for all of them, including after the account has moved.
 
-    The configured value stays as a hard upper bound, so a book can still be
-    more conservative than the budget allows - it just can no longer be less.
+    Used to REFUSE a built structure, not to filter the chain. See the call
+    site for why the difference matters.
     """
-    budget_ceiling = affordable_premium(
+    return affordable_premium(
         getattr(getattr(ctx, "account", None), "equity", 0.0) or 0.0,
         getattr(getattr(ctx.config, "risk", None), "max_risk_per_trade_pct", 0.0) or 0.0,
     )
-    if budget_ceiling is None:
-        return configured
-    return min(configured, budget_ceiling)

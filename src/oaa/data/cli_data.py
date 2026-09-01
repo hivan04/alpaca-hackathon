@@ -166,7 +166,6 @@ class AlpacaCliDataProvider(MarketDataProvider):
                     "--end", stop.isoformat(),
                     "--feed", self.cfg.data.stock_feed,
                     "--adjustment", "all",
-                    "--limit", "10000",
                 ]
                 if page_token:
                     args += ["--page-token", page_token]
@@ -224,11 +223,36 @@ class AlpacaCliDataProvider(MarketDataProvider):
                     "--expiration-date-lte", (today + dt.timedelta(days=max_dte)).isoformat(),
                     "--strike-price-gte", f"{strike_low:.2f}",
                     "--strike-price-lte", f"{strike_high:.2f}",
-                    "--limit", "10000",
                 ]
                 if page_token:
                     args += ["--page-token", page_token]
-                payload = self.run(args)
+
+                # The FIRST request must behave exactly as it did before paging
+                # was added - no new flags, and a failure still raises. Every
+                # SUBSEQUENT page is best-effort: if the CLI does not accept
+                # `--page-token`, or a later page errors, we keep the contracts
+                # already collected instead of losing the whole chain.
+                #
+                # This shape exists because the first attempt added
+                # `--limit 10000` - legal in `bars()`, not here - which made
+                # `run()` raise on every call, `context()` swallow it, and the
+                # chain arrive EMPTY on every symbol for two hours. Every book
+                # then reported a market condition ("no contracts survived the
+                # liquidity filter", "no IV rank available") that was really an
+                # empty list. A pagination improvement must not be able to
+                # return less than no pagination at all.
+                try:
+                    payload = self.run(args)
+                except DataError:
+                    if not snapshots:
+                        raise           # first page failed - that is a real error
+                    log.warning(
+                        "%s: chain pagination stopped early after %d contract(s) "
+                        "- continuing with a PARTIAL chain",
+                        symbol, len(snapshots),
+                    )
+                    break
+
                 page = payload.get("snapshots", payload) if isinstance(payload, dict) else {}
                 if isinstance(page, dict):
                     snapshots.update(page)
@@ -323,7 +347,17 @@ class AlpacaCliDataProvider(MarketDataProvider):
                 symbol, min_dte=chain_min_dte, max_dte=chain_max_dte
             )
         except DataError as exc:
-            log.debug("%s: no chain (%s) - continuing without an overlay", symbol, exc)
+            # WARNING, not DEBUG. Every downstream book turns an empty chain
+            # into a confident market claim - "no contracts survived the
+            # liquidity filter", "no IV rank available" - so a silent fetch
+            # failure is indistinguishable from a quiet day, and was, for
+            # hours. The one line that knows the truth has to say it out loud.
+            log.warning(
+                "%s: OPTION CHAIN FETCH FAILED (%s) - continuing with an EMPTY "
+                "chain; any gate rejection for this symbol this cycle describes "
+                "the fetch, not the market",
+                symbol, exc,
+            )
             chain = []
 
         atm_iv = _atm_iv(chain, spot)

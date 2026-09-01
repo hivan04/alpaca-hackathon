@@ -268,7 +268,16 @@ selection:
   prefer_vertical_above_iv_rank: 0.60
 
 structure:
-  fixed_quantity: 1
+  # NOT a fixed quantity. The risk engine's convention is that a quantity of 1
+  # means "no opinion, size me by the risk budget", so this book is sized by
+  # `risk.max_risk_per_trade_pct` and this number only binds at values ABOVE 1.
+  # The name has caused one real misreading already - the single order this
+  # account ever approved went out at quantity 3 and looked like a bug. Set
+  # `risk.honour_strategy_quantity: true` if you want it binding at 1 as well;
+  # left off deliberately, because budget sizing is where the upside is in a
+  # P&L-scored week.
+  requested_quantity: 1
+  fixed_quantity: 1        # legacy alias, read by `structure.fixed_quantity`
   # Per-contract premium ceiling for THIS book. Added 29 Aug when the global
   # $25 chain-filter cap was removed: that cap was never meant as a notional
   # limit, but this book was relying on it as one. Without a ceiling the
@@ -298,7 +307,14 @@ structure:
   # $999.99, floor(999.99 / 1000.00) to 0, and the whole $10 band auto-rejects
   # again - today's bug, re-created by the first loss. A ceiling under a cap
   # needs headroom, not equality.
-  max_option_price: 9.00
+  # Back to 25.00 as a WIDE sanity bound on the chain filter, not as a budget
+  # guard. 9.00 here emptied the filtered chain on every symbol - the filter
+  # strips contracts by price, so a ceiling near the money removes the strikes
+  # this book actually wants and leaves nothing that passes the rest of the
+  # liquidity filter. Affordability is now enforced on the BUILT structure in
+  # `intraday_momentum._affordable_ceiling`, where refusing is a refusal
+  # instead of a distortion.
+  max_option_price: 25.00
 
 # --- sizing: THERE IS NO PER-STRATEGY SIZING ---------------------------------
 # This block used to read:
