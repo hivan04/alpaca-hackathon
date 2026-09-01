@@ -7,7 +7,7 @@
     "close_equity": 100000.0,
     "day_pl": 0.0,
     "day_pl_pct": 0.0,
-    "snapshots": 274,
+    "snapshots": 336,
     "open_positions_at_close": 0,
     "cycles_run": {
       "intraday_1330": 1,
@@ -139,13 +139,13 @@
         "risk_approved": null
       }
     ],
-    "gate_rejections": 200,
+    "gate_rejections": 202,
     "rejections_by_gate": {
       "time_of_day": 56,
       "structure": 40,
       "scheduled_event": 36,
       "momentum": 15,
-      "premium": 13,
+      "premium": 15,
       "spread": 13,
       "confirmation": 12,
       "selection": 11,
@@ -156,7 +156,7 @@
       "no qualifying scheduled catalyst inside the horizon": 36,
       "no VWAP cross and price is not on the band": 15,
       "2/6 confirmations, needs 3": 12,
-      "no IV rank available": 10,
+      "no IV rank available": 12,
       "SPY: no contracts survived the liquidity filter": 9,
       "IV rank 100% is at or above the 85% no-trade ceiling": 8,
       "11:51 is inside the 11:30-13:30 lunch window": 8,
@@ -168,7 +168,7 @@
     "rejections_by_book": {
       "intraday": 136,
       "opportunistic": 36,
-      "carry": 28
+      "carry": 30
     },
     "symbols_examined": [
       "DIA",
@@ -223,6 +223,12 @@
       "events arm: 0 opened, 0 declined (abstention 0%)",
       "macro: risk_on, vol expanding",
       "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)",
+      "macro: risk_on, vol expanding",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)",
+      "macro: high_dispersion, vol stable",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
       "events arm: 0 opened, 0 declined (abstention 0%)"
     ],
     "reasoning_available": true,
@@ -246,15 +252,13 @@
   "critique": {
     "author": "featherless / Qwen/Qwen3-32B",
     "bullets": [
-      "Increase max loss threshold from 1.0% to 1.5% of equity to allow more TLT/XLF/SPY trades (e.g., TLT max loss $1,424 vs $1,000 limit)",
-      "Expand liquidity filter criteria for TLT/SPY/DIA/qqq symbols, which repeatedly failed \"no contracts survived\" (9+ instances)",
-      "Adjust confirmation gate from 3/6 to 2/6 required confirmations, given 3/6 was sufficient for the one risk-approved but unsent QQQ trade",
-      "Shorten lunch window gate from 11:30-13:30 to 11:45-13:15, as 11:51/13:30 rejections occurred at window edges",
-      "Add IV rank fallback logic when \"no IV rank available\" (10 instances), using alternative volatility metrics",
-      "Investigate why the 14:00:33 QQQ risk-approved trade was not sent despite passing all gates and having $293.5 max loss",
-      "Add post-lunch (13:30-14:30) VWAP cross momentum scans, as 4/6 TLT ideas occurred in this window but were rejected by time_of_day gate",
-      "Expand symbols list to include NIO/ZS/MDB from watch notes, which generated no ideas despite macro \"risk_on\" signals"
+      "Adjust the lunch window gate: Shorten or shift the 11:30-13:30 restriction to capture late-afternoon opportunities (e.g., 12:00-13:00), as 40 rejections cite this rule during a period when 14:00+ momentum ideas were still being generated.",
+      "Lower confirmation threshold from 3/6 to 2/6 for intraday_momentum: 3/6 confirmations were insufficient for risk approval in 3 of 8 declined ideas (e.g., QQQ at 14:00:33), yet 4/6 confirmations still failed due to sizing rules.",
+      "Increase max risk per trade from 1.0% to 1.5% of equity: The QQQ idea (max loss $293.5) was risk-approved but unsent due to critic scoring, while TLT ideas (max loss ~$1,450) were rejected outright despite 4/6 confirmations.",
+      "Expand liquidity filter for SPY/DIA/TLT: 9+ rejections cite \"no contracts survived,\" but these are high-volume symbols. Test relaxing open interest/volume thresholds by 20% for these tickers.",
+      "Validate critic scoring logic: The 14:30:12 TLT idea shows a critic score of 0.55 passing a 0.55 threshold, which is mathematically impossible. Audit the critic's scoring function for off-by-one errors.",
+      "Collect IV rank data for all symbols: 12 rejections cite \"no IV rank available,\" but the system only tracks it conditionally. Enable IV rank logging for DIA/EEM/GLD to validate its absence as a legitimate veto."
     ]
   },
-  "generated_at": "2026-08-31T22:15:26.368154+00:00"
+  "generated_at": "2026-09-01T00:05:58.098197+00:00"
 }

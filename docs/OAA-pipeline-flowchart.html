@@ -1,0 +1,769 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>The Operating Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@600;700&display=swap">
+<style>
+:root {
+  --paper:#F2F5F4; --surface:#FBFCFC; --surface-sunk:#E7ECEA;
+  --ink:#12181A; --ink-soft:#3D4A49; --muted:#6E7C79;
+  --rule:#CBD5D2; --rule-soft:#DEE5E3;
+  --carry:#16655A; --carry-wash:#DCEBE7;
+  --transient:#B7501F; --transient-wash:#F6E4DA;
+  --veto:#8E2B37; --veto-wash:#F4DFE1;
+  --pass:#2F6B3A; --pass-wash:#DEECDF;
+  --z: 1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:#0C1211; --surface:#141B1A; --surface-sunk:#0A100F;
+    --ink:#E4EBE8; --ink-soft:#B4C1BD; --muted:#7E8E8A;
+    --rule:#2C3836; --rule-soft:#202A29;
+    --carry:#46AA97; --carry-wash:#122925;
+    --transient:#E1854F; --transient-wash:#2C1A11;
+    --veto:#D46E79; --veto-wash:#2B1418;
+    --pass:#6FB77C; --pass-wash:#132416;
+  }
+}
+:root[data-theme="dark"] {
+  --paper:#0C1211; --surface:#141B1A; --surface-sunk:#0A100F;
+  --ink:#E4EBE8; --ink-soft:#B4C1BD; --muted:#7E8E8A;
+  --rule:#2C3836; --rule-soft:#202A29;
+  --carry:#46AA97; --carry-wash:#122925;
+  --transient:#E1854F; --transient-wash:#2C1A11;
+  --veto:#D46E79; --veto-wash:#2B1418;
+  --pass:#6FB77C; --pass-wash:#132416;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin:0; background: var(--paper); color: var(--ink);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+header { border-bottom:1px solid var(--rule); background: var(--surface); }
+.wrap { max-width:1200px; margin:0 auto; padding:0 1.6rem; }
+header .wrap { padding-top:2.6rem; padding-bottom:1.6rem; }
+.eyebrow {
+  font-family:"IBM Plex Mono",monospace; font-size:.7rem; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--muted); margin:0 0 .7rem;
+}
+h1 {
+  font-family:"IBM Plex Serif",Georgia,serif; font-weight:700;
+  font-size:clamp(1.9rem,4.4vw,2.9rem); line-height:1.05; letter-spacing:-.02em;
+  margin:0 0 .7rem; text-wrap:balance;
+}
+.standfirst { color:var(--ink-soft); max-width:62ch; margin:0 0 1.4rem; font-size:1.02rem; }
+
+.controls {
+  display:flex; flex-wrap:wrap; align-items:center; gap:.5rem 1.2rem;
+  border-top:1px solid var(--rule-soft); padding-top:1rem;
+}
+.zoom { display:flex; gap:.3rem; }
+button {
+  font-family:"IBM Plex Mono",monospace; font-size:.74rem; letter-spacing:.06em;
+  background:var(--surface-sunk); color:var(--ink); border:1px solid var(--rule);
+  border-radius:2px; padding:.35rem .7rem; cursor:pointer;
+}
+button:hover { border-color:var(--carry); color:var(--carry); }
+button[aria-pressed="true"] { background:var(--carry); color:var(--surface); border-color:var(--carry); }
+button:focus-visible { outline:2px solid var(--carry); outline-offset:2px; }
+
+.legend { display:flex; flex-wrap:wrap; gap:.4rem 1.1rem; font-family:"IBM Plex Mono",monospace; font-size:.72rem; color:var(--muted); }
+.legend span { display:inline-flex; align-items:center; gap:.4rem; }
+.legend i { width:22px; height:0; border-top:2px solid currentColor; display:inline-block; }
+.legend .l-flow { color:var(--ink); }
+.legend .l-veto { color:var(--veto); }
+.legend .l-veto i { border-top-style:dashed; }
+.legend .l-carry { color:var(--carry); }
+.legend .l-trans { color:var(--transient); }
+.legend .l-pass  { color:var(--pass); }
+
+.board {
+  border-top:1px solid var(--rule); border-bottom:1px solid var(--rule);
+  background:var(--surface); overflow:auto; max-height:88vh;
+}
+.board svg {
+  display:block; width:calc(1700px * var(--z)); height:auto;
+  min-width:100%; color:var(--ink);
+}
+.hint {
+  font-family:"IBM Plex Mono",monospace; font-size:.72rem; color:var(--muted);
+  padding:.8rem 1.6rem; max-width:1200px; margin:0 auto;
+}
+footer {
+  border-top:1px solid var(--rule); margin-top:2rem; padding:1.4rem 0 3rem;
+  font-family:"IBM Plex Mono",monospace; font-size:.74rem; color:var(--muted);
+}
+</style>
+<style>
+  /* print build: one page the size of the diagram, no zoom chrome */
+  @page { size: 1780px 4130px; margin: 0; }
+  :root { color-scheme: light; }
+  body { background:#fff; }
+  header { border-bottom:1px solid var(--rule); background:#fff; }
+  header .wrap { max-width:1700px; padding:40px 40px 28px; }
+  h1 { font-size:44px; }
+  .standfirst { max-width:110ch; font-size:15px; }
+  .board { border:0; background:#fff; overflow:visible; max-height:none; padding:24px 40px 0; }
+  .board svg { width:1700px; height:auto; }
+  footer { border-top:1px solid var(--rule); margin:24px 40px 0; padding:14px 0 0; }
+</style>
+</head><body>
+<header>
+  <div class="wrap">
+    <p class="eyebrow">Eventus · Options Alpha Agents · current 1 Sep 2026</p>
+    <h1>The operating pipeline</h1>
+    <p class="standfirst">Every path the system can take in a session: the scheduler waking itself, discovery, market data, the three intraday books running their own gate stacks in parallel, the single approval spine they all funnel through, the firewall work that closes the day, and the earnings book that runs on its own loop outside all of it. Nothing here waits for a human.</p>
+    <p class="standfirst" style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--muted)">Redrawn 1 Sep against the working tree's <b>config/default.yaml</b>, <b>judged.yaml</b> and the three strategy params files — not against the previous drawing. Boxes marked <b style="color:var(--veto)">△</b> changed during a live trading session and carry the date they changed. The running agent holds its modules in memory, so it picks up a change only on restart.</p>
+    </div>
+</header>
+<div class="board"><svg viewBox="0 0 1700 3730" role="img" aria-label="A full end-to-end flowchart of the trading system: the runner's poll loop and phase machine; the pre-market discovery sweep feeding a macro regime view; per-symbol market data assembly; three parallel book lanes each running their own ordered gate stack with every veto written to a rejection log; a single approval spine of cost model, LLM critic, deterministic risk engine, partner veto and execution; the management cycle routing each position back to the strategy that opened it; the 15:15 transient cutoff, the 15:45 carry verification and the dated submission flatten; and a fourth band for the earnings book, which runs its own hourly loop outside the capital firewall.">
+<defs>
+  <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+  <marker id="av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--veto)"/></marker>
+  <marker id="ac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--carry)"/></marker>
+  <marker id="at" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--transient)"/></marker>
+  <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--pass)"/></marker>
+</defs>
+
+<g font-family="IBM Plex Mono, monospace" font-size="12.5">
+
+<!-- ══════════ BAND 1 · SCHEDULER ══════════ -->
+<text x="40" y="34" fill="var(--muted)" font-size="11" letter-spacing="1.4">01 · THE LOOP WAKES ITSELF</text>
+<line x1="40" y1="44" x2="1660" y2="44" stroke="var(--rule)"/>
+
+<rect x="60" y="66" width="230" height="58" fill="none" stroke="currentColor"/>
+<text x="175" y="90" text-anchor="middle" fill="currentColor">runner poll · 20s</text>
+<text x="175" y="108" text-anchor="middle" fill="var(--muted)" font-size="10.5">survives crash + restart</text>
+
+<rect x="330" y="66" width="230" height="58" fill="none" stroke="currentColor"/>
+<text x="445" y="90" text-anchor="middle" fill="currentColor">SessionClock.phase()</text>
+<text x="445" y="108" text-anchor="middle" fill="var(--muted)" font-size="10.5">ET · boundaries validated</text>
+
+<rect x="600" y="66" width="200" height="58" fill="none" stroke="currentColor"/>
+<text x="700" y="90" text-anchor="middle" fill="currentColor">trading day?</text>
+<text x="700" y="108" text-anchor="middle" fill="var(--muted)" font-size="10.5">mon–fri</text>
+
+<rect x="840" y="66" width="250" height="58" fill="none" stroke="currentColor"/>
+<text x="965" y="90" text-anchor="middle" fill="currentColor">cycles due for this phase</text>
+<text x="965" y="108" text-anchor="middle" fill="var(--muted)" font-size="10.5">late cycles still fire</text>
+
+<rect x="1130" y="66" width="230" height="58" fill="none" stroke="currentColor"/>
+<text x="1245" y="90" text-anchor="middle" fill="currentColor">agent_cycles?</text>
+<text x="1245" y="108" text-anchor="middle" fill="var(--muted)" font-size="10.5">cost dial · [] = rules only</text>
+
+<rect x="1400" y="44" width="260" height="46" fill="none" stroke="var(--carry)"/>
+<text x="1530" y="72" text-anchor="middle" fill="var(--carry)" font-size="11.5">TradingAgent · MCP tool loop</text>
+<rect x="1400" y="100" width="260" height="46" fill="none" stroke="currentColor"/>
+<text x="1530" y="128" text-anchor="middle" fill="currentColor" font-size="11.5">Orchestrator.run_cycle()</text>
+
+<g stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#a)">
+  <line x1="290" y1="95" x2="322" y2="95"/>
+  <line x1="560" y1="95" x2="592" y2="95"/>
+  <line x1="800" y1="95" x2="832" y2="95"/>
+  <line x1="1090" y1="95" x2="1122" y2="95"/>
+  <path d="M1360 88 H1380 V67 H1392"/>
+  <path d="M1360 102 H1380 V123 H1392"/>
+</g>
+<path d="M700 124 V152 H175 V132" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#a)"/>
+<text x="440" y="148" text-anchor="middle" fill="var(--muted)" font-size="10.5">no → sleep</text>
+
+<!-- ══════════ BAND 2 · DISCOVERY ══════════ -->
+<text x="40" y="196" fill="var(--muted)" font-size="11" letter-spacing="1.4">02 · 09:15 DISCOVER — ALPACA-NATIVE, NO SCRAPER</text>
+<line x1="40" y1="206" x2="1660" y2="206" stroke="var(--rule)"/>
+
+<rect x="60" y="228" width="210" height="42" fill="none" stroke="currentColor"/>
+<text x="165" y="254" text-anchor="middle" fill="currentColor" font-size="11.5">data news</text>
+<rect x="60" y="282" width="210" height="42" fill="none" stroke="currentColor"/>
+<text x="165" y="308" text-anchor="middle" fill="currentColor" font-size="11.5">screener movers</text>
+<rect x="60" y="336" width="210" height="42" fill="none" stroke="currentColor"/>
+<text x="165" y="362" text-anchor="middle" fill="currentColor" font-size="11.5">screener most-actives</text>
+
+<rect x="330" y="262" width="230" height="86" fill="none" stroke="currentColor"/>
+<text x="445" y="292" text-anchor="middle" fill="currentColor" font-size="11.5">score_snapshot()</text>
+<text x="445" y="312" text-anchor="middle" fill="var(--muted)" font-size="10.5">rank-normalise WITHIN</text>
+<text x="445" y="328" text-anchor="middle" fill="var(--muted)" font-size="10.5">each source, then blend</text>
+
+<rect x="610" y="262" width="210" height="86" fill="none" stroke="currentColor"/>
+<text x="715" y="292" text-anchor="middle" fill="currentColor" font-size="11.5">AttentionSnapshot</text>
+<text x="715" y="312" text-anchor="middle" fill="var(--muted)" font-size="10.5">breadth · news velocity</text>
+<text x="715" y="328" text-anchor="middle" fill="var(--muted)" font-size="10.5">volume ranking</text>
+
+<rect x="880" y="222" width="290" height="56" fill="none" stroke="currentColor"/>
+<text x="1025" y="245" text-anchor="middle" fill="currentColor" font-size="11.5">TradabilityFilter</text>
+<text x="1025" y="264" text-anchor="middle" fill="var(--muted)" font-size="10.5">→ CandidatePool (accumulates)</text>
+
+<rect x="880" y="318" width="290" height="80" fill="none" stroke="var(--carry)"/>
+<text x="1025" y="342" text-anchor="middle" fill="var(--carry)" font-size="11.5">MacroLens</text>
+<text x="1025" y="362" text-anchor="middle" fill="var(--muted)" font-size="10.5">use_llm ? model : breadth rule</text>
+<text x="1025" y="380" text-anchor="middle" fill="var(--muted)" font-size="10.5">deterministic fallback on error</text>
+
+<rect x="1250" y="252" width="400" height="130" fill="var(--carry-wash)" stroke="var(--carry)" stroke-width="1.6"/>
+<text x="1450" y="280" text-anchor="middle" fill="var(--carry)" font-size="12.5" font-weight="600">MacroView — a REGIME, not a trade</text>
+<text x="1270" y="304" fill="var(--ink-soft)" font-size="11">regime · vol_expectation</text>
+<text x="1270" y="324" fill="var(--ink-soft)" font-size="11">guidance: trade / reduce / stand_down</text>
+<text x="1270" y="344" fill="var(--ink-soft)" font-size="11">size_multiplier ≤ 1.0 — can only REDUCE</text>
+<text x="1270" y="364" fill="var(--ink-soft)" font-size="11">flagged_symbols · shared_themes</text>
+
+<g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#a)">
+  <path d="M270 249 H300 V300 H322"/>
+  <line x1="270" y1="303" x2="322" y2="303"/>
+  <path d="M270 357 H300 V306 H322"/>
+  <line x1="560" y1="305" x2="602" y2="305"/>
+  <path d="M820 290 H850 V250 H872"/>
+  <path d="M820 320 H850 V358 H872"/>
+</g>
+<line x1="1170" y1="358" x2="1242" y2="330" stroke="var(--carry)" stroke-width="1.5" marker-end="url(#ac)"/>
+
+<!-- ══════════ BAND 3 · MARKET DATA ══════════ -->
+<text x="40" y="446" fill="var(--muted)" font-size="11" letter-spacing="1.4">03 · MARKET CONTEXT — PER SYMBOL, THREADED, 190 REQ/MIN CEILING</text>
+<line x1="40" y1="456" x2="1660" y2="456" stroke="var(--rule)"/>
+
+<rect x="60" y="478" width="170" height="68" fill="none" stroke="currentColor"/>
+<text x="145" y="500" text-anchor="middle" fill="currentColor" font-size="11">daily bars</text>
+<text x="145" y="518" text-anchor="middle" fill="var(--muted)" font-size="10">400 sessions</text>
+<text x="145" y="534" text-anchor="middle" fill="var(--muted)" font-size="10">adx · trend · rv</text>
+
+<rect x="242" y="478" width="190" height="68" fill="none" stroke="var(--transient)"/>
+<text x="337" y="500" text-anchor="middle" fill="var(--transient)" font-size="11">△ 1-minute bars</text>
+<text x="337" y="518" text-anchor="middle" fill="var(--muted)" font-size="10">5 sessions · VWAP resets daily</text>
+<text x="337" y="534" text-anchor="middle" fill="var(--muted)" font-size="10">was 5-minute · 27 Aug</text>
+
+<rect x="444" y="478" width="210" height="68" fill="none" stroke="currentColor"/>
+<text x="549" y="500" text-anchor="middle" fill="currentColor" font-size="11">△ option chain · 0–32 DTE</text>
+<text x="549" y="518" text-anchor="middle" fill="var(--muted)" font-size="10">window = union of the books</text>
+<text x="549" y="534" text-anchor="middle" fill="var(--muted)" font-size="10">on main 375e59a · 31 Aug</text>
+
+<rect x="666" y="478" width="164" height="68" fill="none" stroke="currentColor"/>
+<text x="748" y="500" text-anchor="middle" fill="currentColor" font-size="11">news · 6h</text>
+<text x="748" y="518" text-anchor="middle" fill="var(--muted)" font-size="10">per-symbol</text>
+<text x="748" y="534" text-anchor="middle" fill="var(--muted)" font-size="10">headlines</text>
+
+<rect x="880" y="466" width="230" height="76" fill="none" stroke="currentColor" stroke-width="1.6"/>
+<text x="995" y="494" text-anchor="middle" fill="currentColor" font-size="12.5" font-weight="600">MarketContext</text>
+<text x="995" y="514" text-anchor="middle" fill="var(--muted)" font-size="10.5">one immutable snapshot</text>
+<text x="995" y="530" text-anchor="middle" fill="var(--muted)" font-size="10.5">strategies read nothing else</text>
+
+<rect x="1160" y="478" width="290" height="52" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="1305" y="500" text-anchor="middle" fill="currentColor" font-size="11">partner: data_enrichment</text>
+<text x="1305" y="518" text-anchor="middle" fill="var(--muted)" font-size="10">sponsor tech, failures skipped</text>
+
+<g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#a)">
+  <path d="M230 512 H240"/>
+  <path d="M432 512 H442"/>
+  <path d="M654 512 H664"/>
+  <line x1="830" y1="512" x2="872" y2="512"/>
+  <line x1="1110" y1="504" x2="1152" y2="504"/>
+</g>
+<path d="M1305 530 V566 H850 V612" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#a)"/>
+<text x="1315" y="556" fill="var(--muted)" font-size="10.5">into every lane below</text>
+
+<!-- ══════════ BAND 4 · THE THREE LANES ══════════ -->
+<text x="40" y="646" fill="var(--muted)" font-size="11" letter-spacing="1.4">04 · THREE BOOKS, THREE GATE STACKS, RUN IN PARALLEL — HARD ON CARRY, TWO HARD + A VOTE ON INTRADAY</text>
+<line x1="40" y1="656" x2="1660" y2="656" stroke="var(--rule)"/>
+
+<!-- lane frames -->
+<rect x="50" y="676" width="470" height="740" fill="none" stroke="var(--carry)" stroke-width="1.2" stroke-dasharray="2 4"/>
+<rect x="560" y="676" width="470" height="740" fill="none" stroke="var(--transient)" stroke-width="1.2" stroke-dasharray="2 4"/>
+<rect x="1070" y="676" width="470" height="740" fill="none" stroke="var(--transient)" stroke-width="1.2" stroke-dasharray="2 4"/>
+
+<text x="70" y="700" fill="var(--carry)" font-size="12" font-weight="600">CARRY · resident · 10:00–15:00</text>
+<text x="70" y="716" fill="var(--muted)" font-size="10.5">held 3–10 sessions · short vol</text>
+<text x="580" y="700" fill="var(--transient)" font-size="12" font-weight="600">INTRADAY · transient · 09:45–14:45</text>
+<text x="580" y="716" fill="var(--muted)" font-size="10.5">△ flat by 15:10 · long vol · 8 index ETFs · 1 Sep</text>
+<text x="1090" y="700" fill="var(--veto)" font-size="12" font-weight="600">OPPORTUNISTIC · enabled · CANNOT OPEN</text>
+<text x="1090" y="716" fill="var(--veto)" font-size="10.5">△ _transient_scan leases as INTRADAY → may_open always fails</text>
+
+<!-- ---------- LANE A · CARRY ---------- -->
+<rect x="95" y="742" width="380" height="46" fill="var(--carry-wash)" stroke="var(--carry)"/>
+<text x="285" y="762" text-anchor="middle" fill="var(--carry)" font-size="11.5">firewall.allocate_carry()</text>
+<text x="285" y="779" text-anchor="middle" fill="var(--muted)" font-size="10">reserve up to the equity ceiling FIRST</text>
+
+<rect x="95" y="806" width="380" height="40" fill="none" stroke="currentColor"/>
+<text x="285" y="831" text-anchor="middle" fill="currentColor" font-size="11.5">past entry_cutoff_utc?</text>
+
+<rect x="95" y="866" width="380" height="56" fill="none" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="112" y="886" fill="var(--carry)" font-size="11" font-weight="600">GATE 1 · PREMIUM — is vol rich?</text>
+<text x="112" y="904" fill="var(--ink-soft)" font-size="10.5">△ iv_rank ≥ 0.35 AND (iv − rv) ≥ 0.03 · 27 Aug</text>
+<text x="112" y="918" fill="var(--muted)" font-size="10">both required — either alone false-positives</text>
+
+<rect x="95" y="940" width="380" height="52" fill="none" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="112" y="960" fill="var(--carry)" font-size="11" font-weight="600">GATE 2 · TREND — is it going nowhere?</text>
+<text x="112" y="978" fill="var(--ink-soft)" font-size="10.5">adx ≤ 25 AND |trend| ≤ 0.60</text>
+<text x="112" y="990" fill="var(--muted)" font-size="10">same measure that fires momentum_debit_spread</text>
+
+<rect x="95" y="1010" width="380" height="52" fill="none" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="112" y="1030" fill="var(--carry)" font-size="11" font-weight="600">GATE 3 · EVENT — hard exclusions</text>
+<text x="112" y="1048" fill="var(--ink-soft)" font-size="10.5">no earnings in window · no ex-div w/ short call</text>
+<text x="112" y="1060" fill="var(--muted)" font-size="10">IV is high BECAUSE of the event — that premium is fair</text>
+
+<rect x="95" y="1080" width="380" height="52" fill="none" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="112" y="1100" fill="var(--carry)" font-size="11" font-weight="600">GATE 4 · MACRO — shared or idiosyncratic?</text>
+<text x="112" y="1118" fill="var(--ink-soft)" font-size="10.5">not flagged · guidance ≠ stand_down</text>
+<text x="112" y="1130" fill="var(--muted)" font-size="10">the question a z-score cannot answer</text>
+
+<rect x="95" y="1150" width="380" height="60" fill="none" stroke="currentColor"/>
+<text x="285" y="1172" text-anchor="middle" fill="currentColor" font-size="11.5">StructureBuilder</text>
+<text x="285" y="1190" text-anchor="middle" fill="var(--muted)" font-size="10.5">condor · credit vertical · calendar</text>
+<text x="285" y="1204" text-anchor="middle" fill="var(--muted)" font-size="10.5">△ 7–14 DTE · 25Δ shorts · wings 1.5% of spot</text>
+
+<rect x="95" y="1230" width="380" height="46" fill="none" stroke="currentColor"/>
+<text x="285" y="1250" text-anchor="middle" fill="currentColor" font-size="11.5">COST GATE</text>
+<text x="285" y="1267" text-anchor="middle" fill="var(--muted)" font-size="10.5">round trip ≤ 20% of the credit received</text>
+
+<rect x="95" y="1296" width="380" height="44" fill="var(--carry-wash)" stroke="var(--carry)" stroke-width="1.6"/>
+<text x="285" y="1323" text-anchor="middle" fill="var(--carry)" font-size="12" font-weight="600">TradeIdea · book = carry</text>
+
+<g stroke="var(--carry)" stroke-width="1.3" fill="none" marker-end="url(#ac)">
+  <line x1="285" y1="788" x2="285" y2="798"/>
+  <line x1="285" y1="846" x2="285" y2="858"/>
+  <line x1="285" y1="922" x2="285" y2="932"/>
+  <line x1="285" y1="992" x2="285" y2="1002"/>
+  <line x1="285" y1="1062" x2="285" y2="1072"/>
+  <line x1="285" y1="1132" x2="285" y2="1142"/>
+  <line x1="285" y1="1210" x2="285" y2="1222"/>
+  <line x1="285" y1="1276" x2="285" y2="1288"/>
+</g>
+
+<!-- ---------- LANE B · INTRADAY ---------- -->
+<rect x="605" y="742" width="380" height="46" fill="var(--transient-wash)" stroke="var(--transient)"/>
+<text x="795" y="762" text-anchor="middle" fill="var(--transient)" font-size="11.5">firewall.acquire_transient()</text>
+<text x="795" y="779" text-anchor="middle" fill="var(--muted)" font-size="10">lease = (RegT − carry reserve) × utilisation</text>
+
+<rect x="605" y="806" width="380" height="40" fill="none" stroke="currentColor"/>
+<text x="795" y="826" text-anchor="middle" fill="currentColor" font-size="11.5">TIME GATE · 09:45–14:45</text>
+<text x="795" y="840" text-anchor="middle" fill="var(--muted)" font-size="10">lunch 11:30–13:30 skipped</text>
+
+<rect x="605" y="866" width="380" height="56" fill="none" stroke="var(--transient)" stroke-width="1.5"/>
+<text x="622" y="886" fill="var(--transient)" font-size="11" font-weight="600">TRIGGER · VWAP — the only directional view</text>
+<text x="622" y="904" fill="var(--ink-soft)" font-size="10.5">△ cross ≤ 15 one-minute bars = exactly one polling gap</text>
+<text x="622" y="918" fill="var(--muted)" font-size="10">vol z ≥ 0.5 in its time-of-day bucket · 2-bar persistence</text>
+
+<rect x="605" y="940" width="380" height="52" fill="none" stroke="var(--transient)" stroke-width="1.5"/>
+<text x="622" y="960" fill="var(--transient)" font-size="11" font-weight="600">△ CONFIRMATION SCORE — 3 of up to 7 votes · 28–30 Aug</text>
+<text x="622" y="978" fill="var(--ink-soft)" font-size="10.5">band width · dispersion · term structure · breadth</text>
+<text x="622" y="990" fill="var(--muted)" font-size="10">eight hard vetoes = 0.7⁸ ≈ 6%: built never to fire</text>
+
+<rect x="605" y="1010" width="380" height="52" fill="none" stroke="var(--transient)" stroke-width="1.5"/>
+<text x="622" y="1030" fill="var(--transient)" font-size="11" font-weight="600">VETO · RSI — has it already run?</text>
+<text x="622" y="1048" fill="var(--ink-soft)" font-size="10.5">one-sided: long vetoed &gt; 80, short vetoed &lt; 20</text>
+<text x="622" y="1060" fill="var(--muted)" font-size="10">a brake, not a signal — RSI 65 blocks nothing</text>
+
+<rect x="605" y="1080" width="380" height="52" fill="none" stroke="var(--transient)" stroke-width="1.5"/>
+<text x="622" y="1100" fill="var(--transient)" font-size="11" font-weight="600">△ CATALYST — now the fifth VOTE, not a veto · 28 Aug</text>
+<text x="622" y="1118" fill="var(--ink-soft)" font-size="10.5">news .50 · breadth .35 · volume .15, rank-normalised</text>
+<text x="622" y="1130" fill="var(--muted)" font-size="10">it always MEASURES; required=false only downgrades the failure</text>
+
+<rect x="605" y="1150" width="380" height="60" fill="none" stroke="currentColor"/>
+<text x="795" y="1172" text-anchor="middle" fill="currentColor" font-size="11.5">SELECTION · expected move × IV rank</text>
+<text x="795" y="1190" text-anchor="middle" fill="var(--muted)" font-size="10.5">ATM 0–1 DTE · OTM · debit vertical</text>
+<text x="795" y="1204" text-anchor="middle" fill="var(--veto)" font-size="10.5">iv_rank ≥ 0.85 → NO TRADE, already priced in</text>
+
+<rect x="605" y="1230" width="380" height="46" fill="none" stroke="currentColor"/>
+<text x="795" y="1250" text-anchor="middle" fill="currentColor" font-size="11.5">SPREAD GATE · mandatory</text>
+<text x="795" y="1267" text-anchor="middle" fill="var(--muted)" font-size="10.5">△ ≤ 4% of mid AND ≤ 30% of the target — 2% was below the tightest quote</text>
+
+<rect x="605" y="1296" width="380" height="44" fill="var(--transient-wash)" stroke="var(--transient)" stroke-width="1.6"/>
+<text x="795" y="1323" text-anchor="middle" fill="var(--transient)" font-size="12" font-weight="600">TradeIdea · book = intraday</text>
+
+<g stroke="var(--transient)" stroke-width="1.3" fill="none" marker-end="url(#at)">
+  <line x1="795" y1="788" x2="795" y2="798"/>
+  <line x1="795" y1="846" x2="795" y2="858"/>
+  <line x1="795" y1="922" x2="795" y2="932"/>
+  <line x1="795" y1="992" x2="795" y2="1002"/>
+  <line x1="795" y1="1062" x2="795" y2="1072"/>
+  <line x1="795" y1="1132" x2="795" y2="1142"/>
+  <line x1="795" y1="1210" x2="795" y2="1222"/>
+  <line x1="795" y1="1276" x2="795" y2="1288"/>
+</g>
+
+<!-- ---------- LANE C · OPPORTUNISTIC ---------- -->
+<rect x="1115" y="742" width="380" height="46" fill="var(--transient-wash)" stroke="var(--transient)"/>
+<text x="1305" y="762" text-anchor="middle" fill="var(--transient)" font-size="11.5">shares the transient lease</text>
+<text x="1305" y="779" text-anchor="middle" fill="var(--muted)" font-size="10">never while carry is at its aggregate cap</text>
+
+<rect x="1115" y="806" width="380" height="40" fill="none" stroke="currentColor"/>
+<text x="1305" y="826" text-anchor="middle" fill="currentColor" font-size="11.5">scheduled print within 30h?</text>
+<text x="1305" y="840" text-anchor="middle" fill="var(--muted)" font-size="10">committed calendar, not a live feed</text>
+
+<rect x="1115" y="866" width="380" height="56" fill="none" stroke="var(--transient)" stroke-width="1.5"/>
+<text x="1132" y="886" fill="var(--transient)" font-size="11" font-weight="600">MACRO must actively say TRADE</text>
+<text x="1132" y="904" fill="var(--ink-soft)" font-size="10.5">guidance == "trade" — reduce is not enough</text>
+<text x="1132" y="918" fill="var(--muted)" font-size="10">this book asks permission, it is not the default</text>
+
+<rect x="1115" y="940" width="380" height="52" fill="none" stroke="currentColor"/>
+<text x="1305" y="962" text-anchor="middle" fill="currentColor" font-size="11.5">implied move = ATM straddle / spot</text>
+<text x="1305" y="980" text-anchor="middle" fill="var(--muted)" font-size="10.5">front expiry only</text>
+
+<rect x="1115" y="1010" width="380" height="52" fill="none" stroke="var(--transient)" stroke-width="1.5"/>
+<text x="1132" y="1030" fill="var(--transient)" font-size="11" font-weight="600">MISPRICING · implied vs realised</text>
+<text x="1132" y="1048" fill="var(--ink-soft)" font-size="10.5">ratio ≥ 1.25 against the historical median</text>
+<text x="1132" y="1060" fill="var(--muted)" font-size="10">≥ 6 prior samples, or it cannot claim a mispricing</text>
+
+<rect x="1115" y="1080" width="380" height="52" fill="none" stroke="currentColor"/>
+<text x="1305" y="1102" text-anchor="middle" fill="currentColor" font-size="11.5">iron condor, SPY / QQQ, 20Δ</text>
+<text x="1305" y="1120" text-anchor="middle" fill="var(--muted)" font-size="10.5">index only — single names are too wide</text>
+
+<rect x="1115" y="1150" width="380" height="60" fill="none" stroke="currentColor"/>
+<text x="1305" y="1174" text-anchor="middle" fill="currentColor" font-size="11.5">capped at 2% of equity</text>
+<text x="1305" y="1194" text-anchor="middle" fill="var(--muted)" font-size="10.5">hard, independent of the transient lease</text>
+
+<rect x="1115" y="1230" width="380" height="46" fill="none" stroke="currentColor"/>
+<text x="1305" y="1250" text-anchor="middle" fill="currentColor" font-size="11.5">SPREAD GATE</text>
+<text x="1305" y="1267" text-anchor="middle" fill="var(--muted)" font-size="10.5">≤ 6% of mid AND ≤ 20% of the credit</text>
+
+<rect x="1115" y="1296" width="380" height="44" fill="var(--transient-wash)" stroke="var(--transient)" stroke-width="1.6"/>
+<text x="1305" y="1323" text-anchor="middle" fill="var(--transient)" font-size="12" font-weight="600">TradeIdea · book = opportunistic</text>
+
+<g stroke="var(--transient)" stroke-width="1.3" fill="none" marker-end="url(#at)">
+  <line x1="1305" y1="788" x2="1305" y2="798"/>
+  <line x1="1305" y1="846" x2="1305" y2="858"/>
+  <line x1="1305" y1="922" x2="1305" y2="932"/>
+  <line x1="1305" y1="992" x2="1305" y2="1002"/>
+  <line x1="1305" y1="1062" x2="1305" y2="1072"/>
+  <line x1="1305" y1="1132" x2="1305" y2="1142"/>
+  <line x1="1305" y1="1210" x2="1305" y2="1222"/>
+  <line x1="1305" y1="1276" x2="1305" y2="1288"/>
+</g>
+
+<!-- ---------- veto rails ---------- -->
+<g stroke="var(--veto)" stroke-width="1.2" stroke-dasharray="4 3" fill="none">
+  <line x1="95" y1="826" x2="70" y2="826"/><line x1="95" y1="894" x2="70" y2="894"/>
+  <line x1="95" y1="966" x2="70" y2="966"/><line x1="95" y1="1036" x2="70" y2="1036"/>
+  <line x1="95" y1="1106" x2="70" y2="1106"/><line x1="95" y1="1253" x2="70" y2="1253"/>
+  <line x1="70" y1="826" x2="70" y2="1400"/>
+  <line x1="605" y1="826" x2="580" y2="826"/><line x1="605" y1="894" x2="580" y2="894"/>
+  <line x1="605" y1="966" x2="580" y2="966"/><line x1="605" y1="1036" x2="580" y2="1036"/>
+  <line x1="605" y1="1106" x2="580" y2="1106"/><line x1="605" y1="1180" x2="580" y2="1180"/>
+  <line x1="605" y1="1253" x2="580" y2="1253"/>
+  <line x1="580" y1="826" x2="580" y2="1400"/>
+  <line x1="1115" y1="826" x2="1090" y2="826"/><line x1="1115" y1="894" x2="1090" y2="894"/>
+  <line x1="1115" y1="1036" x2="1090" y2="1036"/><line x1="1115" y1="1253" x2="1090" y2="1253"/>
+  <line x1="1090" y1="826" x2="1090" y2="1470"/>
+</g>
+<g stroke="var(--veto)" stroke-width="1.4" fill="none" marker-end="url(#av)">
+  <line x1="70" y1="1400" x2="70" y2="1438"/>
+  <line x1="580" y1="1400" x2="580" y2="1438"/>
+  <line x1="1090" y1="1470" x2="1044" y2="1470"/>
+</g>
+
+<rect x="50" y="1444" width="990" height="52" fill="var(--veto-wash)" stroke="var(--veto)" stroke-width="1.6"/>
+<text x="545" y="1468" text-anchor="middle" fill="var(--veto)" font-size="12.5" font-weight="600">GATE REJECTION LOG — journal.event("gate_rejection")</text>
+<text x="545" y="1487" text-anchor="middle" fill="var(--veto)" font-size="10.5">which gate vetoed, its reason, and every metric it measured · surfaced by `oaa gates`</text>
+<text x="50" y="1520" fill="var(--muted)" font-size="10.5">A refusal is an artefact, not a dead end. On the intraday book the spread gate is expected to dominate — that is the finding, not a bug.</text>
+
+<!-- ---------- merge to the spine ---------- -->
+<g stroke="currentColor" stroke-width="1.6" fill="none">
+  <path d="M285 1340 V1382 H1305"/>
+  <path d="M795 1340 V1382"/>
+  <path d="M1305 1340 V1382"/>
+</g>
+<path d="M1305 1382 V1560 H880 V1590" fill="none" stroke="currentColor" stroke-width="1.6" marker-end="url(#a)"/>
+
+<!-- ══════════ BAND 5 · APPROVAL SPINE ══════════ -->
+<text x="40" y="1576" fill="var(--muted)" font-size="11" letter-spacing="1.4">05 · ONE APPROVAL SPINE — EVERY BOOK FUNNELS THROUGH IT</text>
+<line x1="40" y1="1586" x2="1660" y2="1586" stroke="var(--rule)"/>
+
+<rect x="650" y="1598" width="460" height="46" fill="none" stroke="currentColor" stroke-width="1.6"/>
+<text x="880" y="1618" text-anchor="middle" fill="currentColor" font-size="12" font-weight="600">TradeIdea</text>
+<text x="880" y="1636" text-anchor="middle" fill="var(--muted)" font-size="10.5">priced from real strikes · contractual max_loss</text>
+
+<rect x="650" y="1666" width="460" height="50" fill="none" stroke="currentColor"/>
+<text x="880" y="1687" text-anchor="middle" fill="currentColor" font-size="11.5">COST MODEL</text>
+<text x="880" y="1705" text-anchor="middle" fill="var(--muted)" font-size="10.5">OCC + ORF + CAT + TAF + SEC, plus a modelled half-spread per leg</text>
+
+<rect x="650" y="1738" width="460" height="50" fill="none" stroke="currentColor"/>
+<text x="880" y="1759" text-anchor="middle" fill="currentColor" font-size="11.5">LLM CRITIC — scores, writes the reasoning</text>
+<text x="880" y="1777" text-anchor="middle" fill="var(--veto)" font-size="10.5">cannot approve · falls back to a heuristic if the model is down</text>
+
+<rect x="470" y="1812" width="820" height="248" fill="none" stroke="var(--veto)" stroke-width="2.2"/>
+<text x="880" y="1840" text-anchor="middle" fill="var(--veto)" font-size="13.5" font-weight="600">RISK ENGINE — the only component that can say yes</text>
+<g fill="var(--ink-soft)" font-size="11">
+  <text x="500" y="1868">0 · FIREWALL FIRST — wrong book, wrong minute → categorical refusal, no sizing performed</text>
+  <text x="500" y="1892">1 · session state · halted? · daily loss limit · max drawdown</text>
+  <text x="500" y="1916">2 · structure · defined risk · computable max_loss · 1–4 legs · no duplicate symbols</text>
+  <text x="500" y="1940">3 · portfolio shape · max_positions · max_new_per_day · duplicate_structure · reentry_cooldown · concentration</text>
+  <text x="500" y="1964">4 · SIZING FROM MAX LOSS, never from capital — every position risks the same fraction</text>
+  <text x="500" y="1988">5 · portfolio_risk and Greek caps — a block of EXACT ZEROS counts as missing, not measured · 6 · cash</text>
+  <text x="500" y="2012" fill="var(--veto)">△ credit ÷ width ≤ 0.45 — catches the impossible condor · still only archive/patches/oaa_gate.patch, NOT APPLIED</text>
+</g>
+<rect x="500" y="2020" width="760" height="30" fill="var(--veto-wash)" stroke="var(--veto)"/>
+<text x="880" y="2040" text-anchor="middle" fill="var(--veto)" font-size="11.5" font-weight="600">→ emits a SIGNED STAMP</text>
+
+<rect x="650" y="2082" width="460" height="44" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="880" y="2102" text-anchor="middle" fill="currentColor" font-size="11.5">partner adapters at stage `risk`</text>
+<text x="880" y="2118" text-anchor="middle" fill="var(--muted)" font-size="10.5">may VETO only — never approve, never widen</text>
+
+<rect x="580" y="2148" width="600" height="52" fill="none" stroke="currentColor" stroke-width="1.8"/>
+<text x="880" y="2170" text-anchor="middle" fill="currentColor" font-size="12" font-weight="600">EXECUTION ROUTER · Alpaca CLI</text>
+<text x="880" y="2188" text-anchor="middle" fill="var(--muted)" font-size="10.5">refuses any ticket without a stamp · deterministic client_order_id · △ judged posts at the FAR TOUCH, chase off · 1 Sep</text>
+
+<rect x="470" y="2226" width="330" height="56" fill="none" stroke="currentColor"/>
+<text x="635" y="2248" text-anchor="middle" fill="currentColor" font-size="11.5">atomic multi-leg</text>
+<text x="635" y="2266" text-anchor="middle" fill="var(--muted)" font-size="10.5">the judged default — one spread crossed</text>
+
+<rect x="830" y="2226" width="450" height="56" fill="none" stroke="currentColor"/>
+<text x="1055" y="2248" text-anchor="middle" fill="currentColor" font-size="11.5">legged combo · LONGS FIRST, unwind in reverse</text>
+<text x="1055" y="2266" text-anchor="middle" fill="var(--veto)" font-size="10.5">△ unreachable on judged — its rollback treats an ack as a fill. Do not enable.</text>
+
+<rect x="470" y="2308" width="330" height="48" fill="var(--carry-wash)" stroke="var(--carry)" stroke-width="1.6"/>
+<text x="635" y="2330" text-anchor="middle" fill="var(--carry)" font-size="11.5" font-weight="600">ledger.register(leg → book)</text>
+<text x="635" y="2347" text-anchor="middle" fill="var(--muted)" font-size="10">persisted — this is what makes 15:15 correct</text>
+
+<rect x="830" y="2308" width="450" height="48" fill="none" stroke="currentColor" stroke-width="1.4"/>
+<text x="1055" y="2330" text-anchor="middle" fill="currentColor" font-size="11.5">journal.record(Decision)</text>
+<text x="1055" y="2347" text-anchor="middle" fill="var(--muted)" font-size="10">idea · verdict · fill · reasoning · error</text>
+
+<g stroke="currentColor" stroke-width="1.5" fill="none" marker-end="url(#a)">
+  <line x1="880" y1="1644" x2="880" y2="1658"/>
+  <line x1="880" y1="1716" x2="880" y2="1730"/>
+  <line x1="880" y1="1788" x2="880" y2="1804"/>
+  <line x1="880" y1="2060" x2="880" y2="2074"/>
+  <line x1="880" y1="2126" x2="880" y2="2140"/>
+  <path d="M880 2200 V2212 H635 V2218"/>
+  <path d="M880 2200 V2212 H1055 V2218"/>
+  <line x1="635" y1="2282" x2="635" y2="2300"/>
+  <line x1="1055" y1="2282" x2="1055" y2="2300"/>
+</g>
+
+<!-- declined path -->
+<rect x="1340" y="1738" width="310" height="118" fill="none" stroke="var(--veto)" stroke-width="1.5"/>
+<text x="1495" y="1764" text-anchor="middle" fill="var(--veto)" font-size="12" font-weight="600">DECLINED — recorded</text>
+<text x="1360" y="1788" fill="var(--ink-soft)" font-size="10.5">critic score below threshold</text>
+<text x="1360" y="1808" fill="var(--ink-soft)" font-size="10.5">risk rule + the exact limit hit</text>
+<text x="1360" y="1828" fill="var(--ink-soft)" font-size="10.5">partner veto reason</text>
+<text x="1360" y="1848" fill="var(--muted)" font-size="10">a well-reasoned pass is evidence too</text>
+<g stroke="var(--veto)" stroke-width="1.3" stroke-dasharray="4 3" fill="none" marker-end="url(#av)">
+  <path d="M1110 1763 H1332"/>
+  <path d="M1290 1936 H1316 V1856"/>
+  <path d="M1110 2104 H1316 V1860"/>
+</g>
+
+<!-- ══════════ BAND 6 · MANAGEMENT ══════════ -->
+<text x="40" y="2406" fill="var(--muted)" font-size="11" letter-spacing="1.4">06 · MANAGEMENT — EACH POSITION IS ROUTED BACK TO THE STRATEGY THAT OPENED IT</text>
+<line x1="40" y1="2416" x2="1660" y2="2416" stroke="var(--rule)"/>
+
+<rect x="60" y="2438" width="290" height="48" fill="none" stroke="currentColor"/>
+<text x="205" y="2460" text-anchor="middle" fill="currentColor" font-size="11.5">△ manage_positions · 11 passes, 11:30–15:10</text>
+<text x="205" y="2477" text-anchor="middle" fill="var(--muted)" font-size="10">mechanical — no LLM in the exit path</text>
+
+<rect x="390" y="2438" width="250" height="48" fill="none" stroke="currentColor"/>
+<text x="515" y="2467" text-anchor="middle" fill="currentColor" font-size="11.5">for each option position</text>
+
+<rect x="680" y="2438" width="330" height="48" fill="var(--carry-wash)" stroke="var(--carry)"/>
+<text x="845" y="2460" text-anchor="middle" fill="var(--carry)" font-size="11.5">ledger.book_of(symbol)</text>
+<text x="845" y="2477" text-anchor="middle" fill="var(--muted)" font-size="10">→ the owning strategy's own rules</text>
+
+<rect x="60" y="2520" width="560" height="84" fill="none" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="80" y="2544" fill="var(--carry)" font-size="11.5" font-weight="600">carry.should_exit()</text>
+<text x="80" y="2564" fill="var(--ink-soft)" font-size="10.5">△ max_loss_usd $450 checked FIRST · 50% of max profit</text>
+<text x="80" y="2582" fill="var(--ink-soft)" font-size="10.5">△ loss = 1.5× credit · DTE floor 3 · short-strike touch</text>
+<text x="80" y="2598" fill="var(--muted)" font-size="10">50/1.5 puts idealised breakeven at 75%, not 87% · 27–30 Aug</text>
+
+<rect x="650" y="2520" width="560" height="84" fill="none" stroke="var(--transient)" stroke-width="1.5"/>
+<text x="670" y="2544" fill="var(--transient)" font-size="11.5" font-weight="600">intraday.should_exit()</text>
+<text x="670" y="2564" fill="var(--ink-soft)" font-size="10.5">10% target · 15% stop · 20-minute time stop</text>
+<text x="670" y="2582" fill="var(--veto)" font-size="10.5">△ VWAP re-cross STILL true in config — 0 wins in 55 attempts · 1 Sep</text>
+<text x="670" y="2598" fill="var(--muted)" font-size="10">stop WIDER than target: a tight stop dies to spread flicker</text>
+
+<rect x="1240" y="2520" width="400" height="84" fill="none" stroke="currentColor" stroke-width="1.4"/>
+<text x="1440" y="2548" text-anchor="middle" fill="currentColor" font-size="11.5">close via the CLI</text>
+<text x="1440" y="2568" text-anchor="middle" fill="var(--muted)" font-size="10.5">ledger.forget(symbol) · memory.record()</text>
+<text x="1440" y="2588" text-anchor="middle" fill="var(--muted)" font-size="10.5">journal.record(CLOSE, reason)</text>
+
+<g stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#a)">
+  <line x1="350" y1="2462" x2="382" y2="2462"/>
+  <line x1="640" y1="2462" x2="672" y2="2462"/>
+  <path d="M760 2486 V2504 H340 V2512"/>
+  <path d="M930 2486 V2504 H930 V2512"/>
+  <path d="M620 2562 H642"/>
+  <path d="M1210 2562 H1232"/>
+</g>
+
+<!-- ══════════ BAND 7 · FIREWALL ENFORCEMENT ══════════ -->
+<text x="40" y="2664" fill="var(--muted)" font-size="11" letter-spacing="1.4">07 · CLOSING THE DAY — LIQUIDATION IS CONFIRMED, NOT REQUESTED</text>
+<line x1="40" y1="2674" x2="1660" y2="2674" stroke="var(--rule)"/>
+
+<!-- col 1 -->
+<rect x="50" y="2692" width="520" height="418" fill="none" stroke="var(--veto)" stroke-width="1.2" stroke-dasharray="2 4"/>
+<text x="70" y="2716" fill="var(--veto)" font-size="12" font-weight="600">15:15 · TRANSIENT CUTOFF</text>
+
+<rect x="70" y="2730" width="480" height="40" fill="none" stroke="currentColor"/>
+<text x="310" y="2755" text-anchor="middle" fill="currentColor" font-size="11.5">cancel_all() — first, so nothing fills into it</text>
+
+<rect x="70" y="2790" width="480" height="40" fill="var(--carry-wash)" stroke="var(--carry)"/>
+<text x="310" y="2809" text-anchor="middle" fill="var(--carry)" font-size="11.5">ledger split — resident legs untouched</text>
+<text x="310" y="2824" text-anchor="middle" fill="var(--muted)" font-size="10">unattributed legs count as transient</text>
+
+<rect x="70" y="2850" width="480" height="36" fill="none" stroke="currentColor"/>
+<text x="310" y="2873" text-anchor="middle" fill="currentColor" font-size="11.5">close every transient position</text>
+
+<rect x="70" y="2906" width="480" height="44" fill="none" stroke="currentColor" stroke-width="1.6"/>
+<text x="310" y="2926" text-anchor="middle" fill="currentColor" font-size="11.5">positions == 0 AND working orders == 0?</text>
+<text x="310" y="2942" text-anchor="middle" fill="var(--muted)" font-size="10">a resting order that fills at 15:59 is exposure</text>
+
+<path d="M560 2928 H578 V2868 H556" fill="none" stroke="currentColor" stroke-width="1.3" marker-end="url(#a)"/>
+<text x="586" y="2900" fill="var(--muted)" font-size="10">retry ≤ 4, 5s apart</text>
+
+<rect x="70" y="2976" width="480" height="40" fill="var(--pass-wash)" stroke="var(--pass)" stroke-width="1.5"/>
+<text x="310" y="3001" text-anchor="middle" fill="var(--pass)" font-size="11.5" font-weight="600">CONFIRMED → lock transient for the session</text>
+
+<rect x="70" y="3038" width="480" height="52" fill="var(--veto-wash)" stroke="var(--veto)" stroke-width="1.5"/>
+<text x="310" y="3060" text-anchor="middle" fill="var(--veto)" font-size="11.5" font-weight="600">NOT CONFIRMED → risk.halt(), CRITICAL log</text>
+<text x="310" y="3078" text-anchor="middle" fill="var(--veto)" font-size="10.5">the 15:45 verification will fail too — by design</text>
+
+<g stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#a)">
+  <line x1="310" y1="2770" x2="310" y2="2782"/>
+  <line x1="310" y1="2830" x2="310" y2="2842"/>
+  <line x1="310" y1="2886" x2="310" y2="2898"/>
+</g>
+<line x1="310" y1="2950" x2="310" y2="2968" stroke="var(--pass)" stroke-width="1.4" marker-end="url(#ap)"/>
+<path d="M240 3016 V3030" stroke="var(--veto)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#av)" fill="none"/>
+
+<!-- col 2 -->
+<rect x="590" y="2692" width="520" height="418" fill="none" stroke="var(--carry)" stroke-width="1.2" stroke-dasharray="2 4"/>
+<text x="610" y="2716" fill="var(--carry)" font-size="12" font-weight="600">15:45 · CARRY VERIFICATION</text>
+
+<rect x="610" y="2730" width="480" height="40" fill="none" stroke="currentColor"/>
+<text x="850" y="2755" text-anchor="middle" fill="currentColor" font-size="11.5">transient positions == 0 AND orders == 0?</text>
+
+<rect x="610" y="2790" width="480" height="40" fill="none" stroke="currentColor"/>
+<text x="850" y="2809" text-anchor="middle" fill="currentColor" font-size="11.5">read FRESH regt_buying_power</text>
+<text x="850" y="2824" text-anchor="middle" fill="var(--muted)" font-size="10">never a cached number</text>
+
+<rect x="610" y="2850" width="480" height="36" fill="none" stroke="currentColor"/>
+<text x="850" y="2873" text-anchor="middle" fill="currentColor" font-size="11.5">carry requirement covered with cushion?</text>
+
+<rect x="610" y="2906" width="480" height="44" fill="none" stroke="currentColor" stroke-width="1.6"/>
+<text x="850" y="2926" text-anchor="middle" fill="currentColor" font-size="11.5">leverage_headroom ≤ 1.0?</text>
+<text x="850" y="2942" text-anchor="middle" fill="var(--muted)" font-size="10">above 1.0 is the state that gets force-liquidated</text>
+
+<rect x="610" y="2976" width="480" height="40" fill="var(--pass-wash)" stroke="var(--pass)" stroke-width="1.5"/>
+<text x="850" y="3001" text-anchor="middle" fill="var(--pass)" font-size="11.5" font-weight="600">PASS → the resident book carries the close</text>
+
+<rect x="610" y="3038" width="480" height="52" fill="var(--veto-wash)" stroke="var(--veto)" stroke-width="1.5"/>
+<text x="850" y="3060" text-anchor="middle" fill="var(--veto)" font-size="11.5" font-weight="600">FAIL → transient books disabled NEXT session</text>
+<text x="850" y="3078" text-anchor="middle" fill="var(--veto)" font-size="10.5">△ needs residual transient POSITIONS — a resting order no longer costs a session</text>
+
+<g stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#a)">
+  <line x1="850" y1="2770" x2="850" y2="2782"/>
+  <line x1="850" y1="2830" x2="850" y2="2842"/>
+  <line x1="850" y1="2886" x2="850" y2="2898"/>
+</g>
+<line x1="850" y1="2950" x2="850" y2="2968" stroke="var(--pass)" stroke-width="1.4" marker-end="url(#ap)"/>
+<path d="M780 3016 V3030" stroke="var(--veto)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#av)" fill="none"/>
+<path d="M310 3064 H590" fill="none" stroke="var(--veto)" stroke-width="1.3" stroke-dasharray="4 3"/>
+
+<!-- col 3 -->
+<rect x="1130" y="2692" width="520" height="418" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 4"/>
+<text x="1150" y="2716" fill="currentColor" font-size="12" font-weight="600">DATED CONTROLS · from the clock, not from memory</text>
+
+<rect x="1150" y="2730" width="480" height="46" fill="none" stroke="currentColor"/>
+<text x="1390" y="2752" text-anchor="middle" fill="currentColor" font-size="11.5">entry_cutoff_utc · 2 Sep 20:00</text>
+<text x="1390" y="2769" text-anchor="middle" fill="var(--muted)" font-size="10">no new carry structures — nothing left to decay</text>
+
+<rect x="1150" y="2796" width="480" height="46" fill="none" stroke="currentColor" stroke-width="1.6"/>
+<text x="1390" y="2818" text-anchor="middle" fill="currentColor" font-size="11.5">submission_flatten_utc · 4 Sep 13:45</text>
+<text x="1390" y="2835" text-anchor="middle" fill="var(--muted)" font-size="10">△ = 09:45 ET, when the intraday window opens → 4 Sep yields NO new trades</text>
+
+<rect x="1150" y="2862" width="480" height="46" fill="none" stroke="var(--veto)" stroke-width="1.5"/>
+<text x="1390" y="2884" text-anchor="middle" fill="var(--veto)" font-size="11.5">close EVERYTHING — resident included</text>
+<text x="1390" y="2901" text-anchor="middle" fill="var(--muted)" font-size="10">same confirmed-flat poll as the 15:15 cutoff</text>
+
+<rect x="1150" y="2928" width="480" height="46" fill="none" stroke="currentColor"/>
+<text x="1390" y="2950" text-anchor="middle" fill="currentColor" font-size="11.5">flattened_for_submission → all entries refused</text>
+<text x="1390" y="2967" text-anchor="middle" fill="var(--muted)" font-size="10">may_open() returns false for every book</text>
+
+<rect x="1150" y="2994" width="480" height="60" fill="var(--pass-wash)" stroke="var(--pass)" stroke-width="1.5"/>
+<text x="1390" y="3018" text-anchor="middle" fill="var(--pass)" font-size="11.5" font-weight="600">realised P&amp;L on a flat account</text>
+<text x="1390" y="3037" text-anchor="middle" fill="var(--pass)" font-size="10.5">unambiguous evidence — no mid-price mark to trust</text>
+
+<g stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#a)">
+  <line x1="1390" y1="2776" x2="1390" y2="2788"/>
+  <line x1="1390" y1="2842" x2="1390" y2="2854"/>
+  <line x1="1390" y1="2908" x2="1390" y2="2920"/>
+</g>
+<line x1="1390" y1="2974" x2="1390" y2="2986" stroke="var(--pass)" stroke-width="1.4" marker-end="url(#ap)"/>
+
+<!-- ══════════ BAND 8 · EVENTS BOOK ══════════ -->
+<text x="40" y="3186" fill="var(--muted)" font-size="11" letter-spacing="1.4">08 · THE EARNINGS BOOK — A SEPARATE LOOP, OUTSIDE THE FIREWALL · ADDED 29–30 AUG</text>
+<line x1="40" y1="3196" x2="1660" y2="3196" stroke="var(--rule)"/>
+
+<text x="40" y="3220" fill="var(--ink-soft)" font-size="11.5">The other three books wait for a market condition to cross a threshold, and the recurring failure is that it never crosses. This one opens on a <tspan font-weight="600">date</tspan>: Broadcom reports on 2 September whether or not any indicator agrees.</text>
+
+<rect x="60" y="3240" width="250" height="72" fill="none" stroke="currentColor"/>
+<text x="185" y="3264" text-anchor="middle" fill="currentColor" font-size="11.5">calendar.py</text>
+<text x="185" y="3283" text-anchor="middle" fill="var(--muted)" font-size="10">the model PROPOSES</text>
+<text x="185" y="3299" text-anchor="middle" fill="var(--muted)" font-size="10">a committed file CONFIRMS</text>
+
+<rect x="330" y="3240" width="250" height="72" fill="none" stroke="currentColor"/>
+<text x="455" y="3264" text-anchor="middle" fill="currentColor" font-size="11.5">volscreen.py</text>
+<text x="455" y="3283" text-anchor="middle" fill="var(--muted)" font-size="10">implied move ÷ median |reaction|</text>
+<text x="455" y="3299" text-anchor="middle" fill="var(--muted)" font-size="10">last four prints · rank top 10</text>
+
+<rect x="600" y="3240" width="250" height="72" fill="var(--carry-wash)" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="725" y="3264" text-anchor="middle" fill="var(--carry)" font-size="11.5">△ watch.py · hourly · 30 Aug</text>
+<text x="725" y="3283" text-anchor="middle" fill="var(--muted)" font-size="10">3 days out, 04:00–16:00 ET</text>
+<text x="725" y="3299" text-anchor="middle" fill="var(--muted)" font-size="10">nothing new → no model call at all</text>
+
+<rect x="870" y="3240" width="250" height="72" fill="none" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="995" y="3264" text-anchor="middle" fill="var(--carry)" font-size="11.5">direction.py</text>
+<text x="995" y="3283" text-anchor="middle" fill="var(--muted)" font-size="10">△ Qwen3-32B, one call per NAME · triage is Qwen3-8B</text>
+<text x="995" y="3299" text-anchor="middle" fill="var(--muted)" font-size="10">confidence ≥ 0.55 · must cite evidence</text>
+
+<rect x="1140" y="3240" width="250" height="72" fill="none" stroke="currentColor"/>
+<text x="1265" y="3264" text-anchor="middle" fill="currentColor" font-size="11.5">technicals.py · 29 Aug</text>
+<text x="1265" y="3283" text-anchor="middle" fill="var(--muted)" font-size="10">Bollinger setup · RSI veto</text>
+<text x="1265" y="3299" text-anchor="middle" fill="var(--muted)" font-size="10">ATR sizes and stops, never gates</text>
+
+<rect x="1410" y="3240" width="250" height="72" fill="var(--veto-wash)" stroke="var(--veto)" stroke-width="1.6"/>
+<text x="1535" y="3264" text-anchor="middle" fill="var(--veto)" font-size="11.5" font-weight="600">△ EXPRESSION · 30 Aug</text>
+<text x="1535" y="3283" text-anchor="middle" fill="var(--veto)" font-size="10">follows the SIGN of the divergence</text>
+<text x="1535" y="3299" text-anchor="middle" fill="var(--muted)" font-size="10">not the direction call</text>
+
+<g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#a)">
+  <line x1="310" y1="3276" x2="322" y2="3276"/>
+  <line x1="580" y1="3276" x2="592" y2="3276"/>
+  <line x1="850" y1="3276" x2="862" y2="3276"/>
+  <line x1="1120" y1="3276" x2="1132" y2="3276"/>
+  <line x1="1390" y1="3276" x2="1402" y2="3276"/>
+</g>
+
+<rect x="60" y="3344" width="510" height="104" fill="none" stroke="var(--veto)" stroke-width="1.5"/>
+<text x="80" y="3368" fill="var(--veto)" font-size="11.5" font-weight="600">We measured volatility and traded direction</text>
+<text x="80" y="3388" fill="var(--ink-soft)" font-size="10.5">ratio ≥ 1.35 · RICH → iron condor, both shorts OUTSIDE the move</text>
+<text x="80" y="3406" fill="var(--ink-soft)" font-size="10.5">ratio ≤ 0.80 · CHEAP → debit vertical in the called direction</text>
+<text x="80" y="3424" fill="var(--ink-soft)" font-size="10.5">0.80 – 1.35 · FAIR → no trade</text>
+<text x="80" y="3440" fill="var(--muted)" font-size="10">that middle band is where the book used to do all of its trading</text>
+
+<rect x="595" y="3344" width="510" height="104" fill="none" stroke="currentColor"/>
+<text x="615" y="3368" fill="currentColor" font-size="11.5" font-weight="600">Three interlocks, all required</text>
+<text x="615" y="3388" fill="var(--ink-soft)" font-size="10.5">1 · the symbol has a CONFIRMED calendar row</text>
+<text x="615" y="3406" fill="var(--ink-soft)" font-size="10.5">2 · today is that event's entry date</text>
+<text x="615" y="3424" fill="var(--ink-soft)" font-size="10.5">3 · the engine supplied a direction call</text>
+<text x="615" y="3440" fill="var(--muted)" font-size="10">the strategy never calls a model from inside a generation loop</text>
+
+<rect x="1130" y="3344" width="530" height="104" fill="var(--carry-wash)" stroke="var(--carry)" stroke-width="1.5"/>
+<text x="1150" y="3368" fill="var(--carry)" font-size="11.5" font-weight="600">It never leases from the capital firewall</text>
+<text x="1150" y="3388" fill="var(--ink-soft)" font-size="10.5">max_risk_per_trade 1.2% · nightly budget 4% · max 10 contracts</text>
+<text x="1150" y="3406" fill="var(--ink-soft)" font-size="10.5">RiskEngine(firewall=None) — a one-night hold does not fit tenancy</text>
+<text x="1150" y="3424" fill="var(--muted)" font-size="10">the 09:45 flatten is what keeps it out of the 15:15 sweep</text>
+<text x="1150" y="3440" fill="var(--muted)" font-size="10">nothing the model returns can authorise: the risk engine still signs</text>
+
+<rect x="60" y="3486" width="1600" height="60" fill="var(--surface-sunk)" stroke="var(--rule)"/>
+<text x="80" y="3510" fill="var(--ink-soft)" font-size="11">04:00–16:00 events_watch (hourly, confirmed names inside the 3-day window) &#160;·&#160; 09:45 events_flatten — into the post-print IV collapse, BEFORE the day books compete for the same buying power</text>
+<text x="80" y="3532" fill="var(--ink-soft)" font-size="11">15:50 events_arm — the session before an after-close print &#160;·&#160; 15:55 no_entry_after, a late-arm guard added 30 Aug &#160;·&#160; 10:30 hard_exit_time</text>
+
+<rect x="60" y="3576" width="1600" height="86" fill="none" stroke="var(--veto)" stroke-width="1.4"/>
+<text x="80" y="3600" fill="var(--veto)" font-size="11.5" font-weight="600">What this book does not have</text>
+<text x="80" y="3620" fill="var(--ink-soft)" font-size="10.5">No usable backtest — four reactions per name is a ranking device, not an edge estimate. &#160;·&#160; No historical option quotes, so the modelled spread is an assumption.</text>
+<text x="80" y="3638" fill="var(--ink-soft)" font-size="10.5">No intraday management: opened once, closed once. &#160;·&#160; The ATR stop cannot be watched overnight — the gap through it is the risk the position exists to take.</text>
+<text x="80" y="3654" fill="var(--muted)" font-size="10">△ 31 Aug: two judged runners were found live at once. Nothing surfaced it, and two arm cycles would have sent two orders against one nightly budget. There is still no singleton guard.</text>
+
+<text x="40" y="3700" fill="var(--muted)" font-size="10.5">Evidence pack is third-party text: it arrives inside &lt;&lt;&lt;EVIDENCE&gt;&gt;&gt; markers named as untrusted, stripped and truncated, and every field of the response is clamped against a fixed schema.</text>
+
+</g>
+</svg></div>
+<footer>Eventus · Options Alpha Agents · carry resident · intraday transient · opportunistic enabled but blocked · earnings book on its own loop, outside the firewall · redrawn 1 Sep 2026 · every veto is written down</footer>
+</body></html>
