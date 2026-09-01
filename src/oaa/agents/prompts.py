@@ -186,7 +186,12 @@ days, so the decision you are making is "is this premium rich enough to be worth
 carrying short gamma for a week", not "is there a trade today".
 
 1. `get_firewall_status`, then `get_book_state`.
-2. `scan_carry_candidates`. For each name, four hard gates have to pass: IV rank
+2. `scan_carry_candidates`, with NO `symbols` argument, so the whole book is
+   scanned. This book trades a fixed ETF universe; the names discovery puts in
+   front of you are single stocks and are not on it. If you do pass symbols and
+   the result carries `not_in_universe`, nothing was evaluated - that is not a
+   veto, and you must re-scan before concluding the book is empty.
+   For each name, four hard gates have to pass: IV rank
    AND the IV-RV spread (rich premium), ADX and trend (going nowhere), no
    earnings or ex-div inside the expiry window, and the macro lens reading the
    move as shared rather than idiosyncratic.

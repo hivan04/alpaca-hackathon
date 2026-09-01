@@ -20,7 +20,7 @@ from oaa.core.logging import get_logger
 from oaa.core.types import AccountSnapshot, MarketContext, RiskVerdict, Side, TradeIdea
 from oaa.options.occ import underlying_of
 from oaa.risk.exposure import book_exposure, describe, idea_exposure, normalised
-from oaa.risk.sizing import size_by_risk
+from oaa.risk.sizing import affordable_premium, size_by_risk
 
 log = get_logger("risk")
 
@@ -296,12 +296,51 @@ class RiskEngine:
         # 4. Sizing ---------------------------------------------------------- #
         quantity = size_by_risk(idea, account.equity, self.limits.max_risk_per_trade_pct)
         if quantity < 1:
+            # An option contract is indivisible, so there is no smaller size to
+            # fall back to and this genuinely has to refuse. What it must NOT
+            # do is refuse without saying what would have fitted: for four days
+            # this printed "max loss $2,460 exceeds 1.0% of $100,000" and left
+            # everyone to work out for themselves that the structure was 2.5x
+            # too expensive because the chain had handed it the wrong strike.
+            # The affordable premium is the number that makes it diagnosable in
+            # one read, and it is the same function the strategy now uses to
+            # pick a strike, so the two can never disagree.
+            budget = account.equity * self.limits.max_risk_per_trade_pct
+            ceiling = affordable_premium(
+                account.equity, self.limits.max_risk_per_trade_pct
+            )
+            over = (idea.max_loss / budget) if budget > 0 else float("inf")
             return fail(
                 "sizing",
                 f"max loss ${idea.max_loss:,.0f} exceeds "
-                f"{self.limits.max_risk_per_trade_pct:.1%} of ${account.equity:,.0f} equity",
+                f"{self.limits.max_risk_per_trade_pct:.1%} of ${account.equity:,.0f} equity "
+                f"(${budget:,.0f}) by {over:.1f}x - one contract is indivisible, so "
+                f"nothing smaller exists. A structure priced at or under "
+                f"${ceiling:,.2f} per contract would size to 1 or more"
+                if ceiling
+                else f"max loss ${idea.max_loss:,.0f} exceeds the per-trade budget",
             )
-        quantity = min(quantity, idea.quantity) if idea.quantity > 1 else quantity
+        # `idea.quantity` is a CEILING only when the strategy states one.
+        # A quantity of 1 means "no opinion, size me by the risk budget" -
+        # `tests/test_risk.py::test_position_size_respects_the_risk_cap` pins
+        # that a $300 max-loss structure sizes to 6 under a 2% cap. Reading
+        # the 1 as an intent and capping there would silently halve the book's
+        # size for a config key (`fixed_quantity: 1`) whose name suggests the
+        # opposite of what the engine means by it. Renaming that key is the
+        # real fix; changing this line is not.
+        # `idea.quantity` is a ceiling when the strategy states one. By the
+        # engine's convention a quantity of 1 means "no opinion, size me by the
+        # risk budget" - which is why the one order this account ever approved
+        # went out at 3 from a book whose config says `fixed_quantity: 1`.
+        # `risk.honour_strategy_quantity` makes the strategy's number binding at
+        # every value including 1. Off by default: budget sizing is what a
+        # P&L-scored week wants, and
+        # `tests/test_risk.py::test_position_size_respects_the_risk_cap` pins it.
+        if getattr(self.limits, "honour_strategy_quantity", False):
+            if idea.quantity and idea.quantity >= 1:
+                quantity = min(quantity, idea.quantity)
+        else:
+            quantity = min(quantity, idea.quantity) if idea.quantity > 1 else quantity
         checks["sizing"] = True
 
         # 5. Aggregate exposure ---------------------------------------------- #
@@ -422,7 +461,15 @@ class RiskEngine:
         else:
             cash_needed = (idea.max_loss or 0.0) * quantity
         buffer = account.equity * self.limits.min_cash_buffer_pct
-        available = (account.options_buying_power or account.buying_power)
+        # `or` treats a REPORTED ZERO as absent and scores the trade against
+        # the much larger equity buying power, so an account with no options
+        # buying power passes the cash gate here and is refused by the broker
+        # instead - a rejection with no reason attached to it.
+        available = (
+            account.buying_power
+            if account.options_buying_power is None
+            else account.options_buying_power
+        )
         if available - cash_needed < buffer:
             return fail(
                 "cash_buffer",

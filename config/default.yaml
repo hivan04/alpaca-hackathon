@@ -413,7 +413,12 @@ execution:
   # atomic -> one multi-leg order. Legging doubles spread exposure, so it is a
   # fallback for venues that cannot route combos, not a default.
   multileg_mode: atomic                # limit | market  (limit strongly preferred)
-  # Where inside the bid/ask to price. 0.5 = mid, 0.0 = bid, 1.0 = ask.
+  # Where to price, as a fraction of the distance FROM THE MID TO THE FAR
+  # TOUCH - not from bid to ask. `pricer.py:56` is
+  # `price = mid + (worst - mid) * ratio`, so 0.0 = mid, 0.5 = halfway to the
+  # touch, 1.0 = the touch itself. The old comment here read
+  # "0.5 = mid, 0.0 = bid, 1.0 = ask", which describes a different formula and
+  # would make anyone tuning this from the comment move it the wrong way.
   limit_price_ratio: 0.5
   # Walk the limit toward the far touch if unfilled.
   chase:
@@ -696,6 +701,20 @@ schedule:
     - name: carry_manage
       at: "14:30"
       action: manage_positions
+    # A second and third look for the RESIDENT book, added 1 Sep. One scan a
+    # day at 10:00 is a single sample of a condition that moves all session,
+    # and it means one bad scan - a model call that reads the tool output
+    # wrongly, a chain that has not warmed up - costs the whole overnight book
+    # for the day. That is exactly what happened on 1 Sep: the 10:00 scan
+    # passed symbols that were not on the book, evaluated nothing, and there
+    # was no second chance. These two are entries, so they sit before the
+    # 15:15 cutoff with room for the 15:45 sign-off to check their margin.
+    - name: carry_scan_1350
+      at: "13:50"
+      action: carry_scan
+    - name: carry_scan_1440
+      at: "14:40"
+      action: carry_scan
     # Mirrors the backtest's 15:10 moment, which is where `exits.flat_by` fires.
     # The 15:15 cutoff below is the firewall's hard liquidation - a backstop,
     # not the plan. The book should already be flat when it runs.

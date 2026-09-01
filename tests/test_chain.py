@@ -119,3 +119,100 @@ def test_accepts_still_agrees_with_reject_reason():
               make_quote(expiry=expiry, oi=1),
               make_quote(expiry=_dt.date(2026, 9, 2), oi=5000)):
         assert cf.accepts(q, asof) is (cf.reject_reason(q, asof) is None)
+
+
+# --------------------------------------------------------------------- #
+# 1 Sep: the truncated chain
+#
+# The judged account took no trades on 1 Sep. Six intraday ideas cleared
+# every signal gate and the critic, and all six were rejected by the sizing
+# gate at a quantity of one: "max loss $2,460 exceeds 1.0% of $100,000".
+#
+# The premium was real. `option_chain` fetched one unpaged page of snapshots,
+# ordered by OCC symbol - calls first, lowest strike first - so the chain
+# stopped 25 points BELOW spot and carried no puts at all. `atm()` then
+# returned the top strike it could see, a deep-ITM call priced at pure
+# intrinsic. Nothing downstream could tell that apart from a real ATM quote.
+# --------------------------------------------------------------------- #
+
+def _one_sided_page(spot: float, top: float, expiry: dt.date, n: int = 130):
+    """A page of calls that stops below spot - the shape that shipped."""
+    return [
+        make_quote(strike=float(top - i), right=Right.CALL, expiry=expiry,
+                   bid=spot - (top - i) - 0.3, ask=spot - (top - i) + 0.3)
+        for i in range(n)
+    ]
+
+
+def test_a_chain_that_stops_below_spot_is_refused_not_silently_priced(today):
+    expiry = today + dt.timedelta(days=1)
+    quotes = _one_sided_page(spot=763.05, top=738.0, expiry=expiry)
+    view = ChainView.from_quotes(
+        "SPY", 763.05, quotes,
+        ChainFilter(min_dte=0, max_dte=2, min_open_interest=0, min_price=0.0,
+                    max_spread_pct=1.0),
+        today,
+    )
+    with pytest.raises(DataError) as exc:
+        view.atm(expiry, Right.CALL)
+    assert "does not reach the strike" in str(exc.value)
+    assert "763.05" in str(exc.value)
+
+
+def test_the_delta_fallback_is_protected_too(today):
+    """by_delta falls through to by_moneyness when greeks are missing, which
+    is the normal case on the free indicative feed. The fallback must not be
+    a way round the guard."""
+    expiry = today + dt.timedelta(days=1)
+    quotes = _one_sided_page(spot=763.05, top=738.0, expiry=expiry)
+    for q in quotes:  # the indicative feed serves zeros, not nulls
+        q.greeks.delta = 0.0
+    view = ChainView.from_quotes(
+        "SPY", 763.05, quotes,
+        ChainFilter(min_dte=0, max_dte=2, min_open_interest=0, min_price=0.0,
+                    max_spread_pct=1.0, require_greeks=False),
+        today,
+    )
+    with pytest.raises(DataError):
+        view.by_delta(expiry, Right.CALL, 0.5)
+
+
+def test_a_chain_that_reaches_spot_selects_a_cheap_atm_contract(today):
+    """The same day, with the chain paged properly: the 763 strike is there,
+    and one contract costs $210 rather than $2,460 - inside the 1% cap."""
+    expiry = today + dt.timedelta(days=1)
+    quotes = _one_sided_page(spot=763.05, top=738.0, expiry=expiry)
+    quotes += [
+        make_quote(strike=float(s), right=Right.CALL, expiry=expiry, bid=2.00, ask=2.20)
+        for s in range(739, 800)
+    ]
+    quotes += [
+        make_quote(strike=float(s), right=Right.PUT, expiry=expiry, bid=2.00, ask=2.20)
+        for s in range(700, 800)
+    ]
+    view = ChainView.from_quotes(
+        "SPY", 763.05, quotes,
+        ChainFilter(min_dte=0, max_dte=2, min_open_interest=0, min_price=0.0,
+                    max_spread_pct=1.0),
+        today,
+    )
+    picked = view.atm(expiry, Right.CALL)
+    assert abs(picked.strike - 763.05) <= 1.0
+    assert picked.mid * 100 < 1_000  # the judged per-trade cap
+
+
+def test_a_thin_chain_that_brackets_spot_is_still_tradeable(today):
+    """The guard must fire on truncation, not on a thin market. A sparse chain
+    centred on spot is the honest shape of an illiquid name."""
+    expiry = today + dt.timedelta(days=20)
+    quotes = [
+        make_quote(strike=s, right=Right.CALL, expiry=expiry, bid=0.40, ask=0.50)
+        for s in (40.0, 42.5, 45.0, 47.5)
+    ]
+    view = ChainView.from_quotes(
+        "XLU", 43.0, quotes,
+        ChainFilter(min_dte=1, max_dte=60, min_open_interest=0, min_price=0.0,
+                    max_spread_pct=1.0),
+        today,
+    )
+    assert view.atm(expiry, Right.CALL).strike == 42.5

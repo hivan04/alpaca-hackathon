@@ -166,6 +166,15 @@ class RiskConfig(Base):
     max_new_positions_per_day: int = 6
     max_positions_per_underlying: int = 2
     max_risk_per_trade_pct: float = 0.02
+    #: When true, a strategy's own `idea.quantity` is a HARD ceiling, even at 1.
+    #: The engine's default convention is that a quantity of 1 means "no
+    #: opinion, size me by the risk budget" - which is why a `fixed_quantity: 1`
+    #: book was sized to 3 by the budget. That convention is deliberate and
+    #: pinned by tests (a $300 structure sizes to 6 under a 2% cap), so this is
+    #: a switch rather than a change of default: turning it on makes the
+    #: strategy's number mean what its name says, at the cost of the budget
+    #: sizing that a P&L-scored week wants.
+    honour_strategy_quantity: bool = False
     max_portfolio_risk_pct: float = 0.20
     #: Delta-equivalent notional a SINGLE structure may control, as a fraction
     #: of equity. Enforced from 30 Aug; before that it was declared here and

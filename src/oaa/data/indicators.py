@@ -500,3 +500,89 @@ def vol_estimator(name: str = "garman_klass"):
     between them meaningless.
     """
     return garman_klass_vol if name == "garman_klass" else realised_vol
+
+
+def atm_iv_from_chain(
+    chain: list[Any],
+    spot: float,
+    asof: dt_module.date | None = None,
+    rate: float = 0.04,
+    max_expiries: int = 10,
+) -> float | None:
+    """ATM implied vol from a live chain, recovered from price when needed.
+
+    The free indicative option feed serves `implied_volatility: null` and a
+    greek block of zeros on most contracts. The previous reader took the
+    nearest expiry, kept only quotes with a truthy `implied_volatility`, and
+    returned None when there were none - so on 1 Sep every one of the carry
+    book's fourteen ETFs was vetoed with "no IV rank available", which is the
+    premium gate, which is the entire carry thesis. The book could not trade
+    at all, and the reason looked like a market condition.
+
+    IV is not actually missing: it is in the price. `implied_vol_from_price`
+    already exists to recover it, and the backtest has always done exactly this
+    ("IV recovered from a real traded price is market data with one arithmetic
+    step applied"). The live path now does the same rather than giving up.
+
+    Order of preference:
+      1. the feed's own IV, when it serves one
+      2. Black-Scholes inverted on the ATM contract's mid
+      3. the next expiry out, up to `max_expiries`, before returning None
+
+    `max_expiries` is 10, not 3. The context chain window starts at the
+    intraday book's 0 DTE, so the three nearest expiries are all 0-2 DTE - the
+    worst place in the chain to invert, because the indicative feed's mids sit
+    at or below intrinsic there and `implied_vol_from_price` correctly refuses
+    them. The carry book's own 7-14 DTE expiries carry real time value and
+    invert cleanly, and they are the ones its premium gate is asking about.
+
+    Returns None only when nothing is invertible - which the caller must treat
+    as missing data, never as zero vol.
+    """
+    from oaa.backtest.pricing import implied_vol_from_price
+
+    if not chain or spot <= 0:
+        return None
+    day = asof or dt_module.date.today()
+
+    # Order matters. The context chain window starts at the intraday book's
+    # 0 DTE, so the nearest expiries are 0-2 DTE: the indicative feed's mids
+    # sit at or below intrinsic there and nothing inverts. Expiries with real
+    # time value are tried FIRST, and the 0-2 DTE ones only as a fallback, so
+    # the carry book's premium gate gets an answer instead of a None.
+    all_expiries = sorted({q.expiry for q in chain})
+    with_time_value = [e for e in all_expiries if (e - day).days >= 3]
+    near_dated = [e for e in all_expiries if (e - day).days < 3]
+    for expiry in (with_time_value + near_dated)[:max_expiries]:
+        same = [q for q in chain if q.expiry == expiry]
+        if not same:
+            continue
+
+        quoted = [q for q in same if q.implied_volatility]
+        if quoted:
+            return min(quoted, key=lambda q: abs(q.strike - spot)).implied_volatility
+
+        years = max((expiry - day).days, 0) / 365.0
+        if years <= 0:
+            years = 1.0 / (365.0 * 24.0)  # same-day expiry: hours, not zero
+
+        recovered: list[float] = []
+        for q in sorted(same, key=lambda q: abs(q.strike - spot))[:6]:
+            mid = q.mid
+            if not mid or mid <= 0:
+                continue
+            iv = implied_vol_from_price(
+                price=float(mid),
+                spot=float(spot),
+                strike=float(q.strike),
+                years=years,
+                is_call=(q.right.value == "call"),
+                rate=rate,
+            )
+            if iv is not None and 0.01 < iv < 5.0:
+                recovered.append(iv)
+        if recovered:
+            recovered.sort()
+            return round(recovered[len(recovered) // 2], 4)
+
+    return None

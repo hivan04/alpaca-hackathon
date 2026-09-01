@@ -19,6 +19,23 @@ execution:
   # the account judges read.
   chase:
     enabled: false
+  # 1.0 = post AT the far touch, i.e. fully marketable on arrival.
+  #
+  # The default 0.5 prices halfway between mid and the touch
+  # (`pricer.py:56`), and with the chase disabled `max_steps` is 1, so `step`
+  # is always 0 and the ratio is always exactly 0.5. There is no second
+  # attempt to walk it in. On this profile the order is, by construction, a
+  # resting order that never crosses the spread - it fills only when the
+  # market happens to come to it inside `fill_settle_seconds`. The one order
+  # this account ever approved (QQQ 0-DTE, 31 Aug) filled the ratio to 2.94
+  # only because the market was a single cent wide and the arithmetic rounded
+  # onto the touch. Anything wider rests and dies.
+  #
+  # The cost of 1.0 is the full half-spread, which is already bounded: the
+  # spread gate refuses anything wider than 4% of mid and the cost model
+  # charges the round trip against the profit target. The cost of 0.5 on this
+  # profile is not trading.
+  limit_price_ratio: 1.0
 
 risk:
   # Raised from 4 on 27 Aug. Self-imposed, not a hackathon rule. At 4/day the

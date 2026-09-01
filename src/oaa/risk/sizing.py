@@ -50,3 +50,32 @@ def kelly_fraction(win_rate: float, reward_risk: float, cap: float = 0.25) -> fl
         return 0.0
     edge = win_rate - (1 - win_rate) / reward_risk
     return round(max(0.0, min(cap, edge)), 4)
+
+
+#: Fraction of the per-trade risk budget a single contract may consume. The
+#: ceiling must sit UNDER the cap, not on it: on 1 Sep `max_option_price` was
+#: 10.00 and the budget was 0.01 x $100,000 = $1,000.00 = exactly 10.00 x 100,
+#: so the two agreed at one equity value and the first losing trade - equity
+#: $99,999, budget $999.99, floor(999.99 / 1000.00) = 0 - would have put the
+#: whole band back into auto-reject.
+PREMIUM_HEADROOM = 0.90
+
+
+def affordable_premium(
+    equity: float,
+    max_risk_pct: float,
+    headroom: float = PREMIUM_HEADROOM,
+    multiplier: int = 100,
+) -> float | None:
+    """The largest per-contract premium one contract of risk budget can buy.
+
+    This is the number a strategy needs BEFORE it picks a strike. Deriving the
+    chain filter's price ceiling from it means the book can only ever build
+    structures the risk engine can approve, and the two cannot drift apart when
+    equity moves - which a hard-coded ceiling does silently, on the first
+    losing trade.
+    """
+    if equity <= 0 or max_risk_pct <= 0:
+        return None
+    return round(equity * max_risk_pct * headroom / multiplier, 2)
+

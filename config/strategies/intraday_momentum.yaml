@@ -275,7 +275,30 @@ structure:
   # selection can land on a deep-ITM contract at $75+, which is $7,500 of risk
   # on a book whose sizing assumes 0.5% of equity per trade. 25.00 reproduces
   # the behaviour this book has always had; raise it only alongside sizing.
-  max_option_price: 25.00
+  #
+  # 10.00 from 1 Sep. 25.00 contradicted the account cap it was supposed to sit
+  # under: risk.max_risk_per_trade_pct is 0.01 on judged, so the largest max
+  # loss the risk engine will approve at quantity 1 is 0.01 x $100,000 = $1,000,
+  # i.e. $10.00 of premium per contract. Every contract between $10 and $25 was
+  # a candidate this book was allowed to BUILD and the risk engine was
+  # guaranteed to REFUSE - a model call, a critic score and a rejection, per
+  # cycle, for a trade that could never be approved. On 1 Sep all six ideas
+  # landed in exactly that band ($23.74-$24.86, all just under the old 25.00
+  # ceiling) and all six died at the sizing gate.
+  #
+  # ATM 0-DTE on this universe prices at $1.50-$4.00, so 10.00 is not a
+  # binding constraint on the trades this book actually wants - it is the
+  # ceiling the account already enforces, moved upstream so the book stops
+  # proposing what cannot be filled. Keep it at
+  # `max_risk_per_trade_pct x equity / 100` if either changes.
+  #
+  # 9.00, not 10.00: at 10.00 the ceiling EQUALS the budget
+  # (10.00 x 100 = $1,000 = 0.01 x $100,000) and they agree at exactly one
+  # equity value. One losing trade takes equity to $99,999, the budget to
+  # $999.99, floor(999.99 / 1000.00) to 0, and the whole $10 band auto-rejects
+  # again - today's bug, re-created by the first loss. A ceiling under a cap
+  # needs headroom, not equality.
+  max_option_price: 9.00
 
 # --- sizing: THERE IS NO PER-STRATEGY SIZING ---------------------------------
 # This block used to read:

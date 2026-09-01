@@ -11,7 +11,10 @@ from dataclasses import dataclass, field, replace
 
 from oaa.core import clock
 from oaa.core.errors import DataError
+from oaa.core.logging import get_logger
 from oaa.core.types import OptionQuote, Right
+
+log = get_logger("options.chain")
 
 
 @dataclass
@@ -111,6 +114,7 @@ class ChainView:
             require_greeks=False,
         )
         pool = [q for q in quotes if wing_cf.accepts(q, day)]
+        _warn_if_chain_misses_spot(symbol, kept or pool, spot)
         return cls(symbol=symbol, spot=spot, quotes=kept, asof=day, all_quotes=pool)
 
     def __len__(self) -> int:
@@ -154,7 +158,17 @@ class ChainView:
         Put deltas are negative; pass the signed value you mean (-0.16 for a
         16-delta put) and this does the right thing either way.
         """
-        candidates = [q for q in self.for_expiry(expiry, right) if q.greeks.delta is not None]
+        # A delta of exactly 0.0 is not a delta. The free indicative feed fills
+        # the greek block with zeros rather than omitting it, so an
+        # `is not None` test passes on every contract and this method then
+        # picks by |0.0 - target| - a tie across the whole chain, resolved by
+        # list order, i.e. the lowest strike listed. Requiring a NON-ZERO
+        # delta is what makes the fallback below actually reachable on the
+        # feed the judged account runs on.
+        candidates = [
+            q for q in self.for_expiry(expiry, right)
+            if q.greeks.delta is not None and abs(q.greeks.delta) > 1e-9
+        ]
         if not candidates:
             # Greeks missing (common on the free indicative feed) - fall back
             # to a moneyness proxy rather than failing the whole cycle.
@@ -165,12 +179,44 @@ class ChainView:
     def by_moneyness(
         self, expiry: dt.date, right: Right, moneyness: float
     ) -> OptionQuote:
-        """moneyness = strike / spot. 1.0 = at the money."""
+        """moneyness = strike / spot. 1.0 = at the money.
+
+        Refuses when the nearest listed strike is nowhere near the one asked
+        for. A truncated chain - one page of an unpaged fetch, ordered by OCC
+        symbol so it stops below spot - makes this method silently return its
+        top strike, which is a deep-ITM contract priced at pure intrinsic. On
+        1 Sep that produced six "ATM" ideas at $2,400+ of premium against a
+        $1,000 per-trade cap, and all six died at the sizing gate. Failing here
+        turns that into a named rejection instead of a bad trade dressed as a
+        good one.
+        """
         candidates = self.for_expiry(expiry, right)
         if not candidates:
             raise DataError(f"{self.symbol}: no {right.value}s for {expiry}")
         target_strike = self.spot * moneyness
-        return min(candidates, key=lambda q: abs(q.strike - target_strike))
+        best = min(candidates, key=lambda q: abs(q.strike - target_strike))
+        drift = abs(best.strike - target_strike)
+        tolerance = max(2.0 * _strike_spacing(candidates), 0.005 * self.spot)
+        # Only refuse when the chain fails to reach SPOT. A sparse chain that
+        # brackets spot is a thin market and the nearest strike is the honest
+        # answer; a chain whose whole strike range sits to one side of spot is
+        # a truncated fetch. Discriminating on spot rather than on the target
+        # keeps legitimate far-OTM wing requests working.
+        lo = min(q.strike for q in self.quotes) if self.quotes else best.strike
+        hi = max(q.strike for q in self.quotes) if self.quotes else best.strike
+        brackets_spot = lo <= self.spot <= hi
+        looks_like_a_real_page = len(self.quotes) >= _TRUNCATION_MIN_CONTRACTS
+        if drift > tolerance and not brackets_spot and looks_like_a_real_page:
+            raise DataError(
+                f"{self.symbol}: nearest listed {right.value} strike to "
+                f"{target_strike:.2f} is {best.strike:.2f} ({drift:.2f} away, "
+                f"tolerance {tolerance:.2f}) - the chain does not reach the "
+                f"strike this structure needs. Strikes seen: "
+                f"{lo:.2f}-{hi:.2f}, spot {self.spot:.2f}. "
+                "A chain that stops short of spot is a truncated fetch, not a "
+                "thin market - check option_chain paging."
+            )
+        return best
 
     def by_strike(self, expiry: dt.date, right: Right, strike: float) -> OptionQuote:
         candidates = self.for_expiry(expiry, right)
@@ -255,3 +301,50 @@ def _delta_to_moneyness(target_delta: float, right: Right) -> float:
     d = min(max(abs(target_delta), 0.01), 0.99)
     offset = (0.50 - d) * 0.20  # 50d -> ATM, 16d -> ~7% OTM
     return 1.0 + offset if right is Right.CALL else 1.0 - offset
+
+
+#: Below this, a one-sided or off-spot chain is a thin name or a test
+#: fixture. At or above it, it is an unpaged fetch: the 1 Sep SPY chain
+#: arrived as 129 contracts, all calls, topping out 25 points below spot.
+_TRUNCATION_MIN_CONTRACTS = 20
+
+
+def _strike_spacing(candidates: list[OptionQuote]) -> float:
+    """Median gap between adjacent listed strikes; 1.0 when it cannot be read."""
+    strikes = sorted({q.strike for q in candidates})
+    if len(strikes) < 2:
+        return 1.0
+    gaps = sorted(b - a for a, b in zip(strikes, strikes[1:], strict=False) if b > a)
+    if not gaps:
+        return 1.0
+    return gaps[len(gaps) // 2]
+
+
+def _warn_if_chain_misses_spot(symbol: str, quotes: list[OptionQuote], spot: float) -> None:
+    """A chain that does not bracket spot, or has only one right, is truncated.
+
+    Both are the signature of an unpaged fetch: snapshots come back ordered by
+    OCC symbol, so a single page is all calls, lowest strikes first. Silent for
+    a whole competition week until someone reads the premiums.
+    """
+    if len(quotes) < _TRUNCATION_MIN_CONTRACTS or spot <= 0:
+        # A handful of contracts is a hand-built fixture or a genuinely thin
+        # name, not a truncated page. Only a chain big enough to BE a page can
+        # be diagnosed as one.
+        return
+    lo = min(q.strike for q in quotes)
+    hi = max(q.strike for q in quotes)
+    if not (lo <= spot <= hi):
+        log.warning(
+            "%s: chain strikes %.2f-%.2f do not bracket spot %.2f - "
+            "the fetch looks truncated, not the market",
+            symbol, lo, hi, spot,
+        )
+    rights = {q.right for q in quotes}
+    if len(rights) < 2:
+        only = next(iter(rights)).value if rights else "none"
+        log.warning(
+            "%s: chain came back with %ss only (%d contracts) - "
+            "a real chain has both rights; the fetch looks truncated",
+            symbol, only, len(quotes),
+        )

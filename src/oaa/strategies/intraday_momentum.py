@@ -62,6 +62,7 @@ from oaa.data.indicators import (
     width_is_rising,
 )
 from oaa.options.selection import Selection, select
+from oaa.risk.sizing import affordable_premium
 from oaa.signals.gates import GateResult, gates_summary, spread_gate, time_gate
 from oaa.strategies.base import Strategy, StrategyContext, strategy_registry
 
@@ -521,7 +522,7 @@ class IntradayMomentum(Strategy):
             max_spread_pct=float(self.p("spread_gate.max_relative_spread", 0.02)) * 2,
             min_open_interest=int(self.p("structure.min_open_interest", 100)),
             min_volume=0,
-            max_price=float(self.p("structure.max_option_price", 25.0)),
+            max_price=_price_ceiling(ctx, float(self.p("structure.max_option_price", 25.0))),
         ))
         thesis = self._thesis(market, selection, bullish, momentum, catalyst)
         quantity = int(self.p("structure.fixed_quantity", 1))
@@ -723,3 +724,26 @@ def _session_slice(bars: list[dict]) -> list[dict]:
 
     last = _day(bars[-1])
     return [b for b in bars if _day(b) == last]
+
+
+def _price_ceiling(ctx: Any, configured: float) -> float:
+    """The per-contract premium ceiling, derived from the LIVE risk budget.
+
+    A hard-coded ceiling and the account's per-trade cap are two numbers that
+    have to agree, and nothing made them. On 1 Sep the ceiling was 25.00 while
+    the cap approved at most 10.00, so every contract between them was one the
+    book was allowed to build and the risk engine was guaranteed to refuse -
+    six ideas, six model calls, six critic scores, six rejections, zero trades.
+    Setting the ceiling to 9.00 fixes it for one equity value; deriving it
+    fixes it for all of them, including after the account has moved.
+
+    The configured value stays as a hard upper bound, so a book can still be
+    more conservative than the budget allows - it just can no longer be less.
+    """
+    budget_ceiling = affordable_premium(
+        getattr(getattr(ctx, "account", None), "equity", 0.0) or 0.0,
+        getattr(getattr(ctx.config, "risk", None), "max_risk_per_trade_pct", 0.0) or 0.0,
+    )
+    if budget_ceiling is None:
+        return configured
+    return min(configured, budget_ceiling)

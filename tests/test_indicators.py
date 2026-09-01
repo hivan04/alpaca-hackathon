@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import datetime as _dt
+import datetime as dt
 
+from oaa.core.types import OptionQuote, Right
 from oaa.data.indicators import (
     IV_RANK_MIN_OBSERVATIONS,
     adx,
+    atm_iv_from_chain,
     atr,
     ema,
     iv_rank,
@@ -154,3 +157,52 @@ def test_a_real_observation_is_never_overwritten_by_a_modelled_one():
     store.observe("SPY", 9.99, day=day)
     store.seed_from_bars("SPY", bars)
     assert store._series["SPY"][day.isoformat()] == 9.99
+
+
+# --------------------------------------------------------------------- #
+# 1 Sep: the premium gate had no IV to read
+#
+# The indicative feed serves implied_volatility: null on most contracts. The
+# old reader kept only quotes with a truthy IV on the nearest expiry, so all
+# fourteen carry ETFs were vetoed with "no IV rank available" - the premium
+# gate, which is the whole carry thesis. IV was never missing; it was in the
+# price, and the backtest has always recovered it that way.
+# --------------------------------------------------------------------- #
+
+def _q(strike, mid, expiry, right=Right.CALL, iv=None):
+    return OptionQuote(
+        symbol=f"SPY{strike}", underlying="SPY", expiry=expiry, strike=float(strike),
+        right=right, bid=mid - 0.05, ask=mid + 0.05, last=mid, implied_volatility=iv,
+    )
+
+
+def test_atm_iv_is_recovered_from_price_when_the_feed_serves_none():
+    expiry = dt.date.today() + dt.timedelta(days=7)
+    chain = [_q(k, m, expiry) for k, m in
+             [(755, 12.0), (760, 8.5), (763, 6.8), (765, 5.6), (770, 3.4)]]
+    iv = atm_iv_from_chain(chain, 763.05)
+    assert iv is not None
+    assert 0.05 < iv < 1.0
+
+
+def test_the_feeds_own_iv_wins_when_it_has_one():
+    expiry = dt.date.today() + dt.timedelta(days=7)
+    chain = [_q(763, 6.8, expiry, iv=0.1234)]
+    assert atm_iv_from_chain(chain, 763.05) == 0.1234
+
+
+def test_an_uninvertible_chain_returns_none_not_zero():
+    """Zero vol would read as the cheapest premium in history and invert the
+    gate it feeds. Missing must stay missing."""
+    expiry = dt.date.today() + dt.timedelta(days=7)
+    intrinsic_only = [_q(700, 63.05, expiry)]  # spot - strike exactly, no time value
+    assert atm_iv_from_chain(intrinsic_only, 763.05) is None
+    assert atm_iv_from_chain([], 763.05) is None
+
+
+def test_it_walks_to_the_next_expiry_rather_than_giving_up():
+    near = dt.date.today() + dt.timedelta(days=1)
+    far = dt.date.today() + dt.timedelta(days=14)
+    chain = [_q(763, 0.0, near)] + [_q(k, m, far) for k, m in
+                                    [(760, 12.0), (763, 10.2), (766, 8.6)]]
+    assert atm_iv_from_chain(chain, 763.05) is not None

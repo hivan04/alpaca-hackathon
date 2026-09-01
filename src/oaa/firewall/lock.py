@@ -644,8 +644,26 @@ class TemporalFirewall:
                 report = self.run_intraday_cutoff(broker, now=moment)
                 verdict.emergency_liquidated = True
                 verdict.reasons.append(report.summary())
-            self._disable_transient_next_session(moment)
-            verdict.reasons.append("transient books disabled for the following session")
+            # The next-session penalty is for residual transient EXPOSURE, not
+            # for a working order. `snapshot.open_orders` is account-wide, so a
+            # resting CARRY entry at 15:45 - or any stale order the emergency
+            # cutoff above has just cancelled - would disable the intraday book
+            # for the whole of the following session. With a competition window
+            # of a handful of sessions that is a full day of trading lost to an
+            # order that belonged to a different book and may no longer exist.
+            # Positions that survived the 15:15 cutoff are a control failure and
+            # still earn the ratchet; an open order is a reason to cancel it,
+            # which `run_intraday_cutoff` above has already done.
+            if transient:
+                self._disable_transient_next_session(moment)
+                verdict.reasons.append(
+                    "transient books disabled for the following session"
+                )
+            else:
+                verdict.reasons.append(
+                    f"{snapshot.open_orders} working order(s) at the sign-off with no "
+                    "residual transient position - cancelled, no next-session penalty"
+                )
             self._record(verdict, carry=True)
             return verdict
         verdict.checks["transient_flat"] = True

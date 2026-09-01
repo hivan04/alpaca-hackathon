@@ -187,12 +187,22 @@ class ToolBelt:
                 "Run the carry book's four hard gates (premium, trend, event, "
                 "macro) across its universe and return, for each symbol, either a "
                 "fully-priced structure or the gate that vetoed it and why. "
-                "Read-only - it computes and explains, it does not trade."
+                "Read-only - it computes and explains, it does not trade. "
+                "The carry book trades a FIXED universe of index and sector ETFs "
+                "and NOTHING else - single names such as AAPL, NVDA or TSLA are "
+                "not on this book and passing them evaluates nothing. OMIT the "
+                "argument to scan the whole book, which is almost always what "
+                "you want."
             ),
             input_schema=_obj({
                 "symbols": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Optional subset. Defaults to the strategy universe.",
+                    "description": (
+                        "Optional subset, and only ever a subset OF THE BOOK'S OWN "
+                        "UNIVERSE. Symbols outside it are returned under "
+                        "`not_in_universe` and are NOT evaluated - do not read "
+                        "their absence as a veto. Omit to scan everything."
+                    ),
                 }
             }),
             handler=self._scan_carry,
@@ -367,7 +377,20 @@ class ToolBelt:
         wanted = [s.upper() for s in symbols] if symbols else sorted(
             {s for strat in strategies for s in strat.universe()}
         )
-        contexts = self.orch._gather_contexts(wanted)
+        # Symbols the caller asked for that no strategy on this book trades.
+        # These are NOT vetoes and must never be reported as though the gates
+        # looked at them. On 1 Sep the model, primed by discovery, called
+        # scan_carry_candidates(["AAPL","MSFT","TSLA","NVDA","AMZN"]) - not one
+        # of which is in vol_carry's 14-ETF universe. Every symbol was skipped
+        # by the filter below, the tool returned an empty candidate list with no
+        # explanation, and the model wrote "no candidates passed the carry
+        # book's four hard gates" into the journal. Nothing had been evaluated.
+        # An empty result and a rejected result are different answers and the
+        # tool has to say which one it is.
+        universe = {s for strat in strategies for s in strat.universe()}
+        skipped = sorted(set(wanted) - universe)
+
+        contexts = self.orch._gather_contexts(sorted(set(wanted) & universe))
         account = self.orch.broker.account()
         out: list[dict[str, Any]] = []
         for strategy in strategies:
@@ -393,7 +416,20 @@ class ToolBelt:
                         "passed": False,
                         "note": "vetoed - see get_gate_rejections for the gate and metrics",
                     })
-        return {"candidates": out}
+        result: dict[str, Any] = {"candidates": out}
+        if skipped:
+            result["not_in_universe"] = skipped
+            result["universe"] = sorted(universe)
+            result["note"] = (
+                f"{len(skipped)} requested symbol(s) are NOT on this book and were "
+                f"not evaluated: {', '.join(skipped)}. This is not a veto - no gate "
+                f"ran on them. Re-call with symbols from `universe`, or omit the "
+                f"argument to scan the whole book."
+            )
+        if not out:
+            result["note"] = (result.get("note", "") + " No symbol on this book "
+                              "produced a candidate or a gate rejection.").strip()
+        return result
 
     def _propose(self, symbol: str, book: str = "carry") -> dict[str, Any]:
         pool = {

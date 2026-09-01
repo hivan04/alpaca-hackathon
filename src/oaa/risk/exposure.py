@@ -174,7 +174,7 @@ def idea_exposure(
     if not option_legs:
         return None
     for leg in option_legs:
-        if leg.quote is None or leg.quote.greeks.delta is None or leg.quote.greeks.vega is None:
+        if leg.quote is None or _greeks_missing(leg.quote):
             return None
 
     reference = spot if spot and spot > 0 else _spot_proxy(option_legs)
@@ -239,7 +239,7 @@ def book_exposure(
                 out.missing.append(name)
             continue
         quote, spot = found
-        if quote.greeks.delta is None or quote.greeks.vega is None:
+        if _greeks_missing(quote):
             out.unmatched += 1
             continue
         # `qty` is already signed by the broker: negative for a short leg.
@@ -280,3 +280,23 @@ def describe(exposure: Exposure, equity: float) -> dict[str, Any]:
     if exposure.missing:
         out["greeks_missing_for"] = ",".join(exposure.missing[:6])
     return out
+
+
+def _greeks_missing(quote: Any) -> bool:
+    """True when a quote carries no usable greeks.
+
+    `is None` alone is not enough. The free indicative feed serves a FULL greek
+    block of exact zeros rather than omitting it, so every `is None` test passed
+    and `net_delta`, `net_vega` and `trade_notional` were evaluated against
+    `dollar_delta 0.0, vega 0.0` - three caps reporting green on a book that had
+    never been measured, with `greek_coverage: 1.0` written into the verdict a
+    judge can read. A real option never has delta AND vega both exactly zero;
+    `oaa.options.chain.by_delta` already applies the same test before selecting.
+    """
+    greeks = getattr(quote, "greeks", None)
+    if greeks is None:
+        return True
+    delta, vega = greeks.delta, greeks.vega
+    if delta is None or vega is None:
+        return True
+    return abs(delta) <= 1e-9 and abs(vega) <= 1e-9

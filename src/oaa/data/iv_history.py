@@ -22,9 +22,12 @@ instead of standing the book down for a month while history accumulates.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import logging
+import os
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -156,9 +159,21 @@ class IVHistoryStore:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(self._series, indent=1, sort_keys=True))
-            tmp.replace(self.path)
+            # A per-writer temp name. A single shared "<name>.json.tmp" races
+            # when two cycles save in the same moment: both write it, the first
+            # renames it away, and the second's replace fails ENOENT with the
+            # day's IV history lost. That warning appeared on 1 Sep, and IV
+            # rank is the whole premium gate for the carry book.
+            tmp = self.path.with_name(
+                f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+            )
+            try:
+                tmp.write_text(json.dumps(self._series, indent=1, sort_keys=True))
+                tmp.replace(self.path)
+            finally:
+                with contextlib.suppress(OSError):
+                    if tmp.exists():
+                        tmp.unlink()
             self._dirty = False
         except OSError as exc:  # pragma: no cover
             log.warning("could not persist IV history to %s (%s)", self.path, exc)

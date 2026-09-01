@@ -19,6 +19,7 @@ from oaa.core.types import Greeks, MarketContext, OptionQuote, Right
 from oaa.data.base import MarketDataProvider, data_registry
 from oaa.data.indicators import (
     adx,
+    atm_iv_from_chain,
     iv_rank,
     trend_strength,
     vol_estimator,
@@ -167,22 +168,32 @@ class AlpacaDataProvider(MarketDataProvider):
             self._connect()
             self._limiter.acquire()
             today = dt.date.today()
-            request = OptionChainRequest(
-                underlying_symbol=symbol,
-                feed=OptionsFeed(self.cfg.data.option_feed),
-                expiration_date_gte=(today + dt.timedelta(days=min_dte)).isoformat(),
-                expiration_date_lte=(today + dt.timedelta(days=max_dte)).isoformat(),
-                strike_price_gte=float(strike_low),
-                strike_price_lte=float(strike_high),
-            )
+            kwargs: dict[str, Any] = {
+                "underlying_symbol": symbol,
+                "feed": OptionsFeed(self.cfg.data.option_feed),
+                "expiration_date_gte": (today + dt.timedelta(days=min_dte)).isoformat(),
+                "expiration_date_lte": (today + dt.timedelta(days=max_dte)).isoformat(),
+                "strike_price_gte": float(strike_low),
+                "strike_price_lte": float(strike_high),
+            }
+            # Ask for the whole window, not the default page. An unpaged chain
+            # comes back ordered by OCC symbol - calls first, lowest strike
+            # first - so its top strike sits below spot and there are no puts
+            # at all. The CLI provider pages explicitly; this SDK call cannot,
+            # so raise the page size instead and verify the result below.
+            fields = getattr(OptionChainRequest, "model_fields", {}) or {}
+            if "limit" in fields:
+                kwargs["limit"] = 10000
+            request = OptionChainRequest(**kwargs)
             try:
                 snapshots = self._option.get_option_chain(request)
             except Exception as exc:  # noqa: BLE001
                 raise DataError(f"option chain fetch failed for {symbol}: {exc}") from exc
-            return [
+            quotes = [
                 q for q in (_to_quote(sym, snap) for sym, snap in snapshots.items())
                 if q is not None
             ]
+            return quotes
 
         return self._cached(key, fetch)
 
@@ -293,16 +304,10 @@ def _to_quote(symbol: str, snap: Any) -> OptionQuote | None:
 
 
 def _atm_iv(chain: list[OptionQuote], spot: float) -> float | None:
-    if not chain:
-        return None
-    nearest_expiry = min(q.expiry for q in chain)
-    candidates = [
-        q for q in chain if q.expiry == nearest_expiry and q.implied_volatility
-    ]
-    if not candidates:
-        return None
-    closest = min(candidates, key=lambda q: abs(q.strike - spot))
-    return closest.implied_volatility
+    """ATM IV, from the feed when it serves one and from the price when it does
+    not. See `atm_iv_from_chain` - the indicative feed's null IV silently
+    disabled the carry book's premium gate for the whole of 1 Sep."""
+    return atm_iv_from_chain(chain, spot)
 
 
 def _f(value: Any) -> float | None:

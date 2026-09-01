@@ -33,6 +33,7 @@ from oaa.core.types import Greeks, MarketContext, OptionQuote, Right
 from oaa.data.base import MarketDataProvider, data_registry
 from oaa.data.indicators import (
     adx,
+    atm_iv_from_chain,
     iv_rank,
     trend_strength,
     vol_estimator,
@@ -202,17 +203,39 @@ class AlpacaCliDataProvider(MarketDataProvider):
 
         def fetch() -> list[OptionQuote]:
             today = dt.date.today()
-            args = [
-                "data", "option", "chain",
-                "--underlying-symbol", symbol,
-                "--feed", self.cfg.data.option_feed,
-                "--expiration-date-gte", (today + dt.timedelta(days=min_dte)).isoformat(),
-                "--expiration-date-lte", (today + dt.timedelta(days=max_dte)).isoformat(),
-                "--strike-price-gte", f"{strike_low:.2f}",
-                "--strike-price-lte", f"{strike_high:.2f}",
-            ]
-            payload = self.run(args)
-            snapshots = payload.get("snapshots", payload) if isinstance(payload, dict) else {}
+            snapshots: dict[str, Any] = {}
+            page_token: str | None = None
+
+            # The chain MUST be paginated. Without --limit the CLI serves one
+            # default page of snapshots ordered by OCC symbol - calls first,
+            # lowest strike first - so the highest strike returned lands BELOW
+            # spot and the puts never arrive at all. The selector then takes the
+            # nearest strike it can see, which is a deep-ITM call priced at pure
+            # intrinsic, and the sizing gate rejects it for breaching the
+            # per-trade risk cap at a quantity of one. Zero fills, every book,
+            # every cycle. `bars()` above has always paged; this did not.
+            # See claude/chain-truncated-below-spot.md.
+            for _ in range(20):  # hard page cap
+                args = [
+                    "data", "option", "chain",
+                    "--underlying-symbol", symbol,
+                    "--feed", self.cfg.data.option_feed,
+                    "--expiration-date-gte", (today + dt.timedelta(days=min_dte)).isoformat(),
+                    "--expiration-date-lte", (today + dt.timedelta(days=max_dte)).isoformat(),
+                    "--strike-price-gte", f"{strike_low:.2f}",
+                    "--strike-price-lte", f"{strike_high:.2f}",
+                    "--limit", "10000",
+                ]
+                if page_token:
+                    args += ["--page-token", page_token]
+                payload = self.run(args)
+                page = payload.get("snapshots", payload) if isinstance(payload, dict) else {}
+                if isinstance(page, dict):
+                    snapshots.update(page)
+                page_token = payload.get("next_page_token") if isinstance(payload, dict) else None
+                if not page_token:
+                    break
+
             quotes = [
                 q for q in (
                     _to_quote(sym, snap) for sym, snap in (snapshots or {}).items()
@@ -454,10 +477,7 @@ def _to_quote(symbol: str, snap: Any) -> OptionQuote | None:
 
 
 def _atm_iv(chain: list[OptionQuote], spot: float) -> float | None:
-    if not chain:
-        return None
-    nearest = min(q.expiry for q in chain)
-    candidates = [q for q in chain if q.expiry == nearest and q.implied_volatility]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda q: abs(q.strike - spot)).implied_volatility
+    """ATM IV, from the feed when it serves one and from the price when it does
+    not. See `atm_iv_from_chain` - the indicative feed's null IV silently
+    disabled the carry book's premium gate for the whole of 1 Sep."""
+    return atm_iv_from_chain(chain, spot)
