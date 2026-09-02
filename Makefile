@@ -212,7 +212,6 @@ live: ## Start both accounts live + the dashboard (pm2)
 	@echo ""
 	@echo "Streamlit operator dashboard: http://localhost:8501 -> Control tab"
 	@echo "  (pm2 process oaa-control - `oaa dashboard`, not `oaa serve`)"
-	@echo "Public FastAPI page: pm2 process oaa-dashboard - `oaa serve`"
 	@echo "Toggle books per account in the Control tab; no restart needed."
 
 .PHONY: status

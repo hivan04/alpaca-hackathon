@@ -36,6 +36,32 @@ execution:
   # charges the round trip against the profit target. The cost of 0.5 on this
   # profile is not trading.
   limit_price_ratio: 1.0
+  # ...and 1.0 STILL did not fill. 2 Sep, three orders, every gate green, every
+  # one dead as `unfilled after 20s at <the ask>`: SPY 765C at 1.51, IWM 293C at
+  # 0.78, QQQ 704P at 2.25 - each posted at exactly the quoted ask, each
+  # cancelled by our own router twenty seconds later. A marketable limit that
+  # does not fill in twenty seconds is not a marketable limit.
+  #
+  # The quote is the problem, not the ratio. `data.option_feed: indicative` is
+  # the free tier and serves DELAYED quotes (the payloads show it: asof,
+  # open_interest, volume, iv_source all null), so the "far touch" is a touch
+  # from up to fifteen minutes ago. And the error is BIASED, not random:
+  # intraday_momentum enters after a VWAP cross, buying calls into an up-move
+  # and puts into a down-move, so the live offer has by construction moved away
+  # from the stale one - by roughly the move that triggered the entry. The
+  # limit sits below the real market every time.
+  #
+  # 10% of the touch, floor 2c. That is a guess at the size of a fifteen-minute
+  # gap on a 1-DTE contract, deliberately smaller than the delta-times-ATR
+  # estimate (~27% of premium on the 2 Sep SPY idea), which is what it would
+  # cost to be certain. The right fix is `option_feed: opra` - a paid feed -
+  # after which BOTH of these go back to 0.0.
+  #
+  # The pad cannot outspend the risk engine: router._quantity_within_approved_risk
+  # shrinks the quantity so the padded max loss stays inside the approved
+  # dollars. See `claude/limits-priced-off-a-delayed-feed.md`.
+  stale_quote_pad_pct: 0.10
+  stale_quote_pad_min: 0.02
 
 risk:
   # Raised from 4 on 27 Aug. Self-imposed, not a hackathon rule. At 4/day the

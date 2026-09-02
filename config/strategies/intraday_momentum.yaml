@@ -175,8 +175,11 @@ momentum:
   #                          this book monetises.
   #   slope_band_max  +0.25  Above this the move is already priced and we are
   #                          paying up for our own forecast - the same argument
-  #                          `selection.iv_rank_no_trade_above: 0.85` makes at
-  #                          the LEVEL, made here at the SLOPE.
+  #                          `selection.iv_rank_no_trade_above` makes at the
+  #                          LEVEL, made here at the SLOPE. NOTE that the level
+  #                          version is OFF as of 1 Sep (the rank is pinned at
+  #                          100% by a basis mismatch), so this slope vote is
+  #                          currently the only place that argument is made.
   #
   # This vote can only WIDEN the entry set. `confirmations` is a sum over votes
   # that passed and `needed` is min(confirmations_required, possible), so this
@@ -264,7 +267,28 @@ selection:
   dte_max: 2
   large_move_pct: 0.006
   session_minutes: 345
-  iv_rank_no_trade_above: 0.85     # paying for a move already priced in
+  # DISABLED 1 Sep. This gate refused 74 of the 154 live candidates on 1 Sep -
+  # every one of them reading "IV rank 100% is at or above the 85% ceiling", on
+  # all seven symbols the book reached. The rank is not a market reading: the
+  # 252-day series it ranks against is seeded from `IVModel` over daily PRICE
+  # bars (a realized-vol proxy) while the live observation is option-implied
+  # ATM vol off the chain. Implied sits above realized by the variance risk
+  # premium, so the live print lands at the top of its own history and
+  # `below / len` resolves to 1.0 forever. Measured: on 15 of 20 symbols in
+  # `runs/judged/iv_history.json` the last value IS the series maximum. See
+  # `claude/iv-rank-pinned-by-a-basis-mismatch.md`.
+  #
+  # The thesis of this book is the VWAP cross. This ceiling is a refinement on
+  # top of it, and a refinement fed by a number we cannot currently measure on
+  # a consistent basis is worth less than the trades it costs. Sizing, spread,
+  # structure and the firewall are untouched.
+  #
+  # 1.01, NOT `null`: `intraday_momentum.py:489` reads this through
+  # `float(self.p(...))`, so a null yields `float(None)` and raises on every
+  # cycle. `indicators.iv_rank` clamps to `min(1.0, ...)`, so >= 1.01 is
+  # unreachable by construction and this is an off switch, not a high bar.
+  # RESTORE to 0.85 once the IV history is rebuilt on one basis.
+  iv_rank_no_trade_above: 1.01     # off - see above
   prefer_vertical_above_iv_rank: 0.60
 
 structure:

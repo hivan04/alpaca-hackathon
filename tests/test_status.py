@@ -11,7 +11,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 
-from oaa.app.status import STALE_AFTER, collect, human_age
+import sqlite3
+
+from oaa.app.status import STALE_AFTER, age_of, collect, human_age
 
 UTC = dt.timezone.utc
 
@@ -19,10 +21,19 @@ UTC = dt.timezone.utc
 class _Journal:
     """Stands in for telemetry.Journal - the reads `collect` actually uses."""
 
-    def __init__(self, events: list[dict], decisions: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        events: list[dict],
+        decisions: list[dict] | None = None,
+        snapshot: dict | None = None,
+    ) -> None:
         self._events = list(reversed(events))  # collect expects newest-first
         self._decisions = decisions or []
+        self._snapshot = snapshot
         self.journal_path = "/tmp/journal.jsonl"
+
+    def latest_snapshot(self) -> dict:
+        return dict(self._snapshot or {})
 
     def events(self, kind: str | None = None, limit: int = 200) -> list[dict]:
         rows = [e for e in self._events if kind is None or e.get("kind") == kind]
@@ -45,14 +56,18 @@ SHUT = {"phase": "closed", "open": False, "now_et": "Sat 29 Aug 14:00 EDT",
         "next_open": "Mon 31 Aug 09:30 EDT"}
 
 
-def _snapshot(events, monkeypatch, procs=(), market=None):
+def _snapshot(events, monkeypatch, procs=(), market=None, snapshot=None):
     monkeypatch.setattr("oaa.app.status.processes", lambda profile: list(procs))
     monkeypatch.setattr("oaa.app.status.session", lambda settings: dict(market or OPEN))
-    return collect(settings=None, journal=_Journal(events), profile="judged")
+    return collect(
+        settings=None,
+        journal=_Journal(events, snapshot=snapshot),
+        profile="judged",
+    )
 
 
 ONLINE = [{"name": "oaa-judged", "pid": 1, "status": "online",
-           "restarts": 0, "uptime": "2h"}]
+           "restarts": 0, "running_for": "2h"}]
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +182,13 @@ def test_only_the_trading_loop_counts_as_the_agent_process():
     from oaa.app.status import _looks_like_agent
 
     assert _looks_like_agent("/repo/.venv/bin/python -m oaa.cli run --profile judged")
-    assert _looks_like_agent("node /usr/lib/pm2 oaa-judged")
+    assert _looks_like_agent("node /usr/lib/pm2 oaa-judged")     # SUPERVISED: real
+    # ... but pm2 READING a process is not that process. This exact argv was on
+    # the host on 1 Sep and the board reported the judged loop UP because of it.
+    assert not _looks_like_agent(
+        "node /Users/x/.nvm/versions/node/v24.18.1/bin/pm2 logs oaa-judged --lines 50"
+    )
+    assert not _looks_like_agent("node /usr/lib/pm2 monit oaa-judged")
     assert not _looks_like_agent("python -m streamlit run src/oaa/app/dashboard.py")
     assert not _looks_like_agent("/repo/.venv/bin/oaa status --profile judged")
     assert not _looks_like_agent("grep oaa run")
@@ -188,7 +209,7 @@ def test_a_process_on_another_account_is_called_out(monkeypatch):
     """A bare `oaa status` resolves to dev; a process on the OTHER account
     running beside it must not be read as evidence about what is on screen."""
     procs = [{"name": "oaa-dev", "pid": 1, "status": "online",
-              "restarts": 0, "uptime": "12h"}]
+              "restarts": 0, "running_for": "12h"}]
     snap = _snapshot([{"kind": "report", "ts": _ts(5)}], monkeypatch, procs)
     assert snap["other_profiles"] == ["dev"], "viewing judged, a dev loop is running"
 
@@ -213,3 +234,61 @@ def test_a_recorded_decision_counts_as_activity(monkeypatch):
     assert snap["journal_age"] is not None, "a Z-suffixed timestamp must parse"
     assert snap["journal_age"] < dt.timedelta(minutes=5)
     assert snap["state"] == "live"
+
+
+# --- the money line -------------------------------------------------------- #
+# 2 Sep: the screen printed "equity $100,000.00 | day P&L +0.00 | 0 position(s)"
+# at 14:22 ET with five positions on and +$199 on the day. `report` is written
+# once, by the 16:10 cycle; the newest one was from 01:29 UTC, before the open.
+
+
+def test_money_line_prefers_the_live_snapshot_over_the_daily_report(monkeypatch):
+    snap = _snapshot(
+        [{"kind": "report", "ts": _ts(780), "equity": 100_000.0,
+          "day_pl": 0.0, "positions": 0}],
+        monkeypatch,
+        ONLINE,
+        snapshot={"ts": _ts(2), "equity": 100_199.65, "day_pl": 199.65,
+                  "positions": 5},
+    )
+    assert snap["report"]["equity"] == 100_199.65
+    assert snap["report"]["positions"] == 5
+    assert snap["report"]["source"] == "snapshot"
+
+
+def test_money_line_falls_back_to_the_report_before_the_first_snapshot(monkeypatch):
+    snap = _snapshot(
+        [{"kind": "report", "ts": _ts(60), "equity": 100_000.0,
+          "day_pl": 0.0, "positions": 0}],
+        monkeypatch,
+        ONLINE,
+    )
+    assert snap["report"]["equity"] == 100_000.0
+    assert snap["report"]["source"] == "report"
+
+
+def test_money_line_survives_a_journal_that_cannot_answer(monkeypatch):
+    """`collect` promises never to raise - an unreadable db is not an outage."""
+
+    class _Broken(_Journal):
+        def latest_snapshot(self):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("oaa.app.status.processes", lambda profile: list(ONLINE))
+    monkeypatch.setattr("oaa.app.status.session", lambda settings: dict(OPEN))
+    events = [{"kind": "report", "ts": _ts(60), "equity": 100_000.0,
+               "day_pl": 0.0, "positions": 0}]
+    snap = collect(settings=None, journal=_Broken(events), profile="judged")
+    assert snap["report"]["equity"] == 100_000.0
+
+
+def test_money_line_carries_a_timestamp_so_it_can_be_dated(monkeypatch):
+    """The nine-hour-old number was unreadable because nothing dated it."""
+    snap = _snapshot(
+        [{"kind": "report", "ts": _ts(780)}],
+        monkeypatch,
+        ONLINE,
+        snapshot={"ts": _ts(3), "equity": 100_199.65, "day_pl": 199.65,
+                  "positions": 5},
+    )
+    assert age_of(snap["report"]["ts"]) < dt.timedelta(minutes=10)

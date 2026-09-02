@@ -183,6 +183,19 @@ class Journal:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def latest_snapshot(self) -> dict[str, Any]:
+        """The most recent account snapshot, or {} before the first one.
+
+        `equity_series` is ordered ASC for the curve, so `equity_series(1)`
+        returns the OLDEST row - the first $100,000 of the week, forever. Any
+        caller that wants "how much money is there right now" wants this.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM equity ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else {}
+
     def decisions(self, limit: int = 200, action: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM decisions"
         params: list[Any] = []

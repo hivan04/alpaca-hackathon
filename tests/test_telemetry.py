@@ -51,6 +51,27 @@ def test_equity_snapshots_build_a_curve(tmp_path):
     assert metrics.max_drawdown_pct < 0
 
 
+def test_latest_snapshot_is_the_newest_row_not_the_first(tmp_path):
+    """`equity_series` is ASC for the curve, so LIMIT 1 there is the OLDEST row.
+
+    Reading it that way would pin the money line to the first $100,000 of the
+    week for the whole week - a stale number that never moves is worse than no
+    number, because it looks like a working readout.
+    """
+    journal = journal_at(tmp_path)
+    for i, equity in enumerate([100_000, 101_000, 99_500, 100_199.65]):
+        journal.snapshot(AccountSnapshot(
+            equity=equity, last_equity=100_000, cash=equity,
+            asof=dt.datetime(2026, 9, 2, 10 + i, tzinfo=dt.timezone.utc),
+        ))
+    assert journal.latest_snapshot()["equity"] == 100_199.65
+    assert journal.equity_series(limit=1)[0]["equity"] == 100_000   # the trap
+
+
+def test_latest_snapshot_is_empty_before_the_first_cycle(tmp_path):
+    assert journal_at(tmp_path).latest_snapshot() == {}
+
+
 def test_report_html_is_self_contained(tmp_path):
     journal = journal_at(tmp_path)
     journal.snapshot(AccountSnapshot(equity=100_000, last_equity=100_000))

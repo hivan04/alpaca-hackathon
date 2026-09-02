@@ -59,6 +59,11 @@ def _age(ts: Any) -> dt.timedelta | None:
     return dt.datetime.now(UTC) - when
 
 
+#: Public name for `_age`, for renderers that need to date a value they were
+#: handed (the money line stamps its own age).
+age_of = _age
+
+
 def human_age(delta: dt.timedelta | None) -> str:
     if delta is None:
         return "never"
@@ -70,6 +75,55 @@ def human_age(delta: dt.timedelta | None) -> str:
     if seconds < 86400:
         return f"{seconds // 3600}h {(seconds % 3600) // 60}m ago"
     return f"{seconds // 86400}d ago"
+
+
+def human_duration(delta: dt.timedelta | None) -> str:
+    """How long a process HAS BEEN RUNNING, as a span - never "N ago".
+
+    Split from `human_age` on 1 Sep because the process table mixed the two and
+    the column could not be read. pm2 rows went through `human_age` and printed
+    "3d ago"; the `ps` fallback passed `etime` through untouched and printed
+    "08:10:18". One column, two formats, and "3d ago" against a process reads
+    as the moment it last started rather than how long it has been up - which
+    is the same fact, but only if you already know that. It says "3d 4h" now,
+    and the header says `Running for`, so the question does not arise.
+    """
+    if delta is None:
+        return "-"
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"
+
+
+def _parse_etime(elapsed: str) -> dt.timedelta | None:
+    """`ps -o etime` -> timedelta. Format is [[DD-]hh:]mm:ss."""
+    text = (elapsed or "").strip()
+    if not text:
+        return None
+    days = 0
+    if "-" in text:
+        head, _, text = text.partition("-")
+        try:
+            days = int(head)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 2:
+        hours, minutes, secs = 0, nums[0], nums[1]
+    elif len(nums) == 3:
+        hours, minutes, secs = nums
+    else:
+        return None
+    return dt.timedelta(days=days, hours=hours, minutes=minutes, seconds=secs)
 
 
 # --------------------------------------------------------------------------- #
@@ -93,15 +147,21 @@ def processes(profile: str) -> list[dict[str, Any]]:
                     continue
                 env = entry.get("pm2_env") or {}
                 started = env.get("pm_uptime")
+                state = env.get("status")
                 found.append({
                     "source": "pm2",
                     "name": name,
                     "pid": entry.get("pid"),
-                    "status": env.get("status"),
+                    "status": state,
                     "restarts": env.get("restart_time"),
-                    "uptime": human_age(
+                    # pm2 keeps `pm_uptime` on a STOPPED entry, where it marks
+                    # the last state change and is not a run length at all. The
+                    # 1 Sep board printed "3d ago" beside a stopped dashboard,
+                    # which reads as "up for three days" for a process that was
+                    # not running. A stopped row has no duration and says so.
+                    "running_for": human_duration(
                         dt.timedelta(milliseconds=max(0, _now_ms() - int(started)))
-                        if started else None
+                        if started and state == "online" else None
                     ),
                 })
         except Exception:  # noqa: BLE001 - a status command never raises
@@ -128,14 +188,21 @@ def processes(profile: str) -> list[dict[str, Any]]:
             if any(str(r.get("pid")) == str(pid) for r in found):
                 continue    # already reported by pm2; do not double-count it
             found.append({
-                "source": "ps", "name": args[:60], "pid": pid,
-                "status": "online", "restarts": None, "uptime": elapsed,
+                # `name` is truncated for the table; `argv` is not. Classifying
+                # from the truncated name put the account marker past the cut
+                # on a long interpreter path and every such row reported its
+                # profile as "-".
+                "source": "ps", "name": args[:60], "argv": args, "pid": pid,
+                "status": "online", "restarts": None,
+                # `etime` is already a span; normalise it so both sources
+                # render identically rather than one clock and one phrase.
+                "running_for": human_duration(_parse_etime(elapsed)),
             })
     # Both books share a process table; the profile is shown per row rather
     # than filtered on, because "the judged loop is down and the dev one is up"
     # is exactly the state this command exists to make obvious.
     for row in found:
-        row["profile"] = _profile_of(str(row["name"]))
+        row["profile"] = _profile_of(str(row.get("argv") or row["name"]))
     return found
 
 
@@ -155,8 +222,29 @@ def _profile_of(name: str) -> str:
 _AGENT_PROCESS = re.compile(r"(oaa(?:\.cli)?\s+run\b|oaa-(?:judged|dev)\b)")
 
 
+#: Commands that MENTION a loop without being one. `pm2 logs oaa-judged`
+#: carries the literal string `oaa-judged` in its argv, so it matched
+#: `_AGENT_PROCESS` and a log tail was reported as a running trading loop -
+#: which is how the 1 Sep board printed UP with the judged runner's state
+#: unknown.
+_NOT_AN_AGENT = ("streamlit", "grep", "tail ", "less ")
+
+#: This CANNOT be a blanket "pm2" exclusion, and the first attempt at it was.
+#: On a host where pm2 SUPERVISES the loop, the supervised process's own argv
+#: mentions pm2 and it is the real thing - `node /usr/lib/pm2 oaa-judged` is
+#: the agent, and `test_only_the_trading_loop_counts_as_the_agent_process`
+#: has pinned exactly that since before this bug existed. What separates a
+#: tail from a loop is not the tool, it is the VERB: a read-only pm2
+#: subcommand observes a process, it does not run one.
+_PM2_READONLY = re.compile(
+    r"\bpm2\b.*\b(logs?|list|ls|jlist|prettylist|monit|describe|show|status|info)\b"
+)
+
+
 def _looks_like_agent(args: str) -> bool:
-    if "streamlit" in args or "grep" in args:
+    if any(token in args for token in _NOT_AN_AGENT):
+        return False
+    if _PM2_READONLY.search(args):
         return False
     return bool(_AGENT_PROCESS.search(args))
 
@@ -204,6 +292,19 @@ def _next_open(now: dt.datetime, market_open: dt.time) -> str:
     return candidate.strftime("%a %d %b %H:%M %Z")
 
 
+def _money(journal: Any, report: dict[str, Any] | None) -> dict[str, Any]:
+    """Equity, day P&L and the position count, newest first, never raising."""
+    try:
+        snap = journal.latest_snapshot()
+    except Exception:      # an older Journal, or an unreadable db
+        snap = None
+    if snap:
+        return {**snap, "source": "snapshot"}
+    if report:
+        return {**report, "source": "report"}
+    return {}
+
+
 def collect(settings: Any, journal: Any, profile: str) -> dict[str, Any]:
     """Everything `oaa status` shows, as plain data. Never raises."""
     # 2000, raised from 400 on 1 Sep. `by_kind` below picks the most recent
@@ -234,7 +335,8 @@ def collect(settings: Any, journal: Any, profile: str) -> dict[str, Any]:
     state = "offline"
     if online:
         if not market.get("open", True):
-            # Market shut: uptime is the whole story. Silence is the schedule
+            # Market shut: whether a process is up is the whole story. Silence
+            # is the schedule
             # working, so it is never held against the process here.
             state = "idle"
         elif journal_age is None or journal_age < STALE_AFTER:
@@ -267,7 +369,13 @@ def collect(settings: Any, journal: Any, profile: str) -> dict[str, Any]:
         "discovery": _discovery(by_kind.get("discovery")),
         "macro": _macro(by_kind.get("macro_view")),
         "agent": _agent(by_kind.get("agent_run")),
-        "report": by_kind.get("report") or {},
+        # The money line. `report` is written once a day by the 16:10 cycle, so
+        # reading it means the screen shows the account as it stood before the
+        # open - on 2 Sep it printed $100,000.00 / 0 positions at 14:22 ET with
+        # five positions on and +$199 on the day. `snapshot()` writes the equity
+        # table EVERY cycle, so that is the live number; the report event stays
+        # as the fallback for a run whose sqlite has no snapshot yet.
+        "report": _money(journal, by_kind.get("report")),
         "startup": by_kind.get("startup") or {},
         "decisions": _decisions(journal),
         "recent": [

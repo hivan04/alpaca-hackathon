@@ -49,6 +49,7 @@ _NOTABLE_EVENTS = (
     "discovery",
     "macro_view",
     "switchboard",
+    "operator_note",
 )
 
 
@@ -378,6 +379,9 @@ def _describe_event(event: dict[str, Any]) -> str | None:
         return f"discovery source failure: {', '.join(errors)}" if errors else None
     if kind == "switchboard":
         return f"switchboard: on={event.get('turned_on')} off={event.get('turned_off')}"
+    if kind == "operator_note":
+        text = str(event.get("text") or "").strip()
+        return f"operator note: {text}" if text else None
     return None
 
 

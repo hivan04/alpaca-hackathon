@@ -16,7 +16,9 @@ from oaa.strategies.events.params import load_params
 
 def test_the_deadline_is_parsed_from_the_shipped_config():
     params = load_params("config/strategies/earnings_event.yaml")
-    assert params.no_entry_after_at() == dt.time(15, 55)
+    # 15:58 for the 2-3 Sep arms only; restores to 15:55. See the dated note
+    # in config/strategies/earnings_event.yaml.
+    assert params.no_entry_after_at() == dt.time(15, 58)
 
 
 def test_the_deadline_sits_after_the_arm_and_before_the_close():

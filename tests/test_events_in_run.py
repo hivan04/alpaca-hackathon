@@ -373,8 +373,9 @@ def test_the_engine_is_built_with_the_firewall_bypassed(settings, chain, bars, f
     ("when", "refused"),
     [
         ("15:50", False),   # the scheduled arm
-        ("15:55", False),   # exactly on the deadline still trades
-        ("15:56", True),    # one minute past
+        ("15:55", False),   # inside the widened window
+        ("15:58", False),   # exactly on the deadline still trades
+        ("15:59", True),    # one minute past
         ("17:00", True),    # a machine woken after the close
         ("09:30", False),   # a morning arm for a before-open print
     ],

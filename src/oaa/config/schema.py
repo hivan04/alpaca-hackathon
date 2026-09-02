@@ -246,6 +246,21 @@ class ExecutionConfig(Base):
     #: a limit priced off a stale touch may not be marketable at the real
     #: market and needs time to be reached.
     fill_settle_seconds: int = 20
+    #: Extra aggression BEYOND the far touch, as a fraction of it, applied only
+    #: when `limit_price_ratio` already prices at the touch. It exists because
+    #: `option_feed: indicative` serves DELAYED quotes: the "ask" being crossed
+    #: is up to fifteen minutes old, so a limit at that ask is not marketable
+    #: at the real market. The error is biased, not random - `intraday_momentum`
+    #: enters AFTER a VWAP cross, so the live offer has moved away from the
+    #: stale one by roughly the move that triggered the entry. Every 2 Sep order
+    #: died as `unfilled after 20s at <the stale ask>`. See
+    #: `claude/limits-priced-off-a-delayed-feed.md`.
+    #: 0.0 disables it. Irrelevant on a real-time feed - set it to 0 the day
+    #: `option_feed` becomes `opra`.
+    stale_quote_pad_pct: float = 0.0
+    #: Floor for the same pad, in dollars of premium, so a cheap contract still
+    #: clears a tick.
+    stale_quote_pad_min: float = 0.0
     dry_run: bool = True
 
 
@@ -499,6 +514,14 @@ class TelemetryConfig(Base):
     report_dir: str = "reports"
     snapshot_interval_seconds: int = 300
     capture_screenshots: bool = False
+    #: Notes an operator wants carried into EVERY session report until removed.
+    #: Journalled as `operator_note` at runner start rather than injected at
+    #: render time, so `collect_session` stays a pure function of the journal
+    #: and a note is attributed only to the sessions it was actually in force
+    #: for. They surface in the report's `## Session log` and in the critic's
+    #: brief, which is the point: a config change the critic cannot see is a
+    #: change it will keep recommending.
+    operator_notes: list[str] = Field(default_factory=list)
 
 
 class AppConfig(Base):

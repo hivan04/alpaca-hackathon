@@ -395,7 +395,8 @@ oaa mcp-tools           list the tools the Alpaca MCP server exposes
 oaa backtest            replay a window against real bars
 oaa runs                the backtest history on disk
 oaa dashboard           the operator dashboard (Streamlit, six tabs)
-oaa serve               the public dashboard (the submission's Application URL)
+oaa serve               preview the FastAPI page locally (NOT the submitted URL -
+                        that is https://eventus-algo.streamlit.app)
 oaa config-dump         the fully merged configuration
 ```
 

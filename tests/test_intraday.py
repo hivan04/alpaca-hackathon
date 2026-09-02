@@ -278,9 +278,28 @@ def test_the_lunch_window_is_skipped(intraday_chain, intraday_bars, attention, a
 
 def test_extremely_rich_vol_declines_the_trade(intraday_chain, intraday_bars, attention, account):
     """Paying for a move that is already priced in is a negative-expectancy way
-    to be right. This row of the selection table is worth a slide."""
+    to be right. This row of the selection table is worth a slide.
+
+    Pinned against an EXPLICIT ceiling rather than the shipped one. As of 1 Sep
+    `selection.iv_rank_no_trade_above` is 1.01 in the yaml - off - because the
+    live IV rank is pinned at 100% by a seed/observation basis mismatch, so the
+    gate was refusing every candidate on a number nothing could measure. See
+    `claude/iv-rank-pinned-by-a-basis-mismatch.md`.
+
+    The MECHANISM is what this test protects, so it sets the ceiling it tests
+    and survives that config change. The second half pins what is actually
+    DEPLOYED, so the live behaviour is never a surprise and flipping the config
+    back cannot happen silently.
+    """
     strat, ctx = scenario(intraday_chain, intraday_bars, attention, account, iv_rank=0.95)
-    assert strat.generate(ctx) == []
+    strat.params["selection"]["iv_rank_no_trade_above"] = 0.85
+    assert strat.generate(ctx) == [], "with a ceiling, rich vol must decline"
+
+    strat, ctx = scenario(intraday_chain, intraday_bars, attention, account, iv_rank=0.95)
+    assert strat.generate(ctx), (
+        "the shipped ceiling is OFF (1.01) - rich vol trades. If this fails, the "
+        "ceiling was restored: revert the first half to the shipped value too."
+    )
 
 
 def test_the_universe_is_index_only(intraday_chain, intraday_bars, attention, account):

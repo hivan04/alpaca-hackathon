@@ -231,3 +231,71 @@ def test_the_chase_still_sends_one_resting_order_per_step(monkeypatch):
     assert broker.submitted == len(broker.cancelled), (
         "every submitted order must be cancelled before the next is sent"
     )
+
+
+# --- the stale-quote pad, 2 Sep ------------------------------------------- #
+# Three orders posted at exactly the quoted ask and none filled, because the
+# free `indicative` feed quotes up to fifteen minutes late. The pad prices
+# past the stale touch; the quantity guard stops it spending unapproved risk.
+# See `claude/limits-priced-off-a-delayed-feed.md`.
+
+
+def test_the_pad_prices_past_the_far_touch_only_at_full_aggression():
+    idea = spread_idea()
+    _, worst = structure_bid_ask(idea)
+
+    at_touch = limit_price_for(idea, 1.0, step=0)
+    padded = limit_price_for(idea, 1.0, step=0, pad_pct=0.10, pad_min=0.02)
+    halfway = limit_price_for(idea, 0.5, step=0, pad_pct=0.10, pad_min=0.02)
+
+    assert at_touch == pytest.approx(worst, abs=0.01)
+    assert padded > at_touch
+    assert padded == pytest.approx(worst * 1.10, abs=0.01)
+    # Below the touch there is still room to walk; the pad must not front-run it.
+    assert halfway == limit_price_for(idea, 0.5, step=0)
+
+
+def test_the_pad_floor_clears_a_tick_on_a_cheap_contract():
+    cheap = make_quote(strike=500, bid=0.10, ask=0.12)
+    idea = TradeIdea(
+        symbol="SPY",
+        strategy="test",
+        structure=StructureType.SINGLE_LONG,
+        legs=[Leg(symbol=cheap.symbol, side=Side.BUY, intent=Intent.BUY_TO_OPEN,
+                  quote=cheap, limit_price=cheap.mid)],
+        net_price=0.11,
+        max_loss=11.0,
+    )
+    # 10% of 0.12 is 1.2c, which rounds back onto the touch. The floor is why
+    # a cheap contract still gets a real pad.
+    assert limit_price_for(idea, 1.0, pad_pct=0.10, pad_min=0.02) == pytest.approx(0.14)
+
+
+def test_the_pad_shrinks_the_quantity_rather_than_the_risk_budget(cfg):
+    cfg.execution.dry_run = False
+    cfg.execution.chase.enabled = False
+    cfg.execution.limit_price_ratio = 1.0
+    cfg.execution.stale_quote_pad_pct = 0.10
+    cfg.execution.stale_quote_pad_min = 0.02
+    router = ExecutionRouter(cfg, SimBroker(cfg))
+    idea = spread_idea()          # max_loss 400 per unit at a net price of 4.00
+
+    ticket = router.build_ticket(idea, RiskVerdict.approve(6), step=0)
+
+    approved = 6 * idea.max_loss
+    padded_unit_risk = idea.max_loss + (ticket.limit_price - idea.net_price) * 100
+    assert ticket.quantity < 6
+    assert ticket.quantity * padded_unit_risk <= approved
+
+
+def test_the_pad_never_sizes_a_trade_out_of_existence(cfg):
+    cfg.execution.dry_run = False
+    cfg.execution.chase.enabled = False
+    cfg.execution.limit_price_ratio = 1.0
+    cfg.execution.stale_quote_pad_pct = 0.10
+    cfg.execution.stale_quote_pad_min = 0.02
+    router = ExecutionRouter(cfg, SimBroker(cfg))
+
+    ticket = router.build_ticket(spread_idea(), RiskVerdict.approve(1), step=0)
+
+    assert ticket.quantity == 1

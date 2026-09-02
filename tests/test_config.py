@@ -31,7 +31,17 @@ def test_strategy_params_are_inlined_from_files():
     # replayed candidates. The floor still has to be a floor, though - a carry
     # book that sells premium at median richness is not a carry book, so pin a
     # band rather than deleting the assertion.
-    assert 0.30 <= carry.params["premium_gate"]["iv_rank_min"] <= 0.50
+    # NEUTRALISED to 0.0 on 1 Sep: the rank this floor tests is pinned at 100%
+    # by the seed/observation basis mismatch, so at 0.35 it was not selecting
+    # rich premium, it was passing everything while still reading as the
+    # thesis. Both states are named so neither can drift in unnoticed.
+    iv_rank_min = carry.params["premium_gate"]["iv_rank_min"]
+    assert iv_rank_min == 0.0 or 0.30 <= iv_rank_min <= 0.50, (
+        "iv_rank_min is either OFF (0.0, while the rank is unmeasurable) or a "
+        "real floor in 0.30-0.50; anything else is silent drift"
+    )
+    # Either way, this is the gate actually carrying the premium thesis.
+    assert carry.params["premium_gate"]["iv_rv_spread_min"] >= 0.02
     assert 7 <= carry.params["structures"]["dte_min"] <= carry.params["structures"]["dte_max"] <= 14
 
 
@@ -42,32 +52,65 @@ def test_the_books_are_the_three_the_firewall_knows_about():
     assert {s.book for s in cfg.strategies} <= {b.value for b in Book}
 
 
-def test_the_submission_controls_are_set_not_left_to_memory():
-    """`submission_flatten_utc` is set in config on purpose: relying on
-    remembering to trigger a flatten manually on the day is how a book ends up
-    marked-to-mid at judging.
+def test_the_date_gates_move_together_or_not_at_all():
+    """The submission date gates are OFF as of 1 Sep, deliberately.
 
-    The GLOBAL `entry_cutoff_utc` was removed on 29 Aug - it gated every book
-    when its reasoning only ever applied to the multi-session carry book, and
-    it silently deleted every event after 2 Sep 20:00 UTC. It is now null, and
-    must stay null: a value here re-gates the event book. The carry book's own
-    cutoff is asserted below."""
+    `submission_flatten_utc` fired one flatten cycle and then refused every
+    book for the life of the process (`lock.py:258`). The agent is wanted
+    running past the judged window, so all three date gates are null and the
+    book is closed by hand instead - see
+    `claude/submission-flatten-disabled.md`.
+
+    So this no longer asserts "the flatten is set" - that would pin a policy
+    that was reversed on purpose, and a test that contradicts a decision is a
+    red build saying nothing about the code.
+
+    What it protects instead is the INVARIANT, which survives either policy:
+    the flatten and the carry book's own entry cutoff move together. A flatten
+    with no carry cutoff lets the resident book open a 3-10 session structure
+    that the flatten then liquidates early - exactly the failure the cutoff
+    exists to prevent. A carry cutoff with no flatten silences the resident
+    book for a deadline that no longer exists, which is what it was doing on
+    1 Sep. Turning either back on is therefore a complete change or a caught
+    one.
+    """
     cfg = load_config()
-    assert cfg.management.submission_flatten_utc
+    carry = next(s for s in cfg.strategies if s.name == "vol_carry")
+    flatten = cfg.management.submission_flatten_utc
+    carry_cutoff = carry.params.get("exits", {}).get("entry_cutoff_utc")
+
+    # Null whatever else happens: its reasoning only ever applied to the carry
+    # book, and a value here re-gates the events book. Removed 29 Aug.
     assert cfg.management.entry_cutoff_utc is None
 
+    if flatten is None:
+        assert carry_cutoff is None, (
+            "the carry cutoff's whole justification is 'do not open a structure "
+            "that cannot decay before the submission flatten'. With no flatten "
+            "it gates nothing and stands the resident book down for free."
+        )
+    else:
+        assert carry_cutoff, "a submission flatten needs the carry book's own cutoff"
+        assert carry_cutoff < flatten, (
+            "the carry book must stop OPENING before the flatten closes everything"
+        )
 
-def test_the_carry_book_keeps_its_own_entry_cutoff():
-    """Carry structures hold 3-10 sessions, so one opened late cannot decay
-    before `submission_flatten_utc` liquidates it. That constraint is real and
-    belongs to the carry book alone - it must not migrate back to a global
-    gate."""
-    cfg = load_config()
-    carry = [s for s in cfg.strategies if s.name == "vol_carry"]
-    assert carry, "vol_carry strategy missing from config"
-    cutoff = carry[0].params.get("exits", {}).get("entry_cutoff_utc")
-    assert cutoff, "the carry book must keep its own entry cutoff"
-    assert cutoff < cfg.management.submission_flatten_utc
+
+def test_closing_the_book_by_hand_is_actually_available():
+    """`oaa flatten` is the replacement for the automatic flatten.
+
+    With every date gate null, nothing closes the book at any time. That is a
+    considered trade-off only while the manual control exists; if this verb is
+    renamed or dropped, the nulls quietly become an account with no terminal
+    event and no way to produce one on demand.
+    """
+    from oaa.cli import app
+
+    names = {
+        command.name or (command.callback.__name__ if command.callback else "")
+        for command in app.registered_commands
+    }
+    assert "flatten" in names, f"no `oaa flatten` command; found {sorted(names)}"
 
 
 def test_unknown_keys_are_rejected():

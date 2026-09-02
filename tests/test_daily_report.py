@@ -26,10 +26,12 @@ from oaa.core.types import (
     RiskVerdict,
 )
 from oaa.telemetry.daily import (
+    _critic_brief,
     _parse_bullets,
     collect_session,
     critique,
     generate_daily_report,
+    render_markdown,
     session_bounds,
 )
 from oaa.telemetry.journal import Journal
@@ -162,6 +164,28 @@ def test_the_gate_funnel_is_aggregated_by_gate_book_and_reason(tmp_path):
     assert session.rejections_by_book == {"intraday": 3, "carry": 1}
     assert session.symbols_examined == ["QQQ", "SPY"]
     assert max(session.rejections_by_reason.values()) == 3
+
+
+@freeze_time(FROZEN)
+def test_an_operator_note_reaches_the_session_log_and_the_critic(tmp_path):
+    """A deliberate config change has to be visible to the reviewer.
+
+    The intraday IV-rank ceiling and the carry IV-rank floor were both switched
+    off on 1 Sep because the rank they read is pinned at 100% by a basis
+    mismatch. Without a note the critic sees two gates it would recommend
+    tuning and recommends them every session, and a reader of the report sees a
+    book that stopped filtering for no stated reason.
+    """
+    journal = journal_at(tmp_path)
+    journal.event("operator_note", text="iv_rank gates are OFF - the rank is unmeasurable")
+    journal.event("operator_note", text="   ")           # blank notes are not notes
+    session = collect_session(journal, DAY, timezone=ET)
+
+    assert session.notes == ["operator note: iv_rank gates are OFF - the rank is unmeasurable"]
+    assert "iv_rank gates are OFF" in render_markdown(session, [], "test")
+    assert "iv_rank gates are OFF" in _critic_brief(session), (
+        "the critic must see the note, or it recommends the change that was already made"
+    )
 
 
 @freeze_time(FROZEN)

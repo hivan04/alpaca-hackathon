@@ -184,7 +184,8 @@ def _render_status(snap: dict) -> None:
         )
 
     if snap["processes"]:
-        table = Table("Process", "Account", "PID", "Status", "Uptime", "Restarts",
+        table = Table("Process", "Account", "PID", "Status", "Running for",
+                      "Restarts",
                       title="processes")
         for proc in snap["processes"]:
             account = proc.get("profile") or "-"
@@ -192,7 +193,7 @@ def _render_status(snap: dict) -> None:
                 account = f"[bold]{account}[/]"
             table.add_row(
                 str(proc["name"])[:40], account, str(proc.get("pid") or "-"),
-                str(proc.get("status") or "-"), str(proc.get("uptime") or "-"),
+                str(proc.get("status") or "-"), str(proc.get("running_for") or "-"),
                 str(proc.get("restarts") if proc.get("restarts") is not None else "-"),
             )
         console.print(table)
@@ -251,10 +252,18 @@ def _render_status(snap: dict) -> None:
     # -- money -------------------------------------------------------------- #
     report = snap["report"]
     if report:
+        # Stamped with its age on purpose: this line read $100,000.00 / 0
+        # positions for nine hours on 2 Sep because it came from the previous
+        # day's report event, and nothing on screen said so.
+        from oaa.app.status import age_of
+
+        stamp = human_age(age_of(report.get("ts")))
+        if report.get("source") == "report":
+            stamp += ", from the daily report - no snapshot yet"
         console.print(
             f"[bold]account[/] equity ${report.get('equity', 0):,.2f} | "
             f"day P&L {report.get('day_pl', 0):+,.2f} | "
-            f"{report.get('positions', 0)} position(s)"
+            f"{report.get('positions', 0)} position(s) [dim]({stamp})[/]"
         )
 
     decisions = snap["decisions"]
@@ -891,7 +900,13 @@ def serve(
     config: str | None = _CONFIG,
     port: int | None = typer.Option(None),
 ) -> None:
-    """Run the public dashboard - the submission's Application URL."""
+    """Preview the FastAPI public page locally.
+
+    NOT the submission's Application URL, whatever this docstring said until
+    1 Sep. That is the Streamlit Community Cloud deploy of
+    `public_dashboard.py` - https://eventus-algo.streamlit.app - and the pm2
+    entry that used to run this (`oaa-dashboard`) was removed the same day.
+    """
     import uvicorn
 
     from oaa.app.server import create_app

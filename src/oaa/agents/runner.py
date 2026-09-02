@@ -116,6 +116,7 @@ class Runner:
             self.schedule.monitor_interval_seconds,
         )
         self.orch.journal.event("runner_start", cycles=[c.name for c in self.schedule.cycles])
+        self._journal_operator_notes()
         self._warn_if_reasoning_is_missing()
 
         while not self._stop:
@@ -151,6 +152,20 @@ class Runner:
 
         log.info("runner stopped")
         self.orch.journal.event("runner_stop")
+
+    def _journal_operator_notes(self) -> None:
+        """Put `telemetry.operator_notes` into the journal, once per start.
+
+        A standing note about a disabled gate has to reach the daily report, or
+        the critic spends every session recommending a change that was already
+        made deliberately. Journalling it (rather than rendering it in) keeps
+        the report a pure function of the journal and dates the note to the
+        sessions it actually applied to.
+        """
+        for note in getattr(self.cfg.telemetry, "operator_notes", None) or []:
+            text = str(note).strip()
+            if text:
+                self.orch.journal.event("operator_note", text=text)
 
     def _warn_if_reasoning_is_missing(self) -> None:
         """Say at START-UP whether the agent can actually reason.

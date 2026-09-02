@@ -55,10 +55,17 @@ class ExecutionRouter:
 
         quantity = verdict.adjusted_quantity or idea.quantity
         price = (
-            limit_price_for(idea, self.exec_cfg.limit_price_ratio, step)
+            limit_price_for(
+                idea,
+                self.exec_cfg.limit_price_ratio,
+                step,
+                pad_pct=self.exec_cfg.stale_quote_pad_pct,
+                pad_min=self.exec_cfg.stale_quote_pad_min,
+            )
             if self.exec_cfg.order_type == "limit"
             else None
         )
+        quantity = self._quantity_within_approved_risk(idea, quantity, price)
         return OrderTicket(
             idea_id=idea.id,
             client_order_id=self.broker.client_order_id(idea, suffix=str(step)),
@@ -141,6 +148,39 @@ class ExecutionRouter:
 
         assert ticket is not None
         return ExecutionResult(ticket=ticket, fill=None, attempts=max_steps, error=last_error)
+
+    def _quantity_within_approved_risk(
+        self, idea: TradeIdea, quantity: int, price: float | None
+    ) -> int:
+        """Do not let the stale-quote pad spend risk the engine never approved.
+
+        The sizer chose `quantity` against `idea.max_loss`, which is priced at
+        the idea's own net price. Paying above that raises the max loss by the
+        difference, once per unit per multiplier - so an approved 0.9% of
+        equity can quietly cross a 1.0% cap on the way to the broker. Shrink
+        the quantity instead of repricing, because the whole point of the pad
+        is that the price is the thing that must not move back.
+
+        Floored at one contract: refusing to trade at all is the failure this
+        pad exists to fix, and a single lot's overage is bounded by the pad.
+        """
+        if price is None or idea.max_loss is None or quantity <= 0:
+            return quantity
+        multiplier = 1 if idea.is_crypto else 100
+        extra = (price - idea.net_price) * multiplier
+        if extra <= 0:
+            return quantity
+        unit_risk = idea.max_loss + extra
+        budget = idea.max_loss * quantity
+        allowed = max(int(budget // unit_risk), 1)
+        if allowed >= quantity:
+            return quantity
+        log.info(
+            "limit padded to %.2f: %s quantity %d -> %d to stay inside the "
+            "approved $%.0f of risk",
+            price, idea.symbol, quantity, allowed, budget,
+        )
+        return allowed
 
     def _existing_fill(self, client_order_id: str) -> Fill | None:
         getter = getattr(self.broker, "order_by_client_id", None)

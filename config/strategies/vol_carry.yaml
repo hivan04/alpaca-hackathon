@@ -101,7 +101,19 @@ premium_gate:
   # is a lottery ticket. 35% sells less-rich premium, so expect a lower win
   # rate and a smaller credit per trade; the IV-RV spread gate below is what
   # still has to be cleared, and it is the one carrying the actual edge.
-  iv_rank_min: 0.35
+  # NEUTRALISED 1 Sep, and read the note above with this in mind: the rank this
+  # floor tests is pinned at 100% by the seed/observation basis mismatch in
+  # `claude/iv-rank-pinned-by-a-basis-mismatch.md`. At 0.35 the gate was not
+  # selecting rich premium - it was passing EVERYTHING, unconditionally, while
+  # still reading in this file as though it were the thesis. A refusal shows up
+  # in the journal; a false positive does not, which is why this direction is
+  # the more dangerous of the two the same broken number produces.
+  #
+  # 0.0 does not change behaviour - it makes the existing behaviour honest, and
+  # hands the premium decision entirely to `iv_rv_spread_min` below, which is
+  # measured on a consistent basis and is where the edge was always claimed to
+  # live. RESTORE to 0.35 once the IV history is rebuilt on one basis.
+  iv_rank_min: 0.0                 # off - the rank is unmeasurable, see above
   iv_rank_lookback_days: 252
   iv_rv_spread_min: 0.03           # 3 vol points
 

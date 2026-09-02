@@ -1,9 +1,8 @@
 /**
  * PM2 process definitions.
  *
- *   pm2 start deploy/ecosystem.config.js --only oaa-dev      # throwaway account
  *   pm2 start deploy/ecosystem.config.js --only oaa-judged   # THE judged account
- *   pm2 start deploy/ecosystem.config.js --only oaa-dashboard
+ *   pm2 start deploy/ecosystem.config.js --only oaa-control   # operator dashboard
  *   pm2 logs oaa-judged
  *   pm2 save && pm2 startup            # survive a host reboot
  *
@@ -60,14 +59,13 @@ module.exports = {
       out_file: "logs/control.out.log",
       error_file: "logs/control.err.log",
     },
-    {
-      ...base,
-      name: "oaa-dashboard",
-      script: PY,
-      args: "serve --profile judged",
-      env: { OAA_PROFILE: "judged", PYTHONUNBUFFERED: "1", TZ: "America/New_York" },
-      out_file: "logs/dashboard.out.log",
-      error_file: "logs/dashboard.err.log",
-    },
+    // oaa-dashboard removed 1 Sep. It ran `oaa serve`, the FastAPI page that
+    // USED to be the submission's Application URL. That URL is now the
+    // Streamlit Community Cloud deploy of `public_dashboard.py` -
+    // https://eventus-algo.streamlit.app - per
+    // `claude/public-dashboard-split.md`. The process had been stopped for
+    // three days and the pm2 entry survived only as a dead row that the
+    // status board then reported an uptime against. `oaa serve` remains a
+    // command for previewing that page locally; it is nobody's public URL.
   ],
 };

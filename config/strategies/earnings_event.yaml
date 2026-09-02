@@ -167,7 +167,20 @@ technicals:
   squeeze_max_percentile: 0.25
   # false records the reading without vetoing - run a replay both ways to
   # measure what the gate actually costs before trusting it.
-  require_squeeze: true
+  #
+  # 2 SEP: OFF (false). RESTORE TO true AFTER THE 3 SEP ARM.
+  # The squeeze gate asks for Bollinger width in the bottom 25th percentile of
+  # its own 100-bar history. A name carrying an 8-14% implied move into a dated
+  # print is, by construction, not coiled - the catalyst is already in the
+  # tape. On the four names arming tonight (AVGO 8.13, SNOW 12.36, AI 13.87,
+  # NTAP n/a) this is a near-certain veto on all of them, and the events book
+  # has never once reached a structure decision on the judged account: 8 of its
+  # 9 events_arm records are `past no_entry_after` and the 9th abstained.
+  # This is a SETUP filter, not a risk control - max loss is still bounded by
+  # the debit structure and by sizing.nightly_risk_budget_pct (0.04). Deciding
+  # to trade a catalyst that the width filter was built to avoid is a
+  # deliberate, dated exception, not a re-tune.
+  require_squeeze: false
 
   # --- RSI: the VETO, one-sided and only at extremes ------------------------
   # A short into a tape already at 18 is a short into the bounce. RSI at 60
@@ -261,7 +274,16 @@ structure:
 schedule:
   # US/Eastern. Arm into the close of the session before an after-close print.
   arm_time: "15:45"
-  no_entry_after: "15:55"
+  # 2 SEP: WIDENED 15:55 -> 15:58. RESTORE TO "15:55" AFTER THE 3 SEP ARM.
+  # The cycle fires at 15:50 (config/default.yaml `events_arm`), so the usable
+  # window was five minutes. On 2 Sep the host logged 12 `snapshot failed`
+  # warnings - No route to host, Network is unreachable, DNS failure - so a
+  # single retry inside those five minutes costs the night, and all 8 of the
+  # book's historical stand-downs are `past no_entry_after`. Three more minutes
+  # buys margin against the network, not against the reasoning: the guard still
+  # refuses a woken-at-17:00 machine, which is the case it was written for, and
+  # 15:58 is still inside the session.
+  no_entry_after: "15:58"
   # Close into the post-print IV collapse, not at the open - the first minutes
   # are the widest quotes of the day.
   exit_time: "09:45"

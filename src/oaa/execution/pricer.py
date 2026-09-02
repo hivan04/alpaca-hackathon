@@ -41,10 +41,25 @@ def mid_price(idea: TradeIdea) -> float:
     return round(total, 4)
 
 
-def limit_price_for(idea: TradeIdea, aggression: float = 0.5, step: int = 0) -> float:
+def limit_price_for(
+    idea: TradeIdea,
+    aggression: float = 0.5,
+    step: int = 0,
+    pad_pct: float = 0.0,
+    pad_min: float = 0.0,
+) -> float:
     """Price between mid (aggression=0) and the far touch (aggression=1).
 
     `step` walks further toward the touch on each chase attempt.
+
+    `pad_pct` / `pad_min` push the limit PAST the far touch, and apply only
+    once the ratio has reached the touch. They exist for one reason: on the
+    free `indicative` options feed the touch is a DELAYED quote, so "the ask"
+    is an ask from up to fifteen minutes ago and a limit at it need not be
+    marketable at the real market. `worst` is always on the far side of `mid`
+    in this signed convention (a debit rises toward the ask, a credit rises
+    toward a smaller credit), so more aggressive is always a larger number and
+    the pad is always added.
     """
     best, worst = structure_bid_ask(idea)
     mid = mid_price(idea)
@@ -54,6 +69,9 @@ def limit_price_for(idea: TradeIdea, aggression: float = 0.5, step: int = 0) -> 
     ratio = min(1.0, max(0.0, aggression + 0.25 * step))
     # `worst` is the price at which we are certain to be marketable.
     price = mid + (worst - mid) * ratio
+    if ratio >= 1.0:
+        pad = max(abs(worst) * max(pad_pct, 0.0), max(pad_min, 0.0))
+        price += pad
     return round(price, 2)
 
 
