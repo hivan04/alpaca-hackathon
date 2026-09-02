@@ -7,7 +7,7 @@
     "close_equity": 100000.0,
     "day_pl": 0.0,
     "day_pl_pct": 0.0,
-    "snapshots": 285,
+    "snapshots": 359,
     "open_positions_at_close": 0,
     "cycles_run": {
       "intraday_1015": 1,
@@ -218,7 +218,23 @@
       "watch noted DELL",
       "macro: risk_on, vol expanding",
       "macro: risk_on, vol expanding",
-      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)"
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "macro: neutral, vol stable",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)",
+      "macro: high_dispersion, vol expanding",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)",
+      "operator note: 1 Sep: selection.iv_rank_no_trade_above is OFF (1.01) and premium_gate.iv_rank_min is OFF (0.0). IV rank is pinned at 100% on every symbol because runs/judged/iv_history.json mixes two estimators - 251 seeded days from IVModel over daily PRICE bars (a realized-vol proxy) against a live observation of option-implied ATM vol. Implied sits above realized by the variance risk premium, so the live print lands at the top of its own history and the percentile resolves to 1.0. Measured: on 15 of 20 symbols the last value IS the series maximum. The intraday ceiling was refusing 74 of 154 live candidates on that number; the carry floor was passing everything on it. Both gates are off deliberately - do NOT recommend re-tuning either until the history is rebuilt on one basis. See claude/iv-rank-pinned-by-a-basis-mismatch.md.",
+      "operator note: 1 Sep: the submitted deck (docs/options-agent-strategy.pptx, slides 3, 8 and 16) still states both IV-rank gates as live. The submission is in and is deliberately NOT being changed; the discrepancy is known, not an oversight.",
+      "macro: risk_on, vol expanding",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)",
+      "operator note: 1 Sep: selection.iv_rank_no_trade_above is OFF (1.01) and premium_gate.iv_rank_min is OFF (0.0). IV rank is pinned at 100% on every symbol because runs/judged/iv_history.json mixes two estimators - 251 seeded days from IVModel over daily PRICE bars (a realized-vol proxy) against a live observation of option-implied ATM vol. Implied sits above realized by the variance risk premium, so the live print lands at the top of its own history and the percentile resolves to 1.0. Measured: on 15 of 20 symbols the last value IS the series maximum. The intraday ceiling was refusing 74 of 154 live candidates on that number; the carry floor was passing everything on it. Both gates are off deliberately - do NOT recommend re-tuning either until the history is rebuilt on one basis. See claude/iv-rank-pinned-by-a-basis-mismatch.md.",
+      "operator note: 1 Sep: the submitted deck (docs/options-agent-strategy.pptx, slides 3, 8 and 16) still states both IV-rank gates as live. The submission is in and is deliberately NOT being changed; the discrepancy is known, not an oversight.",
+      "macro: neutral, vol stable",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)"
     ],
     "reasoning_available": true,
     "traded": false,
@@ -227,14 +243,14 @@
   "critique": {
     "author": "featherless / Qwen/Qwen3-32B",
     "bullets": [
-      "Increase intraday momentum sizing threshold from 1.0% to 1.2% of equity to allow trades like QQQ/IWM ($2,126\u2013$2,486 loss) that narrowly exceed current limits",
-      "Reserve capital for the carry book (currently \"no reserved capital\") to enable vol_carry strategies (e.g., DIA iron condors with $546\u2013$668 max loss)",
-      "Expand IV rank ceiling above 85% for vol_carry strategies, as 79 rejections cite IV rank 100% hitting the ceiling despite high IV-RV spreads (7.5\u20137.7%)",
-      "Adjust liquidity filter criteria for SPY/IWM/qqq: 25+ symbols failed due to \"no contracts survived,\" suggesting overly strict OI or bid-ask requirements",
-      "Narrow lunch window (11:30\u201313:30) to 12:00\u201313:00, as 112 rejections occurred in early/midday but 40+ were at 12:34\u201313:03 (post-lunch recovery period)",
-      "Add IV rank data fallback for symbols like TLT/XLE (112 \"no IV rank available\" rejections) by using sector ETF proxies or historical volatility estimates",
-      "Align intraday book leasing ($15,000) with sizing rules: 1.0% of $100k = $1,000 risk per trade, but leased capital is 15x higher, suggesting misalignment between risk and capital allocation"
+      "Increase intraday momentum sizing threshold from 1.0% to 1.2% of equity to allow trades like QQQ/IWM ($2,126\u2013$2,486 loss) without violating risk limits.",
+      "Reserve capital for the carry book (e.g., $5,000) to enable vol_carry trades on DIA (rejected 2x due to \"no reserved capital\").",
+      "Expand IV rank data coverage: 112 rejections cited \"no IV rank available,\" including for SPY/IWM/TLT. Prioritize fetching IV rank for liquid ETFs.",
+      "Adjust liquidity filter thresholds: 25+ rejections for SPY/IWM/TLT due to \"no contracts survived.\" Log strike/IV spreads to identify filter tightness.",
+      "Lower IV rank no-trade ceiling from 85% to 90% for symbols hitting 100% (e.g., DIA in vol_carry ideas).",
+      "Shift intraday cycles to pre-11:30 or post-13:30 to avoid lunch window rejections (40+ hits between 12:34\u201313:03).",
+      "Audit \"scheduled_event\" gate: 126 rejections for \"no qualifying catalyst,\" but no macro catalysts were logged in notes. Align event definitions with actual market context."
     ]
   },
-  "generated_at": "2026-09-01T23:02:51.089195+00:00"
+  "generated_at": "2026-09-02T01:30:19.352019+00:00"
 }
