@@ -246,7 +246,11 @@ def collect_session(
         elif action == "close":
             bucket["closed"] += 1
             payload = _payload(row)
-            realised = payload.get("realized_pl") or payload.get("realised_pl")
+            # `or` here would discard a realised P&L of exactly 0.0 and print
+            # "n/a" for a scratch close, which is not the same statement.
+            realised = payload.get("realized_pl")
+            if realised is None:
+                realised = payload.get("realised_pl")
             if realised is not None:
                 bucket["realised_pl"] += float(realised)
             session.closes.append(
@@ -370,9 +374,30 @@ def _describe_event(event: dict[str, Any]) -> str | None:
             f"{event.get('positions_before')} -> {event.get('positions_after')} position(s)"
         )
     if kind == "firewall_lock":
+        # `firewall_lock` covers BOTH acquire and release. Rendering them with
+        # one string printed the release as "intraday book leased $0", which
+        # reads as a second lease that granted nothing rather than the lease
+        # being handed back at the cutoff.
+        if str(event.get("action")) == "release":
+            return f"{event.get('book')} book released its lease"
         return f"{event.get('book')} book leased ${float(event.get('budget') or 0):,.0f}"
     if kind == "macro_view":
-        return f"macro: {event.get('regime')}, vol {event.get('vol_expectation')}"
+        # The regime alone is not the story. `neutral` was journalled today
+        # while the same object told `event_premium` to stand down, which then
+        # vetoed 22 candidates - the note has to carry the per-book verdict or
+        # the report shows a benign line above a book that never traded.
+        guidance = event.get("guidance") or {}
+        stood_down = sorted(
+            k for k, v in guidance.items() if str(v) not in ("trade", "")
+        )
+        tail = (
+            "; " + ", ".join(f"{k}={guidance[k]}" for k in stood_down)
+            if stood_down else ""
+        )
+        return (
+            f"macro: {event.get('regime')}, vol "
+            f"{event.get('vol_expectation')}{tail}"
+        )
     if kind == "discovery":
         snapshot = event.get("snapshot") or {}
         errors = snapshot.get("source_errors") or {}

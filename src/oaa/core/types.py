@@ -528,5 +528,11 @@ class Decision(Model):
     verdict: RiskVerdict | None = None
     fill: Fill | None = None
     rationale: str = ""
+    #: Realised P&L on a CLOSE, in dollars, as marked at the moment the close
+    #: was confirmed. `manage_positions` already holds it on the position
+    #: snapshot; without it on the decision the daily report has no per-book
+    #: P&L at all and prints +0.00 across every strategy on a winning day.
+    #: `telemetry/daily.py` reads exactly this key.
+    realized_pl: float | None = None
     agent_notes: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

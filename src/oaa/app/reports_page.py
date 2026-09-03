@@ -244,7 +244,10 @@ def _headline(session: dict[str, Any]) -> None:
     cols = st.columns(5)
     cols[0].metric(
         "Day P&L", f"{pl:+,.2f}",
-        delta=f"{(session.get('day_pl_pct') or 0.0):+.2f}%",
+        # `day_pl_pct` is a FRACTION (0.01479 = +1.48%). `:+.2f}%` printed
+        # it as "+0.01%" - a 1.48% day shown as a rounding error. `:+.2%`
+        # does the x100 and appends the sign, matching the markdown report.
+        delta=f"{(session.get('day_pl_pct') or 0.0):+.2%}",
         delta_color="normal" if pl else "off",
     )
     cols[1].metric("Fills", len(session.get("fills") or []),

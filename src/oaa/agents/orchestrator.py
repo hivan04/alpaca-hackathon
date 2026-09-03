@@ -802,8 +802,20 @@ class Orchestrator:
             if reason is None:
                 continue
 
+            # Attribute the close to the strategy that OPENED it, off the
+            # ledger, before the executor call - `ledger.forget` runs below and
+            # the attribution is gone after it. Without this every close is
+            # journalled with `strategy: null`, lands in a phantom "unknown"
+            # book in the daily report, and no book can be shown to have made
+            # or lost anything.
+            entry = self.firewall.ledger.entries.get(position.symbol.upper())
+            # `book_of` defaults an unknown symbol to "intraday", so it cannot
+            # be the fallback here - it would label an unattributed leg with a
+            # book it never belonged to. No entry means genuinely unknown.
+            owner = (entry.strategy or entry.book or None) if entry else None
             decision = Decision(
-                cycle=cycle, action=DecisionAction.CLOSE, symbol=symbol, rationale=reason,
+                cycle=cycle, action=DecisionAction.CLOSE, symbol=symbol,
+                strategy=owner, rationale=reason,
             )
             try:
                 decision.fill = self.executor.close(position.symbol, abs(position.qty))
@@ -834,6 +846,11 @@ class Orchestrator:
                 # operator to go and look up the one number they wanted.
                 pnl = getattr(position, "unrealized_pl", None)
                 pct = getattr(position, "unrealized_plpc", None)
+                # ...and onto the decision, not just the tape. The mark at the
+                # moment of a confirmed close IS the realised amount for this
+                # leg; the daily report reads `realized_pl` off the payload.
+                if pnl is not None:
+                    decision.realized_pl = float(pnl)
                 tape().info(
                     "CLOSE %s | %s | %s | %s",
                     position.symbol,
