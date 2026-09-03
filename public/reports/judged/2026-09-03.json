@@ -1,0 +1,601 @@
+{
+  "session": {
+    "date": "2026-09-03",
+    "profile": "judged",
+    "timezone": "America/New_York",
+    "open_equity": 100093.45,
+    "close_equity": 101602.22,
+    "day_pl": 1480.97,
+    "day_pl_pct": 0.01479,
+    "snapshots": 211,
+    "open_positions_at_close": 9,
+    "cycles_run": {
+      "intraday_1000": 1,
+      "agent": 4,
+      "intraday_1015": 2,
+      "intraday_1030": 1,
+      "intraday_1100": 3,
+      "intraday_1115": 1,
+      "lunch_manage_1130": 4,
+      "intraday_1330": 2,
+      "intraday_1345": 3,
+      "intraday_1400": 3,
+      "intraday_1415": 2,
+      "intraday_1430": 1,
+      "carry_manage": 4,
+      "events_arm": 3
+    },
+    "orders_sent": 6,
+    "fills": [
+      {
+        "ts": "10:00:48",
+        "symbol": "SPY260904C00771000",
+        "status": "filled",
+        "filled_qty": 5.0,
+        "filled_price": 1.4,
+        "order_id": "7dfb278a-7766-4447-9c27-fde08ae814a4"
+      },
+      {
+        "ts": "11:30:32",
+        "symbol": "DIA260911C00536000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "b1d7baf0-b33b-422f-95d6-2ce01bdeb311"
+      },
+      {
+        "ts": "11:30:32",
+        "symbol": "DIA260911C00541000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "1d553068-e203-40fd-ad41-1232307ba6a8"
+      },
+      {
+        "ts": "11:30:32",
+        "symbol": "DIA260911P00524000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "e62d8938-b1cf-4f03-98e9-bbbe2d81141f"
+      },
+      {
+        "ts": "11:30:32",
+        "symbol": "SPY260904C00771000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "92917af5-d6b0-4319-b99b-9207b81b630a"
+      },
+      {
+        "ts": "13:30:32",
+        "symbol": "QQQ260904C00719000",
+        "status": "filled",
+        "filled_qty": 4.0,
+        "filled_price": 1.82,
+        "order_id": "cd8d2625-7e8d-4751-b3b6-5a94f8ba44e5"
+      },
+      {
+        "ts": "13:31:03",
+        "symbol": "IWM260903C00295000",
+        "status": "filled",
+        "filled_qty": 18.0,
+        "filled_price": 0.44,
+        "order_id": "94de58bb-6b39-4c25-97cf-2bc7fed505f6"
+      },
+      {
+        "ts": "13:47:55",
+        "symbol": "SPY260903C00773000",
+        "status": "filled",
+        "filled_qty": 13.0,
+        "filled_price": 0.55,
+        "order_id": "55be12a2-5fc8-4b46-bf16-11a942ec04ca"
+      },
+      {
+        "ts": "14:15:48",
+        "symbol": "TLT260904P00082500",
+        "status": "filled",
+        "filled_qty": 17.0,
+        "filled_price": 0.34,
+        "order_id": "8eba311e-b22c-4b97-9dc9-0ae607aac06c"
+      },
+      {
+        "ts": "14:41:06",
+        "symbol": "IWM260903C00295000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "76497ac1-30f8-4d1a-8970-0f72de13f3bb"
+      },
+      {
+        "ts": "14:41:07",
+        "symbol": "QQQ260904C00719000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "8df57da9-8025-47cb-bf69-16c04a403a7a"
+      },
+      {
+        "ts": "14:41:07",
+        "symbol": "SPY260903C00773000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "d6d3b567-42ec-4740-a8d0-9ad5bd766e45"
+      },
+      {
+        "ts": "14:41:07",
+        "symbol": "TLT260904P00082500",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "70124dab-3484-4f86-b368-5119d90506dd"
+      }
+    ],
+    "closes": [
+      {
+        "at": "11:30:32",
+        "symbol": "DIA",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "stop loss 200% hit (-304.3%)"
+      },
+      {
+        "at": "11:30:32",
+        "symbol": "DIA",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "profit target 50% hit (400.0%)"
+      },
+      {
+        "at": "11:30:32",
+        "symbol": "DIA",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "profit target 50% hit (65.5%)"
+      },
+      {
+        "at": "11:30:32",
+        "symbol": "SPY",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "target 10% of premium reached (160%)"
+      },
+      {
+        "at": "14:41:06",
+        "symbol": "IWM",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "stop 15% of premium hit (-59%)"
+      },
+      {
+        "at": "14:41:07",
+        "symbol": "QQQ",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "target 10% of premium reached (38%)"
+      },
+      {
+        "at": "14:41:07",
+        "symbol": "SPY",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "target 10% of premium reached (62%)"
+      },
+      {
+        "at": "14:41:07",
+        "symbol": "TLT",
+        "strategy": "unknown",
+        "realised_pl": null,
+        "reason": "target 10% of premium reached (18%)"
+      }
+    ],
+    "potential": [
+      {
+        "ts": "10:08:53",
+        "symbol": "DIA",
+        "strategy": "vol_carry",
+        "structure": "iron_condor",
+        "quantity": 1,
+        "net_price": -2.065,
+        "max_loss": 643.5,
+        "max_profit": 206.5,
+        "reason": "DIA already has 4 option legs open; rule=concentration",
+        "thesis": "DIA at 533.38: IV rank 41% with a 5.4% IV-RV spread, ADX 9 and trend 0.26",
+        "risk_approved": false
+      },
+      {
+        "ts": "10:15:36",
+        "symbol": "SPY",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 1.545,
+        "max_loss": 154.5,
+        "max_profit": null,
+        "reason": "critic scored 0.42, below the 0.55 bar:",
+        "thesis": "SPY crossed below session VWAP (768.37 vs 768.83), the directional trigger. 3 of 7 confirmations agree",
+        "risk_approved": null
+      },
+      {
+        "ts": "10:25:01",
+        "symbol": "QQQ",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 1.765,
+        "max_loss": 176.5,
+        "max_profit": null,
+        "reason": "The trade is based on a directional trigger (QQQ crossing above session VWAP) and is supported by the surface being in contango, which suggests a potential for price movement",
+        "thesis": "QQQ crossed above session VWAP (712.00 vs 711.82), the directional trigger. 3 of 7 confirmations agree",
+        "risk_approved": true
+      },
+      {
+        "ts": "10:30:36",
+        "symbol": "QQQ",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 1.84,
+        "max_loss": 184.0,
+        "max_profit": null,
+        "reason": "critic scored 0.52, below the 0.55 bar: QQQ crossed above session VWAP (713.06 vs 712.14), the directional trigger. 4 of 7 confirmations agree",
+        "thesis": "QQQ crossed above session VWAP (713.06 vs 712.14), the directional trigger. 4 of 7 confirmations agree",
+        "risk_approved": null
+      },
+      {
+        "ts": "11:00:41",
+        "symbol": "SPY",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 1.125,
+        "max_loss": 112.5,
+        "max_profit": null,
+        "reason": "intraday_momentum opened SPY 60 minutes ago; the cooldown is 60",
+        "thesis": "SPY crossed above session VWAP (769.26 vs 768.73), the directional trigger. 5 of 7 confirmations agree",
+        "risk_approved": false
+      },
+      {
+        "ts": "11:00:58",
+        "symbol": "IWM",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.995,
+        "max_loss": 99.5,
+        "max_profit": null,
+        "reason": "critic scored 0.51, below the 0.55 bar: IWM crossed below session VWAP (294.30 vs 294.69), the directional trigger. 3 of 7 confirmations agree",
+        "thesis": "IWM crossed below session VWAP (294.30 vs 294.69), the directional trigger. 3 of 7 confirmations agree",
+        "risk_approved": null
+      },
+      {
+        "ts": "11:08:23",
+        "symbol": "QQQ",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 2.0145,
+        "max_loss": 201.45,
+        "max_profit": null,
+        "reason": "The trade is based on a directional trigger of QQQ crossing above session VWAP with four out of seven confirmations supporting the move",
+        "thesis": "QQQ crossed above session VWAP (713.60 vs 712.13), the directional trigger. 4 of 7 confirmations agree",
+        "risk_approved": true
+      },
+      {
+        "ts": "11:15:24",
+        "symbol": "IWM",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.89,
+        "max_loss": 89.0,
+        "max_profit": null,
+        "reason": "critic scored 0.50, below the 0.55 bar: The trade is based on IWM crossing below session VWAP with mixed confirmation signals",
+        "thesis": "IWM crossed below session VWAP (294.67 vs 294.69), the directional trigger. 3 of 7 confirmations agree",
+        "risk_approved": null
+      },
+      {
+        "ts": "13:45:36",
+        "symbol": "QQQ",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.575,
+        "max_loss": 57.5,
+        "max_profit": null,
+        "reason": "critic scored 0.53, below the 0.55 bar: QQQ crossed above session VWAP (717.57 vs 714.71), the directional trigger. 3 of 7 confirmations agree",
+        "thesis": "QQQ crossed above session VWAP (717.57 vs 714.71), the directional trigger. 3 of 7 confirmations agree",
+        "risk_approved": null
+      },
+      {
+        "ts": "13:48:29",
+        "symbol": "IWM",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.435,
+        "max_loss": 43.5,
+        "max_profit": null,
+        "reason": "already holding this exact single_long on IWM",
+        "thesis": "IWM crossed above session VWAP (295.30 vs 294.84), the directional trigger. 4 of 7 confirmations agree",
+        "risk_approved": false
+      },
+      {
+        "ts": "13:55:47",
+        "symbol": "IWM",
+        "strategy": "vol_carry",
+        "structure": "iron_condor",
+        "quantity": 1,
+        "net_price": -0.855,
+        "max_loss": 314.5,
+        "max_profit": 85.5,
+        "reason": "IWM already has 4 option legs open; rule=concentration",
+        "thesis": "IWM at 295.28: IV rank 0% with a 3.1% IV-RV spread, ADX 20 and trend 0.09",
+        "risk_approved": false
+      },
+      {
+        "ts": "14:00:36",
+        "symbol": "IWM",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.425,
+        "max_loss": 42.5,
+        "max_profit": null,
+        "reason": "already holding this exact single_long on IWM",
+        "thesis": "IWM crossed above session VWAP (295.18 vs 294.85), the directional trigger. 6 of 7 confirmations agree",
+        "risk_approved": false
+      },
+      {
+        "ts": "14:03:23",
+        "symbol": "SPY",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.405,
+        "max_loss": 40.5,
+        "max_profit": null,
+        "reason": "intraday_momentum opened SPY 15 minutes ago; the cooldown is 60",
+        "thesis": "SPY crossed above session VWAP (773.26 vs 770.61), the directional trigger. 4 of 7 confirmations agree",
+        "risk_approved": false
+      },
+      {
+        "ts": "14:03:49",
+        "symbol": "TLT",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.375,
+        "max_loss": 37.5,
+        "max_profit": null,
+        "reason": "critic scored 0.46, below the 0.55 bar: TLT crossed below session VWAP (82.24 vs 82.29), the directional trigger. 4 of 7 confirmations agree",
+        "thesis": "TLT crossed below session VWAP (82.24 vs 82.29), the directional trigger. 4 of 7 confirmations agree",
+        "risk_approved": null
+      },
+      {
+        "ts": "14:15:39",
+        "symbol": "IWM",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.375,
+        "max_loss": 37.5,
+        "max_profit": null,
+        "reason": "already holding this exact single_long on IWM",
+        "thesis": "IWM crossed above session VWAP (295.17 vs 294.88), the directional trigger. 4 of 7 confirmations agree",
+        "risk_approved": false
+      },
+      {
+        "ts": "14:30:28",
+        "symbol": "TLT",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 0.415,
+        "max_loss": 41.5,
+        "max_profit": null,
+        "reason": "critic scored 0.45, below the 0.55 bar: TLT crossed below session VWAP (82.23 vs 82.29), the directional trigger. 5 of 7 confirmations agree",
+        "thesis": "TLT crossed below session VWAP (82.23 vs 82.29), the directional trigger. 5 of 7 confirmations agree",
+        "risk_approved": null
+      },
+      {
+        "ts": "14:44:49",
+        "symbol": "DIA",
+        "strategy": "vol_carry",
+        "structure": "iron_condor",
+        "quantity": 1,
+        "net_price": -1.63,
+        "max_loss": 687.0,
+        "max_profit": 163.0,
+        "reason": "vol_carry opened DIA 50 minutes ago; the cooldown is 1440",
+        "thesis": "DIA at 536.77: IV rank 5% with a 4.5% IV-RV spread, ADX 10 and trend 0.24",
+        "risk_approved": false
+      },
+      {
+        "ts": "15:51:03",
+        "symbol": "DOCU",
+        "strategy": "earnings_event_directional",
+        "structure": "iron_condor",
+        "quantity": 1,
+        "net_price": -0.755,
+        "max_loss": 224.5,
+        "max_profit": 75.5,
+        "reason": "execution failed",
+        "thesis": "DOCU reports 03 Sep (after the close)",
+        "risk_approved": true
+      },
+      {
+        "ts": "15:51:17",
+        "symbol": "LULU",
+        "strategy": "earnings_event_directional",
+        "structure": null,
+        "quantity": null,
+        "net_price": null,
+        "max_loss": null,
+        "max_profit": null,
+        "reason": "model abstained",
+        "thesis": "model abstained",
+        "risk_approved": null
+      },
+      {
+        "ts": "15:51:31",
+        "symbol": "ZS",
+        "strategy": "earnings_event_directional",
+        "structure": null,
+        "quantity": null,
+        "net_price": null,
+        "max_loss": null,
+        "max_profit": null,
+        "reason": "ZS: implied/realised 1.01 sits between the 0.80 cheap and 1.35 rich thresholds",
+        "thesis": "ZS: implied/realised 1.01 sits between the 0.80 cheap and 1.35 rich thresholds",
+        "risk_approved": null
+      }
+    ],
+    "gate_rejections": 124,
+    "rejections_by_gate": {
+      "spread": 40,
+      "macro": 22,
+      "structure": 15,
+      "premium": 13,
+      "momentum": 12,
+      "time_of_day": 8,
+      "confirmation": 7,
+      "trend": 7
+    },
+    "rejections_by_reason": {
+      "macro lens returned 'stand_down', not 'trade'": 22,
+      "no VWAP cross and price is not on the band": 12,
+      "14:46 is past 14:45": 8,
+      "2/7 confirmations, needs 3": 7,
+      "IV-RV spread 2.1% is below the 3.0% floor": 4,
+      "TLT: 0.45/0.22 deltas resolved to the same strike": 3,
+      "FXI: the condor body is inverted": 3,
+      "EEM: the condor body is inverted": 3,
+      "ADX 26 is above 25": 3,
+      "widest leg quote is 5.5% of mid, ceiling is 4.0%": 3,
+      "IV-RV spread 2.4% is below the 3.0% floor": 3,
+      "widest leg quote is 4.7% of mid, ceiling is 4.0%": 2
+    },
+    "rejections_by_book": {
+      "intraday": 69,
+      "carry": 33,
+      "opportunistic": 22
+    },
+    "symbols_examined": [
+      "DIA",
+      "EEM",
+      "EFA",
+      "FXI",
+      "GLD",
+      "IWM",
+      "QQQ",
+      "SLV",
+      "SPY",
+      "TLT",
+      "XLE",
+      "XLF",
+      "XLU",
+      "XLV"
+    ],
+    "by_strategy": {
+      "earnings_event_directional": {
+        "ideas": 3,
+        "opened": 0,
+        "closed": 0,
+        "declined": 3,
+        "near_misses": 1,
+        "realised_pl": 0.0
+      },
+      "intraday_momentum": {
+        "ideas": 19,
+        "opened": 5,
+        "closed": 0,
+        "declined": 14,
+        "near_misses": 2,
+        "realised_pl": 0.0
+      },
+      "unknown": {
+        "ideas": 8,
+        "opened": 0,
+        "closed": 8,
+        "declined": 0,
+        "near_misses": 0,
+        "realised_pl": 0.0
+      },
+      "vol_carry": {
+        "ideas": 4,
+        "opened": 1,
+        "closed": 0,
+        "declined": 3,
+        "near_misses": 0,
+        "realised_pl": 0.0
+      }
+    },
+    "errors": [
+      "intraday_1045: ('Connection aborted.', OSError(49, \"Can't assign requested address\"))"
+    ],
+    "notes": [
+      "macro: neutral, vol expanding",
+      "intraday book leased $15,013",
+      "intraday book leased $0",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 3 declined (abstention 33%)"
+    ],
+    "reasoning_available": true,
+    "traded": true,
+    "near_misses": [
+      {
+        "ts": "10:25:01",
+        "symbol": "QQQ",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 1.765,
+        "max_loss": 176.5,
+        "max_profit": null,
+        "reason": "The trade is based on a directional trigger (QQQ crossing above session VWAP) and is supported by the surface being in contango, which suggests a potential for price movement",
+        "thesis": "QQQ crossed above session VWAP (712.00 vs 711.82), the directional trigger. 3 of 7 confirmations agree",
+        "risk_approved": true
+      },
+      {
+        "ts": "11:08:23",
+        "symbol": "QQQ",
+        "strategy": "intraday_momentum",
+        "structure": "single_long",
+        "quantity": 1,
+        "net_price": 2.0145,
+        "max_loss": 201.45,
+        "max_profit": null,
+        "reason": "The trade is based on a directional trigger of QQQ crossing above session VWAP with four out of seven confirmations supporting the move",
+        "thesis": "QQQ crossed above session VWAP (713.60 vs 712.13), the directional trigger. 4 of 7 confirmations agree",
+        "risk_approved": true
+      },
+      {
+        "ts": "15:51:03",
+        "symbol": "DOCU",
+        "strategy": "earnings_event_directional",
+        "structure": "iron_condor",
+        "quantity": 1,
+        "net_price": -0.755,
+        "max_loss": 224.5,
+        "max_profit": 75.5,
+        "reason": "execution failed",
+        "thesis": "DOCU reports 03 Sep (after the close)",
+        "risk_approved": true
+      }
+    ]
+  },
+  "critique": {
+    "author": "deterministic (fallback - featherless / Qwen/Qwen3-32B returned prose)",
+    "bullets": [
+      "1 error(s) were journalled this session - first: intraday_1045: ('Connection aborted.', OSError(49, \"Can't assign requested address\")). Fix before reading anything else here.",
+      "`spread` vetoed 40 of 124 candidates (32%) - it is the binding constraint. Either its threshold is mis-set for this regime, or every gate after it ran for nothing and should be re-ordered behind it.",
+      "Most repeated single reason (22x): \"macro lens returned 'stand_down', not 'trade'\". Measure the distribution of that quantity across the universe before moving its threshold.",
+      "3 idea(s) (DOCU, QQQ) passed the risk engine and never reached the broker. Trace where the ticket died - this is the highest-value single check on a session that filled nothing.",
+      "13 fill(s) executed. Compare filled price with the idea's `net_price` to measure slippage against the mid the gate approved.",
+      "Day P&L +1,480.97 (+1.48%) across 211 snapshot(s)."
+    ]
+  },
+  "generated_at": "2026-09-03T20:21:29.881132+00:00"
+}
