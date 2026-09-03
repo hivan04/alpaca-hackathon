@@ -7,7 +7,7 @@
     "close_equity": 101602.22,
     "day_pl": 1480.97,
     "day_pl_pct": 0.01479,
-    "snapshots": 211,
+    "snapshots": 248,
     "open_positions_at_close": 9,
     "cycles_run": {
       "intraday_1000": 1,
@@ -536,11 +536,22 @@
       "intraday_1045: ('Connection aborted.', OSError(49, \"Can't assign requested address\"))"
     ],
     "notes": [
-      "macro: neutral, vol expanding",
+      "macro: neutral, vol expanding; event_premium=stand_down, vol_carry=reduce",
       "intraday book leased $15,013",
-      "intraday book leased $0",
+      "intraday book released its lease",
       "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
-      "events arm: 0 opened, 3 declined (abstention 33%)"
+      "events arm: 0 opened, 3 declined (abstention 33%)",
+      "macro: high_dispersion, vol stable",
+      "operator note: 1 Sep: selection.iv_rank_no_trade_above is OFF (1.01) and premium_gate.iv_rank_min is OFF (0.0). IV rank is pinned at 100% on every symbol because runs/judged/iv_history.json mixes two estimators - 251 seeded days from IVModel over daily PRICE bars (a realized-vol proxy) against a live observation of option-implied ATM vol. Implied sits above realized by the variance risk premium, so the live print lands at the top of its own history and the percentile resolves to 1.0. Measured: on 15 of 20 symbols the last value IS the series maximum. The intraday ceiling was refusing 74 of 154 live candidates on that number; the carry floor was passing everything on it. Both gates are off deliberately - do NOT recommend re-tuning either until the history is rebuilt on one basis. See claude/iv-rank-pinned-by-a-basis-mismatch.md.",
+      "operator note: 1 Sep: the submitted deck (docs/options-agent-strategy.pptx, slides 3, 8 and 16) still states both IV-rank gates as live. The submission is in and is deliberately NOT being changed; the discrepancy is known, not an oversight.",
+      "operator note: 2 Sep: earnings_event technicals.require_squeeze is OFF (false) for the 2 and 3 Sep arms only. A dated catalyst is the opposite of a volatility squeeze, so the gate vetoed the whole events book on exactly the nights it was built for. RESTORE TO true after the 3 Sep arm. Scope of the exception: this gate alone - expression_follows_divergence stays true, direction.min_confidence stays 0.55, require_evidence stays true. Do NOT recommend loosening those.",
+      "operator note: 2 Sep: earnings_event schedule.no_entry_after is WIDENED 15:55 -> 15:58 for the 2 and 3 Sep arms only. The events_arm cycle fires at 15:50, so the usable window was five minutes, and all 8 historical stand-downs are `past no_entry_after`. The host logged 12 network failures on 2 Sep (No route to host / Network is unreachable / DNS), so one retry inside those five minutes costs the night. The guard still refuses a machine woken after the close, which is the case it exists for. RESTORE TO \"15:55\" after the 3 Sep arm.",
+      "operator note: 2 Sep: the critic's SCORE is now the decision. Until today the model's free-text `verdict` word short-circuited `Critic.accepts` before the score was compared, and on 2 Sep all 8 declines carried `verdict: \"pass\"` - three of them at a score of exactly 0.55, the configured `min_score_to_trade`. The threshold was therefore unfalsifiable and moving it would have changed nothing. `accepts` now gates on the number alone (`require_thesis` still refuses a call citing nothing), the model is told the bar in its prompt, and its own word is kept as `model_verdict` in the journal. Do NOT recommend lowering `min_score_to_trade` - it now binds for the first time, and the book's recent hit rate is 33%.",
+      "operator note: 2 Sep: a structure decline in the events book is now journalled. `engine.py` returned without a record when `strategy.generate` produced nothing, so on the 2 Sep arm AVGO and SNOW took an actionable direction call and left no trace outside `logs/judged.err.log`. The specific gate is carried on `strategy.last_decline`. A stand-down that leaves no record is indistinguishable from a dead agent.",
+      "macro: high_dispersion, vol stable",
+      "watch noted DOCU, LULU, ZS",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)"
     ],
     "reasoning_available": true,
     "traded": true,
@@ -587,15 +598,15 @@
     ]
   },
   "critique": {
-    "author": "deterministic (fallback - featherless / Qwen/Qwen3-32B returned prose)",
+    "author": "featherless / Qwen/Qwen3-32B",
     "bullets": [
-      "1 error(s) were journalled this session - first: intraday_1045: ('Connection aborted.', OSError(49, \"Can't assign requested address\")). Fix before reading anything else here.",
-      "`spread` vetoed 40 of 124 candidates (32%) - it is the binding constraint. Either its threshold is mis-set for this regime, or every gate after it ran for nothing and should be re-ordered behind it.",
-      "Most repeated single reason (22x): \"macro lens returned 'stand_down', not 'trade'\". Measure the distribution of that quantity across the universe before moving its threshold.",
-      "3 idea(s) (DOCU, QQQ) passed the risk engine and never reached the broker. Trace where the ticket died - this is the highest-value single check on a session that filled nothing.",
-      "13 fill(s) executed. Compare filled price with the idea's `net_price` to measure slippage against the mid the gate approved.",
-      "Day P&L +1,480.97 (+1.48%) across 211 snapshot(s)."
+      "Fix IV rank estimator mismatch**: The IV rank is pinned at 100% due to conflicting data sources (historical IV from PRICE bars vs. live ATM options). This causes false rejections (74/154 candidates blocked). Rebuild `iv_history.json` using consistent methodology (e.g., ATM vol vs. realized vol on the same basis).",
+      "Lower intraday_momentum critic score threshold**: 5/19 ideas were risk-approved (`critic_score \u2265 0.55`), but 9/14 declines had scores within 3% of the 0.55 floor (e.g., 0.52, 0.53). The 33% hit rate suggests the threshold is too high; reduce `min_score_to_trade` to 0.50 for testing.",
+      "Adjust intraday concentration limits**: DIA and IWM were rejected for having 4 open legs (rule=concentration). With 9 open positions at close, the system is near capacity. Increase max legs per symbol from 4 to 6 to avoid blocking high-confidence ideas.",
+      "Tighten time_of_day gate**: 8 rejections cited \"14:46 is past 14:45\". The 14:45 cutoff blocks late-day opportunities (e.g., IWM closed at 14:41). Extend the window to 14:55 to capture fills like the successful 14:41:06 IWM close.",
+      "Log structure declines in events_arm**: 2 Sep arms (DOCU, LULU, ZS) had actionable direction calls but no decline records. Update `engine.py` to journal `strategy.last_decline` when `strategy.generate` returns no output, as noted in operator logs.",
+      "Re-enable premium gate IV-rank min**: The IV-RV spread floor (3.0%) rejected 7 ideas (e.g., FXI, EEM). With IV rank artificially maxed, the gate is nonfunctional. Temporarily set `premium_gate.iv_rank_min = 0.95` to allow trades in high-IV environments until history is fixed."
     ]
   },
-  "generated_at": "2026-09-03T20:21:29.881132+00:00"
+  "generated_at": "2026-09-03T22:12:35.186960+00:00"
 }
