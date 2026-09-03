@@ -490,7 +490,11 @@ def test_the_critic_can_decline_and_the_decline_is_logged():
     assert result.provenance["critic"]["declined"] > 0
     assert "critic" in result.rejection_funnel()
     declined = [r for r in result.rejections if r.stage == "critic"]
-    assert declined and "critic passed" in declined[0].reason
+    # The wording says what happened: the score is the decision, and it was
+    # below the bar. It used to read "critic passed (score X < Y)" even when
+    # X was not below Y - the model's own verdict word was doing the refusing.
+    assert declined and "below the 1.01 bar" in declined[0].reason
+    assert declined[0].metrics["score"] < 1.01
 
 
 def test_an_unknown_critic_mode_is_refused():

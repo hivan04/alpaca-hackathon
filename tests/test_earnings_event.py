@@ -942,3 +942,68 @@ def test_the_old_always_directional_behaviour_can_be_restored(tmp_path, account)
     idea = strategy.generate(_ctx(strategy, _market(), account, _CALL))[0]
     assert idea.meta["expression"] == "buy_direction"
     assert len(idea.legs) == 2
+
+
+# --------------------------------------------------------------------------- #
+# The decline trail
+#
+# On 2 Sep AVGO and SNOW both took an actionable direction call and then
+# disappeared: `generate` returned nothing, `engine.py` returned without
+# journalling, and every refusal inside the strategy was a `log.info` that
+# `telemetry.console: focused` drops. Two conviction calls on arm night, and
+# the audit trail for them was empty. A stand-down that leaves no record is
+# indistinguishable from a dead agent - see
+# `claude/the-arm-ran-and-the-dead-band-ate-it.md`.
+# --------------------------------------------------------------------------- #
+def test_the_dead_band_says_so_instead_of_returning_an_empty_list(tmp_path, account):
+    """AVGO's case: ratio 0.851, five hundredths from a trade, refused by
+    design - and the reason has to be readable afterwards."""
+    strategy = _strategy(tmp_path, [_ROW_FAIR])
+    assert strategy.generate(_ctx(strategy, _market(), account, _CALL)) == []
+    assert "no measured mispricing" in strategy.last_decline
+    assert "TEST" in strategy.last_decline
+
+
+def test_a_sizing_refusal_names_the_sizing(tmp_path, account):
+    strategy = _strategy(tmp_path, [_ROW])
+    marginal = DirectionCall("TEST", "bullish", 0.56, "thin but positive", ["a note"])
+    assert strategy.generate(_ctx(strategy, _market(), account, marginal)) == []
+    assert "not sized" in strategy.last_decline
+
+
+def test_the_reason_is_cleared_between_names(tmp_path, account):
+    """One symbol's refusal must not be filed against the next one."""
+    strategy = _strategy(tmp_path, [_ROW_CHEAP])
+    strategy.last_decline = "a stale reason from the previous symbol"
+    assert strategy.generate(_ctx(strategy, _market(), account, _CALL))
+    assert strategy.last_decline == ""
+
+
+def test_a_structure_decline_reaches_the_journal_as_a_decision(tmp_path):
+    """The branch that did not journal. `_journal_skip` now takes the reason,
+    because the direction call has nothing to say about a name that died in
+    the structure - reading its empty skip_reason would file a conviction call
+    as an abstention."""
+    from oaa.strategies.events.engine import EventsEngine
+
+    recorded = []
+
+    class _Journal:
+        def record(self, decision):
+            recorded.append(decision)
+
+    engine = object.__new__(EventsEngine)
+    engine.journal = _Journal()
+    engine._journal_skip(
+        "AVGO", _CALL, {"headlines": 48, "messages": 0},
+        reason="AVGO: implied/realised 0.85 sits between the 0.80 cheap and "
+               "1.35 rich thresholds - no measured mispricing to trade",
+    )
+
+    assert len(recorded) == 1
+    assert recorded[0].symbol == "AVGO"
+    assert recorded[0].strategy == "earnings_event_directional"
+    assert "no measured mispricing" in recorded[0].rationale
+    # The call itself is still on the record - it is the thing that makes this
+    # a structure decline rather than an abstention.
+    assert recorded[0].agent_notes["llm_direction"] == "bullish"

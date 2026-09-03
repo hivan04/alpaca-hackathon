@@ -25,6 +25,12 @@ Score 0.0-1.0:
   0.6-0.8  solid expression of a real edge at a fair price
   0.8-1.0  unusually good risk/reward with a clear mechanism
 
+The SCORE is what decides. A deterministic gate trades the idea when your
+score reaches the bar it is given below and stands it down when it does not -
+your `verdict` word is recorded but is not consulted, so do not use it to
+express a reservation the score does not carry. Score the idea, and let the
+number say what you mean.
+
 Return JSON only:
 {"score": 0.0-1.0, "verdict": "trade" | "pass",
  "reasoning": "2-3 sentences a judge could read",
@@ -57,6 +63,9 @@ PORTFOLIO
   Open option legs:    {open_positions}
   Already open in {symbol}: {same_symbol}
   Opened today:        {opened_today}
+
+DECISION BAR
+  This idea is traded if your score is {min_score:.2f} or above.
 
 {memory}"""
 

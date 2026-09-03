@@ -61,6 +61,7 @@ class Critic:
             same_symbol=len(account.by_underlying(idea.symbol)),
             opened_today=opened_today,
             memory=f"RECENT OUTCOMES\n{memory}" if memory else "",
+            min_score=self.settings.min_score_to_trade,
         )
         result = self.llm.json_complete(CRITIC_SYSTEM, prompt, default={})
         if not result:
@@ -68,17 +69,31 @@ class Critic:
             return self._heuristic(idea, market)
 
         result.setdefault("score", idea.confidence)
-        result.setdefault("verdict", "trade" if result["score"] >= self.settings.min_score_to_trade else "pass")
+        # THE SCORE IS THE DECISION; the model's own verdict word is an opinion
+        # about it. Keeping the model's string as the verdict let the two
+        # disagree, and on 2 Sep they disagreed eight times out of eight: every
+        # declined idea carried `verdict: "pass"`, three of them at a score of
+        # exactly 0.55 - the configured bar. `min_score_to_trade` was therefore
+        # decorative; moving it would have changed nothing. The model's word is
+        # preserved as `model_verdict` so the disagreement stays auditable.
+        result["model_verdict"] = result.get("verdict")
+        result["verdict"] = (
+            "trade" if float(result["score"]) >= self.settings.min_score_to_trade else "pass"
+        )
         result["source"] = "llm"
         return result
 
     def accepts(self, verdict: dict[str, Any]) -> bool:
+        """One number decides. See `score` - the model's `verdict` string is
+        advisory and is not consulted here, because a free-text word that can
+        veto a passing score makes the configured threshold unfalsifiable.
+
+        A malformed or missing score is 0.0, so a broken response still stands
+        the trade down; `require_thesis` still refuses a call citing nothing."""
         try:
             score = float(verdict.get("score", 0))
         except (TypeError, ValueError):
             score = 0.0
-        if verdict.get("verdict") == "pass":
-            return False
         if self.settings.require_thesis and not str(verdict.get("reasoning", "")).strip():
             return False
         return score >= self.settings.min_score_to_trade

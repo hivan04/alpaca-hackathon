@@ -206,7 +206,20 @@ class EventsEngine:
             )
             ideas = self.strategy.generate(ctx)
             if not ideas:
-                report.declined[symbol] = "no structure passed the screen or the sizing"
+                # Every OTHER exit from this loop journals; this branch did not,
+                # so on 2 Sep AVGO and SNOW took an actionable direction call and
+                # then vanished - no journal row, no line in the daily report's
+                # potential-executions table, and the only trace in
+                # `logs/judged.err.log`. A stand-down that leaves no record is
+                # indistinguishable from a dead agent, which is the one failure
+                # this book is built to avoid. `strategy.last_decline` carries
+                # the specific gate; the generic string is the fallback.
+                reason = (
+                    getattr(self.strategy, "last_decline", "")
+                    or "no structure passed the screen or the sizing"
+                )
+                report.declined[symbol] = reason
+                self._journal_skip(symbol, call, pack.counts(), reason=reason)
                 continue
 
             idea = ideas[0]
@@ -317,9 +330,20 @@ class EventsEngine:
             error=error,
         ))
 
-    def _journal_skip(self, symbol: str, call: DirectionCall, counts: dict[str, int]) -> None:
+    def _journal_skip(
+        self,
+        symbol: str,
+        call: DirectionCall,
+        counts: dict[str, int],
+        reason: str | None = None,
+    ) -> None:
         """A declined name is evidence too - it is what the judges read to see
-        the filter working rather than the book simply not firing."""
+        the filter working rather than the book simply not firing.
+
+        `reason` overrides the call's own skip reason for a name that got a
+        real direction call and died downstream, in the structure or the
+        sizing - the call has nothing to say about that, and reading its empty
+        skip_reason would file the decline as an abstention."""
         if self.journal is None:
             return
         self.journal.record(Decision(
@@ -327,6 +351,6 @@ class EventsEngine:
             action=DecisionAction.SKIP,
             symbol=symbol,
             strategy="earnings_event_directional",
-            rationale=call.skip_reason,
+            rationale=reason or call.skip_reason,
             agent_notes={**call.as_meta(), **counts},
         ))

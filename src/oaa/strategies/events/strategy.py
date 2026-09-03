@@ -77,6 +77,19 @@ class EarningsEventDirectional(Strategy):
         # `oaa events arm` reads the calendar the params file names.
         self.calendar_path = self.p("calendar_path") or self.events.calendar_path
         self.calendar = load_calendar(self.calendar_path)
+        #: Why the last `generate` returned nothing. Every refusal below is a
+        #: `log.info`, and `telemetry.console: focused` drops INFO - so on
+        #: 2 Sep two names (AVGO, SNOW) got an actionable direction call and
+        #: left NO record of where they died. The engine reads this and
+        #: journals it, so a structure decline is a decision on the record
+        #: rather than a silence.
+        self.last_decline: str = ""
+
+    def _decline(self, message: str) -> None:
+        """Log a refusal and keep it where the engine can journal it."""
+        self.last_decline = message
+        log.info("%s", message)
+        return None
 
     # ------------------------------------------------------------------ #
     def universe(self) -> list[str]:
@@ -116,8 +129,10 @@ class EarningsEventDirectional(Strategy):
 
     # ------------------------------------------------------------------ #
     def generate(self, ctx: StrategyContext) -> list[TradeIdea]:
+        self.last_decline = ""
         market = ctx.market
         if market is None:
+            self._decline("no market context")
             return []
 
         # Interlock 1: a confirmed event, not a proposal.
@@ -160,18 +175,18 @@ class EarningsEventDirectional(Strategy):
             call = self._derived_call(market)
         if call is None or not call.actionable:
             reason = call.skip_reason if call else "no direction call supplied"
-            log.info("%s: no trade - %s", market.symbol, reason)
+            self._decline(f"{market.symbol}: no trade - {reason}")
             return []
 
         try:
             view = ctx.chain_view(chain_filter=self._filter(ctx))
         except (StrategyError, DataError) as exc:
-            log.info("%s: no usable chain - %s", market.symbol, exc)
+            self._decline(f"{market.symbol}: no usable chain - {exc}")
             return []
 
         read = screen_one(event, market, view, self.events.screen)
         if not read.ok:
-            log.info(read.summary())
+            self._decline(read.summary())
             return []
 
         # The tape gets a vote. The LLM says which way; this says whether the
@@ -186,10 +201,12 @@ class EarningsEventDirectional(Strategy):
             params=self.events.technicals,
         )
         if not tape.ok:
-            log.info(tape.summary())
+            self._decline(tape.summary())
             return []
 
         idea = self.build_idea(ctx, read, call, view_expiry=read.expiry, tape=tape)
+        if idea is None and not self.last_decline:
+            self.last_decline = f"{market.symbol}: no structure passed the screen or the sizing"
         return [idea] if idea else []
 
     def _derived_call(self, market: Any) -> DirectionCall | None:
@@ -274,8 +291,7 @@ class EarningsEventDirectional(Strategy):
             extra_multiple=tape.size_multiple if tape else 1.0,
         )
         if not decision.ok:
-            log.info("%s: not sized - %s", read.symbol, decision.reason)
-            return None
+            return self._decline(f"{read.symbol}: not sized - {decision.reason}")
 
         idea.quantity = decision.contracts
         idea.book = self.events.book
@@ -320,22 +336,20 @@ class EarningsEventDirectional(Strategy):
         if not structure.expression_follows_divergence:
             return "buy_direction"
         if read.ratio is None:
-            log.info(
-                "%s: no realised reaction history - the divergence is unmeasured, "
-                "so there is no edge to express", read.symbol,
+            return self._decline(
+                f"{read.symbol}: no realised reaction history - the divergence "
+                "is unmeasured, so there is no edge to express"
             )
-            return None
         if read.ratio >= structure.rich_ratio_threshold:
             return "sell_premium"
         if read.ratio <= structure.cheap_ratio_threshold:
             return "buy_direction"
-        log.info(
-            "%s: implied/realised %.2f sits between the %.2f cheap and %.2f rich "
-            "thresholds - no measured mispricing to trade",
-            read.symbol, read.ratio,
-            structure.cheap_ratio_threshold, structure.rich_ratio_threshold,
+        return self._decline(
+            f"{read.symbol}: implied/realised {read.ratio:.2f} sits between the "
+            f"{structure.cheap_ratio_threshold:.2f} cheap and "
+            f"{structure.rich_ratio_threshold:.2f} rich thresholds - "
+            "no measured mispricing to trade"
         )
-        return None
 
     # ------------------------------------------------------------------ #
     def _debit_vertical(
@@ -367,25 +381,22 @@ class EarningsEventDirectional(Strategy):
                 thesis=self._thesis(read, call),
             )
         except (StrategyError, DataError) as exc:
-            log.info("%s: could not build the spread - %s", read.symbol, exc)
-            return None
+            return self._decline(f"{read.symbol}: could not build the spread - {exc}")
 
         width = float(idea.meta.get("width") or 0)
         if width and idea.net_price / width > structure.max_debit_to_width:
-            log.info(
-                "%s: debit %.2f is %.0f%% of a %.2f-wide spread - above the %.0f%% ceiling",
-                read.symbol, idea.net_price, idea.net_price / width * 100, width,
-                structure.max_debit_to_width * 100,
+            return self._decline(
+                f"{read.symbol}: debit {idea.net_price:.2f} is "
+                f"{idea.net_price / width * 100:.0f}% of a {width:.2f}-wide spread - "
+                f"above the {structure.max_debit_to_width * 100:.0f}% ceiling"
             )
-            return None
         if idea.max_loss and idea.max_profit:
             reward_risk = idea.max_profit / idea.max_loss
             if reward_risk < structure.min_reward_risk:
-                log.info(
-                    "%s: reward:risk %.2f below the %.2f floor",
-                    read.symbol, reward_risk, structure.min_reward_risk,
+                return self._decline(
+                    f"{read.symbol}: reward:risk {reward_risk:.2f} below the "
+                    f"{structure.min_reward_risk:.2f} floor"
                 )
-                return None
         idea.meta["expression"] = "buy_direction"
         return idea
 
@@ -429,18 +440,15 @@ class EarningsEventDirectional(Strategy):
                 thesis=self._thesis_short(read, call),
             )
         except (StrategyError, DataError) as exc:
-            log.info("%s: could not build the condor - %s", read.symbol, exc)
-            return None
+            return self._decline(f"{read.symbol}: could not build the condor - {exc}")
 
         credit_to_width = float(idea.meta.get("credit_to_width") or 0.0)
         if credit_to_width < structure.min_credit_to_width:
-            log.info(
-                "%s: credit is %.0f%% of the wing, below the %.0f%% floor - "
-                "risking the width to collect very little",
-                read.symbol, credit_to_width * 100,
-                structure.min_credit_to_width * 100,
+            return self._decline(
+                f"{read.symbol}: credit is {credit_to_width * 100:.0f}% of the wing, "
+                f"below the {structure.min_credit_to_width * 100:.0f}% floor - "
+                "risking the width to collect very little"
             )
-            return None
 
         # What the listed ladder actually delivered. The shorts were ASKED for
         # at the implied move; a coarse grid can snap one back inside it, and
@@ -450,12 +458,12 @@ class EarningsEventDirectional(Strategy):
             float(idea.meta.get("call_clearance") or 0.0),
         )
         if clearance < structure.min_shorts_clearance:
-            log.info(
-                "%s: the listed strikes put the nearest short at %.2fx the implied "
-                "move, below the %.2fx floor - the grid is too coarse for this trade",
-                read.symbol, clearance, structure.min_shorts_clearance,
+            return self._decline(
+                f"{read.symbol}: the listed strikes put the nearest short at "
+                f"{clearance:.2f}x the implied move, below the "
+                f"{structure.min_shorts_clearance:.2f}x floor - the grid is too "
+                "coarse for this trade"
             )
-            return None
 
         idea.meta["shorts_clearance"] = round(clearance, 4)
         idea.meta["expression"] = "sell_premium"

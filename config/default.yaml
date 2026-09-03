@@ -887,6 +887,25 @@ telemetry:
       those five minutes costs the night. The guard still refuses a machine
       woken after the close, which is the case it exists for.
       RESTORE TO "15:55" after the 3 Sep arm.
+    - >-
+      2 Sep: the critic's SCORE is now the decision. Until today the model's
+      free-text `verdict` word short-circuited `Critic.accepts` before the
+      score was compared, and on 2 Sep all 8 declines carried
+      `verdict: "pass"` - three of them at a score of exactly 0.55, the
+      configured `min_score_to_trade`. The threshold was therefore
+      unfalsifiable and moving it would have changed nothing. `accepts` now
+      gates on the number alone (`require_thesis` still refuses a call citing
+      nothing), the model is told the bar in its prompt, and its own word is
+      kept as `model_verdict` in the journal. Do NOT recommend lowering
+      `min_score_to_trade` - it now binds for the first time, and the book's
+      recent hit rate is 33%.
+    - >-
+      2 Sep: a structure decline in the events book is now journalled.
+      `engine.py` returned without a record when `strategy.generate` produced
+      nothing, so on the 2 Sep arm AVGO and SNOW took an actionable direction
+      call and left no trace outside `logs/judged.err.log`. The specific gate
+      is carried on `strategy.last_decline`. A stand-down that leaves no
+      record is indistinguishable from a dead agent.
 
 app:
   enabled: true

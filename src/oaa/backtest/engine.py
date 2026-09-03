@@ -792,8 +792,8 @@ class BacktestEngine:
                                 strategy=strategy.name, stage="critic",
                                 vetoed_by="critic",
                                 reason=(
-                                    f"critic passed (score {idea.score:.2f} < "
-                                    f"{self.cfg.agents.critic.min_score_to_trade:.2f}): "
+                                    f"critic scored {idea.score:.2f}, below the "
+                                    f"{self.cfg.agents.critic.min_score_to_trade:.2f} bar: "
                                     + str(critique.get("reasoning", ""))[:400]
                                 ),
                                 metrics={

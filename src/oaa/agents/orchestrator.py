@@ -1105,8 +1105,8 @@ class Orchestrator:
             if not self.critic.accepts(critique):
                 decision.action = DecisionAction.SKIP
                 decision.rationale = (
-                    f"critic passed (score {idea.score:.2f} < "
-                    f"{self.cfg.agents.critic.min_score_to_trade:.2f}): " + decision.rationale
+                    f"critic scored {idea.score:.2f}, below the "
+                    f"{self.cfg.agents.critic.min_score_to_trade:.2f} bar: " + decision.rationale
                 )
                 self.journal.record(decision)
                 return
