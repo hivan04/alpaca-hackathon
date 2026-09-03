@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-
 import sqlite3
 
 from oaa.app.status import STALE_AFTER, age_of, collect, human_age
