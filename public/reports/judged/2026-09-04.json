@@ -1,0 +1,175 @@
+{
+  "session": {
+    "date": "2026-09-04",
+    "profile": "judged",
+    "timezone": "America/New_York",
+    "open_equity": 101602.22,
+    "close_equity": 101909.69,
+    "day_pl": 283.68,
+    "day_pl_pct": 0.00279,
+    "snapshots": 191,
+    "open_positions_at_close": 0,
+    "cycles_run": {
+      "intraday_1115": 1,
+      "lunch_manage_1130": 3,
+      "intraday_1330": 1
+    },
+    "orders_sent": 2,
+    "fills": [
+      {
+        "ts": "11:15:37",
+        "symbol": "SPY260904P00770000",
+        "status": "filled",
+        "filled_qty": 9.0,
+        "filled_price": 0.96,
+        "order_id": "daa33117-8fad-4322-95eb-52cb965d7780"
+      },
+      {
+        "ts": "11:30:25",
+        "symbol": "DIA260911C00543000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "adac0a47-f87a-49dd-a107-8348ef54b32d"
+      },
+      {
+        "ts": "11:30:25",
+        "symbol": "IWM260911P00288000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "78fbc1cc-214e-414f-91e5-7882cf6d8ecc"
+      },
+      {
+        "ts": "11:30:26",
+        "symbol": "SPY260904P00770000",
+        "status": "pending_new",
+        "filled_qty": 0.0,
+        "filled_price": null,
+        "order_id": "cf440ee5-e6f3-45fc-a6b6-5b71faf9f60d"
+      },
+      {
+        "ts": "13:30:44",
+        "symbol": "SPY260904P00770000",
+        "status": "filled",
+        "filled_qty": 11.0,
+        "filled_price": 0.85,
+        "order_id": "cc7fdeff-29d8-4b5f-84e0-a33fd15ef860"
+      }
+    ],
+    "closes": [
+      {
+        "at": "11:30:25",
+        "symbol": "DIA",
+        "strategy": "vol_carry",
+        "realised_pl": 84.0,
+        "reason": "profit target 50% hit (70.6%)"
+      },
+      {
+        "at": "11:30:25",
+        "symbol": "IWM",
+        "strategy": "vol_carry",
+        "realised_pl": 142.0,
+        "reason": "profit target 50% hit (60.7%)"
+      },
+      {
+        "at": "11:30:26",
+        "symbol": "SPY",
+        "strategy": "intraday_momentum",
+        "realised_pl": 207.0,
+        "reason": "target 10% of premium reached (24%)"
+      }
+    ],
+    "potential": [],
+    "gate_rejections": 132,
+    "rejections_by_gate": {
+      "time_of_day": 32,
+      "spread": 31,
+      "scheduled_event": 24,
+      "confirmation": 16,
+      "momentum": 15,
+      "structure": 7,
+      "premium": 6,
+      "trend": 1
+    },
+    "rejections_by_reason": {
+      "no qualifying scheduled catalyst inside the horizon": 24,
+      "15:26 is past 14:45": 16,
+      "15:27 is past 14:45": 16,
+      "no VWAP cross and price is not on the band": 15,
+      "2/7 confirmations, needs 3": 14,
+      "vertical legs must have different strikes": 5,
+      "widest leg quote is 4.7% of mid, ceiling is 4.0%": 4,
+      "widest leg quote is 8.0% of mid, ceiling is 4.0%": 3,
+      "widest leg quote is 7.4% of mid, ceiling is 4.0%": 2,
+      "IV-RV spread 1.1% is below the 3.0% floor": 2,
+      "widest leg quote is 4.4% of mid, ceiling is 4.0%": 2,
+      "widest leg quote is 6.1% of mid, ceiling is 4.0%": 2
+    },
+    "rejections_by_book": {
+      "intraday": 94,
+      "opportunistic": 24,
+      "carry": 14
+    },
+    "symbols_examined": [
+      "DIA",
+      "EEM",
+      "EFA",
+      "FXI",
+      "GLD",
+      "IWM",
+      "QQQ",
+      "SLV",
+      "SPY",
+      "TLT",
+      "XLE",
+      "XLF",
+      "XLU",
+      "XLV"
+    ],
+    "by_strategy": {
+      "intraday_momentum": {
+        "ideas": 3,
+        "opened": 2,
+        "closed": 1,
+        "declined": 0,
+        "near_misses": 0,
+        "realised_pl": 207.0
+      },
+      "vol_carry": {
+        "ideas": 2,
+        "opened": 0,
+        "closed": 2,
+        "declined": 0,
+        "near_misses": 0,
+        "realised_pl": 226.0
+      }
+    },
+    "errors": [
+      "intraday_1345: ('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))"
+    ],
+    "notes": [
+      "macro: risk_on, vol expanding; earnings_event_directional=stand_down, event_premium=reduce",
+      "intraday book leased $15,254",
+      "intraday book leased $15,250",
+      "intraday book released its lease",
+      "firewall cutoff (transient): 0 order(s) cancelled, 0 -> 0 position(s)",
+      "events arm: 0 opened, 0 declined (abstention 0%)"
+    ],
+    "reasoning_available": true,
+    "traded": true,
+    "near_misses": []
+  },
+  "critique": {
+    "author": "featherless / Qwen/Qwen3-32B",
+    "bullets": [
+      "Extend the **time_of_day** gate cutoff from 14:45 to 15:15 to reduce rejections like \"15:26 is past 14:45\" (16 rejections).",
+      "Raise the **spread** gate\u2019s mid-price spread ceiling from 4.0% to 5.0% to avoid rejecting ideas like \"widest leg quote is 4.7% of mid\" (5+ rejections).",
+      "Adjust the **scheduled_event** gate to expand catalyst horizons, as 24 rejections cite \"no qualifying scheduled catalyst\"\u2014align with macro \"risk_on\" context.",
+      "Investigate the **intraday_momentum** strategy\u2019s 1/3 open rate: tighten its momentum criteria or adjust target thresholds (only 1 of 3 ideas opened).",
+      "Validate the **SPY260904P00770000** trade\u2019s P&L logic: 9 contracts bought at $0.96 and 11 sold at $0.85 netted $207 profit\u2014confirm calculation.",
+      "Address the **13:30:25-26** order flood (3 pending fills in 1 second): add a latency buffer or reduce concurrent order attempts."
+    ]
+  },
+  "generated_at": "2026-09-04T20:20:35.180928+00:00"
+}
